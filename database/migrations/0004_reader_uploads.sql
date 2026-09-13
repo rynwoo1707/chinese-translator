@@ -1,0 +1,2 @@
+ALTER TABLE chapters ADD COLUMN file_key TEXT;
+ALTER TABLE chapters ADD COLUMN mime TEXT;
