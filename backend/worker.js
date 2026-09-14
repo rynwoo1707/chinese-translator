@@ -8,6 +8,7 @@ import {recognizeDocument,translate,chunks} from './ai.js';
 import {generateCover} from './cover-ai.js';
 import {cleanExtractedPdfText,cleanReaderText} from './pdf-cleaning.js';
 import {authRoute,currentReader} from './reader-auth.js';
+import {nextBookTranslationPart,splitBookTranslation} from './book-sections.js';
 const json=(data,status=200)=>Response.json(data,{status,headers:{'Cache-Control':'no-store','X-Content-Type-Options':'nosniff'}});
 const id=()=>crypto.randomUUID();
 const GENRES=['Tu tiên','Tiên hiệp','Kiếm hiệp','Ngôn tình','Lịch sử · Cổ văn','Hiện đại','Khác'];
@@ -24,6 +25,29 @@ async function saveCover(file,sid,env){
  else throw new Error('Ảnh bìa phải là JPG, PNG hoặc WebP hợp lệ.');
  const key=`covers/${sid}/${id()}`;await env.FILES.put(key,data,{httpMetadata:{contentType:mime}});return key;
 }
+async function prepareJobRows(env,sid,{source,parts,filename,mime,fileKey,firstId,warnings=[],progress=''}){
+ const units=parts?.length?parts.map((part,index)=>({source:part.content,filename:`${String(index+1).padStart(2,'0')} · ${part.title}`,progress:`Chương ${index+1}/${parts.length} · sẵn sàng dịch`})):[{source,filename,progress}];
+ const rows=[],storedKeys=[];
+ for(const [index,unit] of units.entries()){const jid=index===0&&firstId?firstId:id(),stored=await storeJobText(env,jid,unit.source,'');if(stored.sourceKey)storedKeys.push(stored.sourceKey);rows.push({id:jid,statement:env.DB.prepare('INSERT INTO jobs(id,story_id,filename,file_key,mime,source,source_key,warnings,progress) VALUES(?,?,?,?,?,?,?,?,?)').bind(jid,sid,unit.filename,index===0?fileKey:null,mime,stored.source,stored.sourceKey,JSON.stringify(index===0?warnings:[]),unit.progress)});}
+ return {rows,storedKeys};
+}
+export async function acceptReaderRequest(requestId,env){
+ const item=await env.DB.prepare('SELECT * FROM requests WHERE id=?').bind(requestId).first();if(!item)throw new Error('Không tìm thấy yêu cầu của độc giả.');
+ if(item.story_id){const existingJob=await env.DB.prepare('SELECT id FROM jobs WHERE story_id=? ORDER BY created_at DESC LIMIT 1').bind(item.story_id).first();return {story_id:item.story_id,job_id:existingJob?.id||null,alreadyAccepted:true};}
+ const sid=id(),visibility=item.visibility==='public'?'public':'private';let uploadKey=null,source='',parts=null,warnings=[],progress='',prepared={rows:[],storedKeys:[]};
+ try{
+  if(item.file_key){const firstId=id(),file=await env.FILES.get(item.file_key);if(!file)throw new Error('Tệp độc giả đã tải lên không còn tồn tại.');const data=await file.arrayBuffer();if(data.byteLength>25*1024*1024)throw new Error('Tệp yêu cầu vượt quá 25 MB.');const ext=String(item.filename||'').split('.').pop().toLowerCase();
+   if(ext==='txt')source=decodeText(data);
+   else if(ext==='docx')source=(await mammoth.extractRawText({arrayBuffer:data})).value;
+   else if(ext==='epub'){const book=extractEpub(data);source=book.source;parts=book.parts;warnings=book.warnings;progress=`Đã đọc EPUB · ${book.chapterCount} phần theo thứ tự sách`;}
+   else if(ext==='azw3'){const book=await extractAzw3(data);source=book.source;parts=book.parts;warnings=book.warnings;progress=`Đã đọc AZW3/KF8 · ${book.chapterCount} phần theo thứ tự sách`;}
+   if(['txt','docx','epub','azw3'].includes(ext)&&!source.trim())throw new Error('Tệp yêu cầu không có văn bản để dịch.');if(new TextEncoder().encode(source).length>25*1024*1024)throw new Error('Văn bản trích xuất vượt quá 25 MB.');
+   uploadKey=`uploads/${firstId}`;await env.FILES.put(uploadKey,data,{httpMetadata:{contentType:item.mime||'application/octet-stream'}});prepared=await prepareJobRows(env,sid,{source,parts,filename:item.filename,mime:item.mime,fileKey:uploadKey,firstId,warnings,progress});
+  }
+  const statements=[env.DB.prepare('INSERT INTO stories(id,title,genre,source_url,owner_user_id,visibility) VALUES(?,?,?,?,?,?)').bind(sid,item.title,'Khác',item.source_url||null,item.user_id||null,visibility)];
+  statements.push(...prepared.rows.map(row=>row.statement),env.DB.prepare("UPDATE requests SET status='accepted',story_id=? WHERE id=? AND story_id IS NULL").bind(sid,requestId));await env.DB.batch(statements);return {story_id:sid,job_id:prepared.rows[0]?.id||null,job_ids:prepared.rows.map(row=>row.id),has_file:!!item.file_key};
+ }catch(error){if(uploadKey)await env.FILES.delete(uploadKey);for(const key of prepared.storedKeys)await env.FILES.delete(key);throw error;}
+}
 export async function processJob(jobId,env){
  const job=await env.DB.prepare('SELECT * FROM jobs WHERE id=?').bind(jobId).first();
  const checkpointKey=`processing/${jobId}.json`;
@@ -36,9 +60,10 @@ export async function processJob(jobId,env){
   const previouslyComplete=cp.ocrDone&&cp.translatedChars===cp.source.length;
   let stage='translating';
   if(cp.ocrDone&&cp.translatedChars<cp.source.length){
-   const part=chunks(cp.source.slice(cp.translatedChars),3000)[0];
+   const selection=nextBookTranslationPart(cp.source,cp.translatedChars,3000),part=selection.text;
+   if(!part.trim())throw new Error('Phần sách không có nội dung để dịch.');
    const result=await translate(env,part,{...story,previousSource:cp.source.slice(Math.max(0,cp.translatedChars-1500),cp.translatedChars),previousTranslation:cp.translations.slice(-2).join('\n\n').slice(-2000),context:cp.context||story.context,glossary:JSON.stringify(cp.glossary||JSON.parse(story.glossary))});
-   cp.translations.push(result.translation);cp.part++;cp.translatedChars+=part.length;cp.context=result.context;cp.glossary=result.glossary;
+   cp.translations.push((selection.marker?selection.marker+'\n':'')+result.translation);cp.part++;cp.translatedChars+=selection.consumed;cp.context=result.context;cp.glossary=result.glossary;
   }else if(!cp.ocrDone){
    stage='ocr';const file=job.mime==='application/pdf'?null:await env.FILES.get(job.file_key);if(job.mime!=='application/pdf'&&!file)throw new Error('Không tìm thấy tài liệu gốc.');
    let input=file,mime=job.mime,total=1,count=1;
@@ -76,9 +101,9 @@ export default {async fetch(request,env,ctx){
   const admin=await isAdmin(request,env);
   const authResponse=await authRoute(request,env,url,path);if(authResponse)return authResponse;
   if(path==='/api/status')return json(admin?{aiConfigured:!!env.GEMINI_API_KEY,adminConfigured:!!env.ADMIN_TOKEN,authenticated:admin,model:env.GEMINI_MODEL||'gemini-2.5-flash'}:{authenticated:false});
-  if(path==='/api/library'&&method==='GET')return json((await env.DB.prepare("SELECT s.id,s.title,s.author,s.genre,s.cover_key,s.source_url,COUNT(c.id) AS chapters FROM stories s JOIN chapters c ON c.story_id=s.id WHERE s.visibility='public' GROUP BY s.id ORDER BY s.created_at DESC").all()).results);
+  if(path==='/api/library'&&method==='GET')return json((await env.DB.prepare("SELECT s.id,s.title,s.author,s.genre,s.cover_key,s.source_url,COUNT(c.id) AS chapters,(SELECT status FROM jobs j WHERE j.story_id=s.id ORDER BY j.created_at DESC LIMIT 1) AS translation_status FROM stories s LEFT JOIN chapters c ON c.story_id=s.id WHERE s.visibility='public' GROUP BY s.id ORDER BY s.created_at DESC").all()).results);
   if(path==='/api/my/requests'&&method==='GET'){const reader=await currentReader(request,env);if(!reader)return json({error:'Hãy đăng nhập Google để xem yêu cầu của bạn.'},401);return json((await env.DB.prepare('SELECT id,title,source_url,notes,status,visibility,filename,story_id,created_at FROM requests WHERE user_id=? ORDER BY created_at DESC').bind(reader.id).all()).results);}
-  if(path==='/api/my/library'&&method==='GET'){const reader=await currentReader(request,env);if(!reader)return json({error:'Hãy đăng nhập Google để xem thư viện cá nhân.'},401);return json((await env.DB.prepare('SELECT s.id,s.title,s.author,s.genre,s.cover_key,s.source_url,s.visibility,COUNT(c.id) AS chapters FROM stories s LEFT JOIN chapters c ON c.story_id=s.id WHERE s.owner_user_id=? GROUP BY s.id ORDER BY s.created_at DESC').bind(reader.id).all()).results);}
+  if(path==='/api/my/library'&&method==='GET'){const reader=await currentReader(request,env);if(!reader)return json({error:'Hãy đăng nhập để xem thư viện cá nhân.'},401);return json((await env.DB.prepare('SELECT s.id,s.title,s.author,s.genre,s.cover_key,s.source_url,s.visibility,COUNT(c.id) AS chapters,(SELECT status FROM jobs j WHERE j.story_id=s.id ORDER BY j.created_at DESC LIMIT 1) AS translation_status FROM stories s LEFT JOIN chapters c ON c.story_id=s.id WHERE s.owner_user_id=? GROUP BY s.id ORDER BY s.created_at DESC').bind(reader.id).all()).results);}
   if(path.startsWith('/api/read/')&&method==='GET'){const sid=path.split('/').pop();if(!await canReadStory(request,env,sid,admin))return json({error:'Không tìm thấy truyện hoặc bạn không có quyền đọc.'},404);const chapters=(await env.DB.prepare('SELECT id,title,content,mime,text_key,source_url FROM chapters WHERE story_id=? ORDER BY CASE WHEN position IS NULL THEN 1 ELSE 0 END,position,created_at,id').bind(sid).all()).results;for(const chapter of chapters){chapter.content=cleanReaderText(await fullText(env,chapter.text_key,chapter.content));delete chapter.text_key;}return json(chapters);}
   const publicFile=path.match(/^\/api\/chapter-file\/([^/]+)$/);
   if(publicFile&&method==='GET'){
@@ -151,20 +176,19 @@ export default {async fetch(request,env,ctx){
    if(!b.glossary||typeof b.glossary!=='object'||Array.isArray(b.glossary)||Object.entries(b.glossary).some(([k,v])=>k.length>100||typeof v!=='string'||v.length>100))throw new Error('Bảng tên phải là các cặp tên Trung–Việt.');await env.DB.prepare('UPDATE stories SET glossary=? WHERE id=?').bind(JSON.stringify(b.glossary),path.split('/').pop()).run();return json({ok:true});}
   if(path==='/api/jobs'&&method==='GET')return json((await env.DB.prepare('SELECT j.*,s.title AS story_title,s.genre FROM jobs j JOIN stories s ON s.id=j.story_id ORDER BY j.created_at DESC').all()).results);
   if(path==='/api/jobs'&&method==='POST'){
-   const form=await request.formData(),sid=form.get('story_id'),file=form.get('file');let source=String(form.get('text')||''),warnings=[],progress='';
+   const form=await request.formData(),sid=form.get('story_id'),file=form.get('file');let source=String(form.get('text')||''),parts=null,warnings=[],progress='';
    if(!await env.DB.prepare('SELECT id FROM stories WHERE id=?').bind(sid).first())throw new Error('Vui lòng chọn bộ truyện.');
    if(new TextEncoder().encode(source).length>25*1024*1024)throw new Error('Văn bản tối đa 25 MB.');
-   let key=null,mime=null,filename='Văn bản trực tiếp';const jid=id();
+   let key=null,mime=null,filename='Văn bản trực tiếp',firstId=id();
    if(file&&typeof file!=='string'){
     if(file.size>25*1024*1024||file.size===0)throw new Error('Tài liệu phải từ 1 byte đến 25 MB.');filename=file.name;
     const ext=file.name.split('.').pop().toLowerCase();const types={epub:'application/epub+zip',azw3:'application/vnd.amazon.ebook',pdf:'application/pdf',png:'image/png',jpg:'image/jpeg',jpeg:'image/jpeg',webp:'image/webp',docx:'application/vnd.openxmlformats-officedocument.wordprocessingml.document',txt:'text/plain'};
     if(!types[ext])throw new Error('Định dạng chưa hỗ trợ. Với .doc cũ, hãy lưu thành .docx hoặc PDF.');mime=types[ext];const data=await file.arrayBuffer();
-    if(ext==='docx'){const extracted=await mammoth.extractRawText({arrayBuffer:data});source=extracted.value;}if(ext==='txt')source=decodeText(data);if(ext==='epub'){const book=extractEpub(data);source=book.source;warnings=book.warnings;progress=`Đã đọc EPUB · ${book.chapterCount} phần theo thứ tự sách`;}if(ext==='azw3'){const book=await extractAzw3(data);source=book.source;warnings=book.warnings;progress=`Đã đọc AZW3/KF8 · ${book.chapterCount} phần theo thứ tự sách`;}if(ext==='pdf'&&form.get('parsed_text')){source=cleanExtractedPdfText(String(form.get('parsed_text')));progress=`Đã trích xuất và làm sạch lớp chữ · ${Number(form.get('pdf_pages'))||0} trang`;}if(ext==='pdf'&&form.get('pdf_mode')==='scan')progress=`Đã nhận diện PDF scan · đang nhận ${Number(form.get('pdf_pages'))||0} trang ảnh tối ưu`;
+    if(ext==='docx'){const extracted=await mammoth.extractRawText({arrayBuffer:data});source=extracted.value;}if(ext==='txt')source=decodeText(data);if(ext==='epub'){const book=extractEpub(data);source=book.source;parts=book.parts;warnings=book.warnings;progress=`Đã đọc EPUB · ${book.chapterCount} phần theo thứ tự sách`;}if(ext==='azw3'){const book=await extractAzw3(data);source=book.source;parts=book.parts;warnings=book.warnings;progress=`Đã đọc AZW3/KF8 · ${book.chapterCount} phần theo thứ tự sách`;}if(ext==='pdf'&&form.get('parsed_text')){source=cleanExtractedPdfText(String(form.get('parsed_text')));progress=`Đã trích xuất và làm sạch lớp chữ · ${Number(form.get('pdf_pages'))||0} trang`;}if(ext==='pdf'&&form.get('pdf_mode')==='scan')progress=`Đã nhận diện PDF scan · đang nhận ${Number(form.get('pdf_pages'))||0} trang ảnh tối ưu`;
     if(['txt','docx','epub','azw3'].includes(ext)&&!source.trim())throw new Error('Tài liệu không có văn bản để dịch.');if(new TextEncoder().encode(source).length>25*1024*1024)throw new Error('Văn bản trích xuất tối đa 25 MB.');
-    key=`uploads/${jid}`;await env.FILES.put(key,data,{httpMetadata:{contentType:mime}});
+    key=`uploads/${firstId}`;await env.FILES.put(key,data,{httpMetadata:{contentType:mime}});
    }else if(!source.trim())throw new Error('Hãy chọn tài liệu hoặc nhập văn bản.');
-   const stored=await storeJobText(env,jid,source,'');
-   await env.DB.prepare('INSERT INTO jobs(id,story_id,filename,file_key,mime,source,source_key,warnings,progress) VALUES(?,?,?,?,?,?,?,?,?)').bind(jid,sid,filename,key,mime,stored.source,stored.sourceKey,JSON.stringify(warnings),progress).run();return json({id:jid},201);
+   let prepared;try{prepared=await prepareJobRows(env,sid,{source,parts,filename,mime,fileKey:key,firstId,warnings,progress});if(prepared.rows.length===1)await prepared.rows[0].statement.run();else await env.DB.batch(prepared.rows.map(row=>row.statement));}catch(error){if(key)await env.FILES.delete(key);for(const storedKey of prepared?.storedKeys||[])await env.FILES.delete(storedKey);throw error;}return json({id:prepared.rows[0].id,ids:prepared.rows.map(row=>row.id),chapters:prepared.rows.length},201);
   }
   const scanPage=path.match(/^\/api\/jobs\/([^/]+)\/pdf-page$/);
   if(scanPage&&method==='POST'){
@@ -209,17 +233,20 @@ export default {async fetch(request,env,ctx){
    if(action==='publish'&&method==='POST'){
     if(job.status!=='review'||!job.translation.trim())throw new Error('Chỉ bản dịch đã sẵn sàng duyệt mới được xuất bản.');const b=await request.json();
     if(b.confirmed!==true)throw new Error('Cần xác nhận đã đối chiếu nội dung.');
-    const chapterId=id(),textKey=job.translation_key?`reader/${chapterId}.txt`:null,readerText=cleanReaderText(await fullText(env,job.translation_key,job.translation));if(!readerText)throw new Error('Bản dịch không còn nội dung truyện sau khi loại bỏ dữ liệu kỹ thuật của PDF.');
-    if(textKey)await env.FILES.put(textKey,readerText);
-    await env.DB.batch([env.DB.prepare('INSERT INTO chapters(id,story_id,job_id,title,content,text_key) VALUES(?,?,?,?,?,?)').bind(chapterId,job.story_id,jid,required(b.title),textKey?readerText.slice(0,20000):readerText,textKey),env.DB.prepare("UPDATE jobs SET status='published' WHERE id=?").bind(jid).run?env.DB.prepare("UPDATE jobs SET status='published' WHERE id=?").bind(jid):null]);return json({ok:true});
+    const readerText=cleanReaderText(await fullText(env,job.translation_key,job.translation));if(!readerText)throw new Error('Bản dịch không còn nội dung truyện sau khi loại bỏ dữ liệu kỹ thuật của PDF.');
+    const sections=splitBookTranslation(readerText);
+    if(sections.length){const last=await env.DB.prepare('SELECT COALESCE(MAX(position),0) AS position FROM chapters WHERE story_id=?').bind(job.story_id).first(),base=Number(last?.position)||0,statements=[];for(const section of sections){const chapterId=id(),textKey=section.content.length>20000?`reader/${chapterId}.txt`:null;if(textKey)await env.FILES.put(textKey,section.content);statements.push(env.DB.prepare('INSERT INTO chapters(id,story_id,job_id,title,content,text_key,position) VALUES(?,?,?,?,?,?,?)').bind(chapterId,job.story_id,jid,section.title,textKey?section.content.slice(0,20000):section.content,textKey,base+section.number));}statements.push(env.DB.prepare("UPDATE jobs SET status='published',error=NULL,progress='Đã duyệt và đăng chương' WHERE id=?").bind(jid));await env.DB.batch(statements);return json({ok:true,chapters:sections.length});}
+    const chapterId=id(),textKey=job.translation_key?`reader/${chapterId}.txt`:null;if(textKey)await env.FILES.put(textKey,readerText);
+    await env.DB.batch([env.DB.prepare('INSERT INTO chapters(id,story_id,job_id,title,content,text_key) VALUES(?,?,?,?,?,?)').bind(chapterId,job.story_id,jid,required(b.title),textKey?readerText.slice(0,20000):readerText,textKey),env.DB.prepare("UPDATE jobs SET status='published',error=NULL,progress='Đã duyệt và đăng chương' WHERE id=?").bind(jid)]);return json({ok:true,chapters:1});
    }
    if(!action&&method==='PATCH'){
     if(job.lease_until>Date.now()||['splitting','prepared','ocr','translating','assembling','published'].includes(job.status)||(job.status==='failed'&&await env.FILES.get(`processing/${jid}.json`)))throw new Error('Không thể sửa bản dịch ở trạng thái hiện tại.');const b=await request.json();
     if(job.source_key||job.translation_key)throw new Error('Văn bản dài: tải bản đầy đủ để biên tập, rồi dùng Tải bản đọc lên để đăng. Không lưu đè từ bản xem trước.');
-    await env.DB.prepare('UPDATE jobs SET source=?,translation=?,status=? WHERE id=?').bind(required(b.source,500000),typeof b.translation==='string'?required(b.translation,1000000):'',b.translation?.trim()?'review':'uploaded',jid).run();await env.FILES.delete(`processing/${jid}.json`);return json({ok:true});
+    const source=required(b.source,500000),translation=typeof b.translation==='string'?b.translation.trim():'';if(translation.length>1000000)throw new Error('Bản dịch vượt giới hạn cho phép.');await env.DB.prepare('UPDATE jobs SET source=?,translation=?,status=?,error=NULL,progress=? WHERE id=?').bind(source,translation,translation?'review':'uploaded',translation?'Đã lưu bản biên tập':'Sẵn sàng dịch',jid).run();await env.FILES.delete(`processing/${jid}.json`);return json({ok:true});
    }
   }
   if(path==='/api/requests'&&method==='GET')return json((await env.DB.prepare('SELECT r.*,u.email AS reader_email,u.name AS reader_name FROM requests r LEFT JOIN reader_users u ON u.id=r.user_id ORDER BY r.created_at DESC').all()).results);
+  const acceptRequest=path.match(/^\/api\/requests\/([^/]+)\/accept$/);if(acceptRequest&&method==='POST')return json(await acceptReaderRequest(acceptRequest[1],env),201);
   const requestFile=path.match(/^\/api\/requests\/([^/]+)\/file$/);if(requestFile&&method==='GET'){const item=await env.DB.prepare('SELECT file_key,filename,mime FROM requests WHERE id=?').bind(requestFile[1]).first(),file=item?.file_key?await env.FILES.get(item.file_key):null;if(!file)return json({error:'Yêu cầu này không có tệp nguồn.'},404);return new Response(file.body,{headers:{'Content-Type':item.mime||'application/octet-stream','Content-Disposition':"attachment; filename*=UTF-8''"+encodeURIComponent(item.filename||'nguyen-tac'),'X-Content-Type-Options':'nosniff'}});}
   if(/^\/api\/requests\/[^/]+$/.test(path)&&method==='PATCH'){const b=await request.json();if(!['accepted','done','pending'].includes(b.status))throw new Error('Trạng thái không hợp lệ.');const storyId=typeof b.story_id==='string'&&b.story_id?b.story_id:null;await env.DB.prepare('UPDATE requests SET status=?,story_id=COALESCE(?,story_id) WHERE id=?').bind(b.status,storyId,path.split('/').pop()).run();return json({ok:true});}
   return json({error:'Không tìm thấy chức năng.'},404);

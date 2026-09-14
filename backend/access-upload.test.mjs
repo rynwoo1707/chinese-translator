@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import vm from 'node:vm';
 import {readFile} from 'node:fs/promises';
-import worker, {processJob} from './worker.js';
+import worker, {processJob,acceptReaderRequest} from './worker.js';
 import pdfLibrary from './pdf.cjs';
 import {preparePdf,getPdfManifest,assembleBook} from './pdf-pipeline.js';
 import {recognizeDocument,generate} from './ai.js';
@@ -82,6 +82,15 @@ test('Admin can update translation genre; invalid genres do not change the story
  async function update(value){return worker.fetch(new Request('https://test/api/stories/story',{method:'PATCH',headers:{Authorization:'Bearer test-admin','Content-Type':'application/json'},body:JSON.stringify({genre:value})}),env,{});}
  assert.equal((await update('Ngôn tình')).status,200);assert.equal(genre,'Ngôn tình');
  assert.equal((await update('invalid')).status,400);assert.equal(genre,'Ngôn tình');
+});
+
+test('Accepting a reader request creates its story and translation job directly from the uploaded file',async()=>{
+ const stored=new Map([['requests/request-1/original',new Blob(['第一章\n故事开始。'])]]),batches=[];
+ const requestItem={id:'request-1',title:'Độc giả đề xuất',source_url:'',user_id:'reader-1',visibility:'private',file_key:'requests/request-1/original',filename:'source.txt',mime:'text/plain'};
+ const env={DB:{prepare(sql){return {sql,args:[],bind(...args){this.args=args;return this;},async first(){if(sql==='SELECT * FROM requests WHERE id=?')return requestItem;return null;}};},async batch(statements){batches.push(statements);return statements.map(()=>({meta:{changes:1}}));}},FILES:{async get(key){return stored.get(key)||null;},async put(key,value){stored.set(key,new Blob([value]));},async delete(key){stored.delete(key);}}};
+ const result=await acceptReaderRequest('request-1',env);assert.ok(result.story_id);assert.ok(result.job_id);assert.equal(result.has_file,true);assert.ok(stored.has(`uploads/${result.job_id}`));
+ const sql=batches[0].map(statement=>statement.sql);assert.ok(sql.some(value=>value.startsWith('INSERT INTO stories')));assert.ok(sql.some(value=>value.startsWith('INSERT INTO jobs')));assert.ok(sql.some(value=>value.startsWith('UPDATE requests SET status')));
+ const job=batches[0].find(statement=>statement.sql.startsWith('INSERT INTO jobs'));assert.match(job.args[5],/故事开始/);assert.equal(job.args[1],result.story_id);
 });
 
 test('Admin can rename a story and invalid names are rejected',async()=>{

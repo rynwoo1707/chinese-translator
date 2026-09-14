@@ -37,7 +37,7 @@ export function extractEpub(data){
  const manifest=elements(opf,'manifest')[0],spine=elements(opf,'spine')[0];if(!manifest||!spine)throw new Error('EPUB thiếu mục lục nội dung hoặc thứ tự chương.');
  const items=new Map(elements(manifest,'item').map(item=>[item.attribs.id,item.attribs]));
  const encrypted=files['META-INF/encryption.xml']?elements(parseDocument(read('META-INF/encryption.xml'),{xmlMode:true}),'cipherreference').map(e=>resolvePath('',e.attribs.URI||e.attribs.uri)):[];
- const chapters=[],warnings=[];let readable=0;
+ const chapters=[],parts=[],warnings=[];let readable=0;
  for(const ref of elements(spine,'itemref')){
   const item=items.get(ref.attribs.idref);if(!item)throw new Error('EPUB thiếu chương được liệt kê trong thứ tự đọc.');
   const path=resolvePath(opfPath,item.href);if(encrypted.includes(path))throw new Error('Nội dung EPUB được mã hóa/khóa DRM. Hãy dùng bản EPUB không khóa.');
@@ -47,8 +47,8 @@ export function extractEpub(data){
   if(content)readable++;
   else{content='[Phần không có văn bản; cần đối chiếu ảnh trong EPUB gốc.]';warnings.push(`Phần ${chapters.length+1} (${path}) không có văn bản để dịch.`);}
   if(elements(body,'img').length||elements(body,'svg').length)warnings.push(`Phần ${chapters.length+1}: hình ảnh không được OCR; hãy đối chiếu EPUB gốc nếu có chữ trong ảnh.`);
-  chapters.push(`[Phần EPUB ${chapters.length+1}]\n${content}`);
+  const index=chapters.length+1,title=content.split('\n').find(line=>line.trim())?.trim().slice(0,100)||`Phần ${index}`;parts.push({index,title,content});chapters.push(`[Phần EPUB ${index}: ${title}]\n${content}`);
  }
  if(!readable)throw new Error('EPUB không có chương văn bản để dịch. EPUB chỉ gồm ảnh cần chuyển sang PDF để OCR.');
- return {source:chapters.join('\n\n'),warnings,chapterCount:chapters.length,title:text(elements(opf,'title')[0]||{}).trim()};
+ return {source:chapters.join('\n\n'),parts,warnings,chapterCount:chapters.length,title:text(elements(opf,'title')[0]||{}).trim()};
 }
