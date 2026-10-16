@@ -13,13 +13,13 @@ npm.cmd run dev:pdf-layout    # cửa sổ PowerShell 1: dịch vụ PDF giữ b
 npm.cmd run dev               # cửa sổ PowerShell 2: web, mặc định http://127.0.0.1:8787
 ```
 
-Rồi mở `http://127.0.0.1:8787/#account` → "Tạo tài khoản" → mở `http://127.0.0.1:8787/study.html` → dán khóa Gemini API của bạn (tạo miễn phí ở Google AI Studio) → chọn PDF, chọn 1–3 trang → "Bắt đầu dịch →".
+Rồi mở `http://127.0.0.1:8787/#account` → "Tạo tài khoản" → mở `http://127.0.0.1:8787/study.html` → nhập "Tên nội dung" (bắt buộc) → dán khóa Gemini API của bạn (tạo miễn phí ở https://aistudio.google.com/apikey) → chọn PDF, chọn 1–3 trang → "Bắt đầu dịch →". Trên Windows, clone vào thư mục có đường dẫn ngắn (ví dụ `C:\src`), xem mục 3.1.
 
 **5 điều không được quên khi deploy**
 
 1. Production phải chạy **migration D1 lên remote**: `npx wrangler d1 migrations apply DB --remote`. Thiếu bước này thì lịch sử dịch, sách và bìa đều lỗi.
 2. Chạy `npm run build` **trước** `npx wrangler deploy`. Không build thì site thiếu `/vendor/` (OCR, pdf.js, "Tải cả quyển" hỏng).
-3. Dịch vụ PDF trên production phải có **HTTPS công khai** (chứng chỉ hợp lệ, cổng 443) và không nên đi qua proxy cam hay Tunnel của Cloudflare (bị cắt ở 100 s).
+3. Dịch vụ PDF trên production phải có **HTTPS công khai** (chứng chỉ hợp lệ, cổng 443) và không nên đi qua proxy của Cloudflare (bản ghi DNS bật đám mây màu cam, trạng thái "Proxied"; dưới đây gọi tắt là "proxy cam") hay Cloudflare Tunnel (bị cắt ở 100 s).
 4. Không commit, không gửi `.dev.vars`. Repo GitHub đang **công khai**.
 5. `wrangler.jsonc` đang để `"database_id": "local-db"` (chỉ dùng cho local): tạo D1 thật và thay ID trước khi deploy (mục 5.2).
 
@@ -66,13 +66,16 @@ cd chinese-translator
 npm.cmd ci                    # cài đúng phiên bản trong lockfile, không tải trình duyệt
 ```
 
+- Clone vào thư mục có đường dẫn ngắn (ví dụ `C:\src\chinese-translator`), không dùng ổ `subst` hay ổ mạng: Windows giới hạn đường dẫn ở 260 ký tự, còn D1 local tạo tệp sâu thêm tới 136 ký tự trong `.wrangler`. Nếu đường dẫn thư mục dự án dài hơn 123 ký tự, `setup` báo **LỖI** và bỏ qua bước 7.
+- `npm ci` có thể in "N vulnerabilities (… high)": đó là cảnh báo của `npm audit`. Đừng chạy `npm audit fix` hay `npm audit fix --force`, vì lệnh đó sửa `package-lock.json` và đổi các phiên bản mà hướng dẫn này đã kiểm.
+
 **Bước 2: cài đặt một lần**
 
 ```powershell
 npm.cmd run setup
 ```
 
-`setup` chạy lại bao nhiêu lần cũng được: bước nào đã xong thì bỏ qua, và nó không ghi đè giá trị bạn đã đặt trong `.dev.vars`. Nó làm lần lượt:
+`setup` chạy lại bao nhiêu lần cũng được: bước nào đã xong thì bỏ qua. Trong `.dev.vars` nó chỉ thêm giá trị còn thiếu: giữ nguyên khóa Gemini, `ADMIN_TOKEN` (trừ khi còn là giá trị mẫu), `PDF_LAYOUT_SERVICE_TOKEN` (nếu đủ 24 ký tự) và các đường dẫn `PDF_PYTHON`, `CHROMIUM_EXECUTABLE_PATH`, `PDF_FONT_PATH` còn dùng được. Một bước lỗi không chặn các bước sau không phụ thuộc vào nó; cuối cùng `setup` in các dòng **LỖI**/**CẢNH BÁO**, và nếu còn LỖI thì kết thúc với mã 1 (npm in thêm `npm error code 1`). Nó làm lần lượt:
 
 | # | Việc | Kết quả (đều nằm trong `.gitignore`) |
 |---|---|---|
@@ -84,8 +87,8 @@ npm.cmd run setup
 | 6 | tạo `.dev.vars` từ `.dev.vars.example`, sinh `ADMIN_TOKEN` và `PDF_LAYOUT_SERVICE_TOKEN` ngẫu nhiên (không in ra) | `.dev.vars` |
 | 7 | áp 13 migration vào D1 local (= `npm run db:local`) | `.wrangler/state` |
 
-- Cần Internet (`npm ci`, `pip`, mô hình từ `paddle-model-ecology.bj.bcebos.com`). Không có Internet: chép 3 tệp `det.tar`, `rec.tar`, `manifest.json` trong `frontend/vendor/paddle/models/` từ máy cũ sang rồi chạy `setup`.
-- Báo **LỖI** không tìm thấy Python: cài Python 3 từ python.org (tích "Add python.exe to PATH"), mở cửa sổ PowerShell mới rồi chạy lại `npm.cmd run setup`. Các bước khác vẫn chạy; khi thiếu Python chỉ chế độ "Giữ bố cục PDF" không dùng được (PDF khi đó xử lý trong trình duyệt và chỉ ra văn bản/HTML).
+- Cần Internet (`npm ci`, `pip`, mô hình từ `paddle-model-ecology.bj.bcebos.com`). Nếu chỉ riêng bcebos.com bị chặn: chép 3 tệp `det.tar`, `rec.tar`, `manifest.json` từ máy khác vào `frontend/vendor/paddle/models/` rồi chạy lại `setup` (bước 1 sẽ bỏ qua). Thiếu mô hình thì bước 2 và 4 cũng bị bỏ qua.
+- Báo **LỖI** không tìm thấy Python: cài Python 3 từ python.org (tích "Add python.exe to PATH"), mở cửa sổ PowerShell mới rồi chạy lại `npm.cmd run setup`. Khi thiếu Python, `dev:pdf-layout` vẫn khởi động (kèm CẢNH BÁO "không chạy được PyMuPDF…") và `/study.html` vẫn báo "Dịch theo từng block…", nhưng "Bắt đầu dịch →" với PDF giữ bố cục sẽ báo "Không tìm thấy Python để chạy dịch vụ PDF (python)…". Muốn dịch tạm khi chưa có Python: bỏ tích "Giữ bố cục PDF và xuất bản tiếng Việt" (PDF xử lý trong trình duyệt, chỉ ra văn bản/HTML).
 - **CẢNH BÁO** không tìm thấy trình duyệt hoặc phông: dịch vụ PDF chạy được nhưng không xuất được PDF. Cài Microsoft Edge (Windows có sẵn) rồi chạy lại `setup`.
 - `.dev.vars` không được commit. Mã vào trang `/admin` là giá trị dòng `ADMIN_TOKEN`. `GEMINI_API_KEY` để trống được: chỉ xưởng dịch `/admin` cần, người học dán khóa riêng trên trang. Mỗi dòng dạng `KEY=value` (không `export`, không chú thích cuối dòng); khóa lặp lại thì dòng **cuối** thắng. Ý nghĩa từng biến: mục 5.6.
 
@@ -95,7 +98,7 @@ npm.cmd run setup
 npm.cmd run dev:pdf-layout
 ```
 
-In "PDF layout service ready (PyMuPDF + Puppeteer)." rồi nghe ở `127.0.0.1:8091`. Để cửa sổ này chạy. Dịch vụ tự khởi động lại khi tệp .mjs/.js thay đổi; `extract.py` được chạy mới cho mỗi yêu cầu. Nếu `.dev.vars` chưa có token (ví dụ bạn tự tạo tệp), lệnh này tự ghi thêm `PDF_LAYOUT_SERVICE_TOKEN`; khi đó phải khởi động lại `npm run dev`.
+In "PDF layout service ready (PyMuPDF + Puppeteer)." rồi nghe ở cổng trong `PDF_LAYOUT_SERVICE_URL` (mặc định `127.0.0.1:8091`). Dòng `Restarting 'services/pdf-layout/local.mjs'` ngay lúc khởi động là bình thường. Để cửa sổ này chạy. Dịch vụ tự khởi động lại khi tệp .mjs/.js thay đổi; `extract.py` được chạy mới cho mỗi yêu cầu. Nếu `.dev.vars` chưa có token (ví dụ bạn tự tạo tệp), lệnh này tự ghi thêm `PDF_LAYOUT_SERVICE_TOKEN`; khi đó phải khởi động lại `npm run dev`.
 
 **Bước 4 (cửa sổ PowerShell thứ hai): web (Worker)**
 
@@ -117,6 +120,8 @@ Mặc định là `http://127.0.0.1:8787`; nếu cổng bận, Wrangler tự l�
 
 **Bước 6: kiểm tra nhanh, không tốn token**
 
+Nếu đã đổi cổng dịch vụ PDF (`PDF_LAYOUT_SERVICE_URL`) hoặc cổng web, thay `8091`/`8787` dưới đây bằng cổng của bạn.
+
 ```powershell
 curl.exe -s http://127.0.0.1:8091/health     # mong đợi {"error":"Unauthorized"}
 $t = (Select-String -Path .dev.vars -Pattern '^PDF_LAYOUT_SERVICE_TOKEN=.' | Select-Object -Last 1).Line -replace '^PDF_LAYOUT_SERVICE_TOKEN=', ''
@@ -124,7 +129,7 @@ curl.exe -s -H "Authorization: Bearer $t" http://127.0.0.1:8091/health   # {"ok"
 node backend/check-gemini-runtime.mjs        # chỉ gọi /api/status bằng ADMIN_TOKEN; cổng khác thì thêm http://127.0.0.1:8789
 ```
 
-Đăng nhập rồi mở `/study.html`: dòng trạng thái PDF phải là "Dịch theo từng block; giữ hình gốc, công thức và vị trí." Nếu không, xem mục 6.
+Đăng nhập rồi mở `/study.html`: dòng trạng thái PDF phải là "Dịch theo từng block; giữ hình gốc, công thức và vị trí." Nếu không, xem mục 6. Dòng này chỉ xác nhận Worker có cấu hình và đọc được phông qua dịch vụ; Python/PyMuPDF chỉ chạy khi tách trang, Chromium khi xuất PDF.
 
 ### 3.2 macOS / Linux (chưa chạy thử)
 
@@ -170,7 +175,7 @@ Trong `/study.html` (phải đăng nhập):
 
 - Nếu trang báo "Thư viện đã có bản dịch được giáo viên duyệt…" (cùng tệp, so bằng SHA-256), bấm "Mở bản đã duyệt" thay vì dịch.
 - Thử 1–3 trang trước; để mặc định bỏ qua bìa.
-- Dùng "Tiết kiệm token" cho bản nháp. "Đối chiếu kỹ" dùng thinking 'low' (hai chế độ kia dùng 'minimal') nên dự kiến tốn hơn (chưa đo).
+- Dùng "Tiết kiệm token" cho bản nháp. Ở chế độ giữ bố cục PDF, cả ba "Chế độ dịch" đều gọi Gemini với thinking 'minimal'; chế độ chỉ đổi model khi `GEMINI_PDF_BLOCK_MODEL` để trống và có đặt `GEMINI_ECONOMY_MODEL`/`GEMINI_BALANCED_MODEL`/`GEMINI_QUALITY_MODEL` (với `.dev.vars` mặc định, cả ba dùng `GEMINI_MODEL`). "Đối chiếu kỹ" dùng thinking 'low' (hai chế độ kia 'minimal') chỉ khi dịch văn bản (dán chữ, TXT/DOCX/EPUB/AZW3 hoặc PDF xử lý trong trình duyệt), nên dự kiến tốn hơn (chưa đo).
 - **Đừng dịch lại chỉ để sửa dàn trang.** Mở mục trong "Lịch sử dịch của tôi", bấm "Xuất PDF tiếng Việt": app dựng lại từ dữ liệu đã lưu, không tốn token. Bản xuất cũ sẽ hiện "PDF đã xuất dùng cách dàn trang cũ…". Cách này sửa phân số ½, dấu câu lặp, chữ bị cắt hoặc co quá nhỏ; nó **không** sửa lỗi nằm trong bản tách trang cũ (mất chữ hay công thức, đoạn chữ Hán chưa dịch). Lỗi loại đó phải dịch lại (tốn token): chọn cùng PDF và cùng trang, tích "Thay phần …".
 - Có thể dừng rồi tiếp tục mà không mất phần đã dịch. Theo dõi bộ đếm "token Gemini trong tab này".
 - Khi tắt giữ bố cục, OCR chạy trong trình duyệt (PaddleOCR/Tesseract); chỉ trang có độ tin cậy thấp mới gửi lên Gemini.
@@ -181,6 +186,8 @@ Trong `/study.html` (phải đăng nhập):
 **Quản trị (khóa máy chủ):** `/admin` → "Xưởng dịch" (tải lên, chạy) → "Đối chiếu bản dịch" → xuất bản lên thư viện công khai.
 
 ## 5. Deploy lên Cloudflare
+
+> **(chưa kiểm chứng)** Chưa ai deploy thật lần nào (`database_id` vẫn là `local-db`). Lệnh và cờ dưới đây đã được đối chiếu với `npx wrangler <lệnh> --help` (wrangler 4.131.1), và `npx wrangler deploy --dry-run` chạy được; phần chạy trên Cloudflare thật (D1, R2, secret, workers.dev) và dịch vụ PDF sau HTTPS chưa được thử.
 
 ```
 Trình duyệt ──HTTPS──> Worker muc-viet-cms  (D1 muc-viet, R2 muc-viet-files, tệp tĩnh frontend/)
@@ -196,7 +203,7 @@ Trình duyệt không bao giờ gọi thẳng dịch vụ PDF và không thấy 
 - [ ] Clone sạch từ GitHub, không chép thư mục từ máy cũ.
 - [ ] `npm ci`, `npm run prepare:ocr` và `npm test` chạy được trên máy dùng để deploy.
 - [ ] Tài khoản Cloudflare đã **bật R2** trong dashboard (chưa bật thì không tạo được bucket) và có D1; nên dùng Workers Paid.
-- [ ] Đã sinh 2 chuỗi ngẫu nhiên **mới**, khác bản local: `ADMIN_TOKEN` và `PDF_LAYOUT_SERVICE_TOKEN` (tối thiểu 24 ký tự, nên 64 hex).
+- [ ] Đã sinh 2 chuỗi ngẫu nhiên **mới**, khác bản local: `ADMIN_TOKEN` và `PDF_LAYOUT_SERVICE_TOKEN` (tối thiểu 24 ký tự, nên 64 hex). Sinh mỗi chuỗi bằng `node -e "console.log(require('node:crypto').randomBytes(32).toString('hex'))"` (chạy 2 lần), cất trong trình quản lý mật khẩu, không ghi vào repo.
 - [ ] Có máy chủ cho dịch vụ PDF: tên miền công khai, chứng chỉ hợp lệ, cổng 443, timeout proxy ≥ 300 s, giới hạn body ≥ 45 MB, không bật proxy cam hay Tunnel của Cloudflare.
 - [ ] Chủ dự án đã quyết định về giấy phép AGPL của PyMuPDF khi mở dịch vụ ra mạng (mục 8).
 
@@ -224,7 +231,7 @@ Remote chưa có migration nào; repo có 13 tệp `0001`–`0013`. Thiếu `001
 
 ### 5.4 Dịch vụ PDF (deploy trước Worker)
 
-Trên máy chủ có Docker, build từ thư mục gốc của một **clone sạch**. `.dockerignore` loại `.dev.vars`, `.wrangler`, `node_modules`, `tmp`, `.runtime` khỏi build context; image chỉ chép `package*.json` và các tệp của dịch vụ.
+Trên máy chủ có Docker, build từ thư mục gốc của một **clone sạch**. `.dockerignore` loại `.dev.vars`, `.wrangler`, `node_modules`, `tmp`, `.runtime` khỏi build context; image chỉ chép `package.json`, `package-lock.json`, `services/pdf-layout/` và hai tệp `frontend/pdf-box-layout.js`, `frontend/math-text.js` (đừng thêm `frontend/` vào `.dockerignore`).
 
 ```bash
 docker build -f services/pdf-layout/Dockerfile -t hoa-tri-pdf .
@@ -343,11 +350,13 @@ $W = "https://muc-viet-cms.<subdomain>.workers.dev"
 curl.exe -s "$W/api/me"           # {"authenticated":false,"googleConfigured":...}
 curl.exe -s "$W/api/library"      # []  (bảng D1 hoạt động)
 curl.exe -s -H "Authorization: Bearer <ADMIN_TOKEN>" "$W/api/status"   # "authenticated":true, model, pdfModel, aiConfigured
-curl.exe -s -o NUL -w "%{http_code}`n" "$W/vendor/pdf.mjs"                 # 200
-curl.exe -s -o NUL -w "%{http_code}`n" "$W/vendor/pdf-lib.esm.min.js"      # 200
-curl.exe -s -o NUL -w "%{http_code}`n" "$W/vendor/paddle/models/det.tar"   # 200
+curl.exe -s -o NUL -w "%{http_code} %{content_type}`n" "$W/vendor/pdf.mjs"                 # 200 text/javascript; charset=utf-8
+curl.exe -s -o NUL -w "%{http_code} %{content_type}`n" "$W/vendor/pdf-lib.esm.min.js"      # 200 text/javascript; charset=utf-8
+curl.exe -s -o NUL -w "%{http_code} %{content_type}`n" "$W/vendor/paddle/models/det.tar"   # 200 application/x-tar
 npx.cmd wrangler d1 migrations list DB --remote                            # không còn chờ
 ```
+
+Thấy `text/html` nghĩa là tệp không có: site trả `index.html` với mã 200 cho mọi đường dẫn lạ. Khi đó chạy `npm run build` rồi `npx wrangler deploy` lại.
 
 macOS/Linux: dùng `curl` thay `curl.exe`, `/dev/null` thay `NUL`, bỏ `` `n ``.
 
@@ -369,7 +378,7 @@ Thứ tự đề xuất: `git pull` → `npm ci` → `npx wrangler d1 migrations
 | Thông báo | Nguyên nhân | Cách sửa |
 |---|---|---|
 | "Chưa cấu hình dịch vụ PDF giữ bố cục." hoặc dòng trạng thái "Dịch vụ PDF giữ bố cục chưa được cấu hình." | Worker thiếu `PDF_LAYOUT_SERVICE_URL` và/hoặc `PDF_LAYOUT_SERVICE_TOKEN`. Ở local thường do `npm run dev` chạy trước khi `dev:pdf-layout` ghi token | Chạy `npm run dev:pdf-layout`, rồi khởi động lại `npm run dev`. Production: `secret put` cả hai |
-| "Dịch vụ PDF giữ bố cục chưa sẵn sàng." | `/config` hoặc `/font` lỗi: dịch vụ tắt, sai URL/cổng, vi phạm quy tắc HTTPS, thiếu tệp font | Bật dịch vụ, kiểm `/health`; macOS đặt `PDF_FONT_PATH`; Linux cài `fonts-dejavu-core` |
+| "Dịch vụ PDF giữ bố cục chưa sẵn sàng." | Worker gọi `/api/my/study/pdf-layout/config` hoặc `/font` lỗi: mở trang khi chưa đăng nhập, dịch vụ tắt, sai URL/cổng, token ở Worker khác token dịch vụ, vi phạm quy tắc HTTPS, thiếu tệp font | Đăng nhập ở `/#account` rồi tải lại `/study.html`; bật dịch vụ, kiểm `/health` có token; token phải giống hệt (sửa `.dev.vars` thì khởi động lại `npm run dev`); macOS đặt `PDF_FONT_PATH`; Linux cài `fonts-dejavu-core` |
 | "Không kết nối được dịch vụ PDF giữ bố cục. Hãy kiểm tra dịch vụ (npm run dev:pdf-layout) rồi thử lại." | Lỗi mạng/TLS: dịch vụ không chạy, đang tự khởi động lại, sai cổng, chứng chỉ không hợp lệ | Bật dịch vụ; cổng trong `.dev.vars` phải khớp; production dùng chứng chỉ hợp lệ ở cổng 443 |
 | "Dịch vụ PDF cần HTTPS." | URL `http://` với host khác `127.0.0.1`, `localhost`, `pdf-layout` | Dùng `https://` |
 | "Unauthorized" | Token ở Worker và ở dịch vụ khác nhau | Đặt giống hệt; khởi động lại `wrangler dev` hoặc cập nhật secret |
@@ -395,7 +404,7 @@ Thứ tự đề xuất: `git pull` → `npm ci` → `npx wrangler d1 migrations
 | "Trang N: chữ Việt không vừa box (ids)…" | Bản dịch dài hơn ô gốc | Rút gọn đoạn đó bằng "Chỉnh bản dịch từng đoạn", rồi xuất lại (không tốn token) |
 | "Đặt PDF_LAYOUT_SERVICE_TOKEN tối thiểu 24 ký tự." | Token thiếu hoặc ngắn khi chạy `server.mjs`/Docker | Dùng ≥ 24 ký tự |
 | "Đã cấu hình dịch vụ PDF bên ngoài. Chạy server.mjs với cấu hình của môi trường đó." | `PDF_LAYOUT_SERVICE_URL` trong `.dev.vars` không phải localhost | Dev local phải dùng `http://127.0.0.1:<cổng>` |
-| `Error: listen EADDRINUSE … 127.0.0.1:8091` | Cổng đang bị chiếm (một instance khác hoặc container Docker) | `netstat -ano \| findstr :8091` rồi `taskkill /PID <pid> /F`; hoặc đổi cổng trong `PDF_LAYOUT_SERVICE_URL` rồi khởi động lại cả hai |
+| `Error: listen EADDRINUSE … 127.0.0.1:8091` (cửa sổ vẫn mở với "Waiting for file changes before restarting..." nhưng dịch vụ không chạy) | Cổng đang bị chiếm (một instance khác hoặc container Docker) | Bấm Ctrl+C. Chạy `netstat -ano \| findstr :8091`, xem đó là chương trình gì bằng `Get-Process -Id <pid>`; chỉ `taskkill /PID <pid> /F` khi đó là dịch vụ cũ của bạn, nếu không thì đổi cổng trong `PDF_LAYOUT_SERVICE_URL` (ví dụ `http://127.0.0.1:8092`) rồi khởi động lại cả hai |
 | "PDF có mật khẩu; hãy mở khóa trước khi dịch." · "Trang N quá lớn để render an toàn…" · "Tệp không phải PDF." · "Hãy dịch và lưu đủ các block trước khi xuất PDF." | Đúng như nội dung thông báo | Làm theo thông báo |
 
 ### 6.2 Build, Worker, D1
@@ -406,6 +415,9 @@ Thứ tự đề xuất: `git pull` → `npm ci` → `npx wrangler d1 migrations
 | "Model …: HTTP N" / "…checksum khác phiên bản đã kiểm thử…" (lúc `prepare:ocr`) | Không tải được, hoặc tệp tải về khác bản đã kiểm | Kiểm tra mạng; dùng bản sao từ máy cũ |
 | Wrangler chạy ở cổng khác 8787 | Cổng bận, Wrangler tự lấy cổng kế tiếp | Dùng URL in ra; với Google OAuth thì giải phóng cổng hoặc `npm run dev -- --port <cổng>` |
 | "Wrangler requires at least Node.js v22.0.0…" | Node cũ | Cài Node 22.13+ hoặc 24 |
+| "Cần Node.js 22.13 trở lên (đang dùng v…)." (lúc `npm run setup`) | Node 22.0–22.12 hoặc cũ hơn | Cài Node 22.13+ hoặc 24, mở cửa sổ mới, chạy lại |
+| "Chưa cài thư viện. Chạy "npm ci" trước, rồi chạy lại "npm run setup"." | Chưa chạy `npm ci` | `npm ci` rồi `npm run setup` |
+| `[ERROR] internal error; reference = …` (bước 7 của `setup`, `npm run db:local`, hoặc API cần D1 trả 400) · LỖI "Đường dẫn thư mục dự án quá dài cho Windows…" | Đường dẫn thư mục dự án quá dài (Windows giới hạn 260 ký tự), hoặc dự án nằm trên ổ `subst`/ổ mạng | Chuyển hoặc clone lại vào đường dẫn ngắn, ví dụ `C:\src\chinese-translator`, rồi chạy lại `npm run setup` |
 | "running scripts is disabled on this system" | Execution policy của PowerShell | Dùng `npm.cmd` / `npx.cmd` |
 | "Không tải được lịch sử: D1_ERROR: no such table: study_sessions…" / "no such column: library_chapter_id" (hoặc `page_start`, `source_sha256`, `cover_page`) | Thiếu migration | Local: `npm run db:local`. Remote: `npx wrangler d1 migrations apply DB --remote`. Kiểm bằng `migrations list`. Nếu lỗi xuất hiện ngay sau khi đổi `database_id` thì dev local đã sang DB mới: chạy lại `db:local` |
 | Lỗi deploy/migration nhắc tới D1 id "local-db" | Chưa tạo D1 thật | Làm mục 5.2 |
@@ -445,8 +457,8 @@ Thứ tự đề xuất: `git pull` → `npm ci` → `npx wrangler d1 migrations
 npm.cmd test    # = node --test backend/*.test.mjs
 ```
 
-- Trên máy gốc: 289 test, 289 đạt, khoảng 21 s (Node 24.14.0). Không test nào gọi Gemini thật (đều giả lập) hay ghi tệp.
-- Trên clone mới sẽ có ít nhất 1 test bị skip; như vậy là bình thường:
+- Trên máy gốc: 289 test, 289 đạt, khoảng 21–25 s (Node 24.14.0). Không test nào gọi Gemini thật (đều giả lập); test Python tạo `services/pdf-layout/__pycache__/` (đã ignore).
+- Trên clone mới đã chạy `setup` (Windows, có Edge): 289 test, 288 đạt, 1 skip ("Real scans… real samples are not on this machine"); như vậy là bình thường. Các skip khác chỉ xuất hiện khi thiếu điều kiện trong bảng:
 
 | Test | Cần | Nếu thiếu |
 |---|---|---|
@@ -488,7 +500,7 @@ Các script khác (không nằm trong `npm test`):
 - **Model Gemini:** thiếu `GEMINI_MODEL` thì code dùng mặc định họ 2.5, có thể 404 với project mới, và xưởng dịch admin không tự đổi model. `GEMINI_QUALITY_MODEL` dùng cho hai việc (sửa lỗi của admin và chế độ "Đối chiếu kỹ").
 - **Một `ADMIN_TOKEN` chung**: không có tài khoản admin riêng, không có nhật ký. Đổi token thì khóa Gemini đã lưu ở "Cài đặt" không giải mã được nữa.
 - **Tệp lớn:** chế độ giữ bố cục nhận tối đa 25 MB; sách lớn phải tách tệp. Mỗi tệp tách đánh số trang lại từ 1 và người học tự sắp xếp các phần.
-- **Dữ liệu local không lên production** (tài khoản, lịch sử, sách, tệp R2 trong `.wrangler/state`). Không có script chuyển; muốn chuyển phải tự `wrangler d1 export --local` và chép tệp R2 bằng tay.
+- **Dữ liệu local không lên production** (tài khoản, lịch sử, sách, tệp R2 trong `.wrangler/state`). Không có script chuyển; muốn chuyển phải tự xuất D1 (`npx wrangler d1 export DB --local --output local.sql`, rồi nhập bằng `npx wrangler d1 execute DB --remote --file local.sql`; chưa thử, có thể trùng bảng với migration đã áp) và chép tệp R2 bằng tay.
 - Mô hình PaddleOCR tải từ Baidu BOS. Checksum chặn tệp bị thay, nhưng nếu URL mất thì `prepare:ocr` hỏng; nên giữ một bản `det.tar`/`rec.tar` ở ngoài git.
 
 **Chất lượng dịch và dàn trang**
@@ -497,6 +509,7 @@ Các script khác (không nằm trong `npm test`):
 - Nhãn xám mờ "证明：" vẫn giữ tiếng Trung, kể cả với bộ tách mới.
 - Công thức do Gemini gõ lại có thể sai (không nhận √, a²+b² bị đọc thành chữ Hán, E_k=½mv² bị cắt); công thức Cl₂ nằm ngoài mọi block.
 - Phân đoạn: còn 6 block lẫn vai trò và 14 block gộp nhiều đoạn; trang bài tập và thơ in nghiêng kém hơn bản cũ ở cả hai chỉ số này.
+- Trang có giãn dòng rộng (khoảng 1,7 lần cỡ chữ trở lên) có thể bị tách mỗi dòng thành một block: câu bị cắt giữa từ khi dịch và dòng đầu của đoạn bị in chữ rất nhỏ. Gặp khi kiểm thử bàn giao với trang tổng hợp chữ 14 pt, giãn dòng 24 pt; giãn 21 pt trở xuống thì gộp đúng đoạn.
 - Chữ "年" trong "1949年" ở tiêu đề bảng chưa được dịch.
 - Chữ dọc: cả trang thành một khối, thứ tự đọc chỉ đúng 5%; chưa thử với Gemini thật.
 - Chữ trong hình vẽ vẫn là tiếng Trung; nhãn chú thích được dịch làm thay đổi 1,2% điểm ảnh của hình; icon cạnh tiêu đề bị xóa theo; tiêu đề màu in ra gần như đen.
@@ -505,6 +518,7 @@ Các script khác (không nằm trong `npm test`):
 **Hiệu năng và token**
 
 - Tờ OCR ghép mới chỉ được kiểm bằng Gemini thật trên 1 trang. Trong 2 lần gọi giống hệt nhau, có 1 lần Gemini lặp "&&&" tới giới hạn và tốn 6.242 token. Đầu ra OCR nay đã bị giới hạn, nhưng lượt lỗi vẫn tốn token và phải chạy lại. Token của bước dịch chưa được đo lại.
+- Bộ đếm "token Gemini trong tab này" chỉ cộng lượt gọi thành công. Lượt Gemini trả JSON hỏng rồi được thử lại, hay dừng vì MAX_TOKENS/SAFETY, vẫn tốn token nhưng không được cộng; một lượt lặp vô hạn có thể tốn tới khoảng 33.000 token. Số chính xác xem trong Google AI Studio.
 - Tách trang chậm hơn bản cũ 12–54% (trang thử: 14,8 s so với 9,6 s). Chọn 20 trang vẫn chỉ xử lý khoảng 12 trang mỗi lượt (bản cũ 13).
 - Bộ nhớ khi ghép cả quyển dày trên điện thoại chưa đo.
 - Giới hạn của phép đo: trang thử tổng hợp sạch hơn scan thật, trang thật không có đáp án chuẩn, cỡ chữ được đo bằng chữ Việt giả.
@@ -519,7 +533,7 @@ Các script khác (không nằm trong `npm test`):
 - **`PDF_LAYOUT_SERVICE_TOKEN`**: tối thiểu 24 ký tự (nên 64 hex), giống nhau ở Worker và dịch vụ, trình duyệt không thấy. Container chạy bằng root với `--no-sandbox` nên càng phải giữ kín; khi đổi thì đổi cả hai phía cùng lúc.
 - **`.wrangler/`** là D1/R2 local: tài khoản, lịch sử, sách đã tải lên, khóa dashboard đã mã hóa. Thư mục này nằm trong `.gitignore`; không chép cho người khác; xóa là mất dữ liệu local.
 - **Mật khẩu người dùng** được băm bằng PBKDF2-SHA256 100.000 vòng (tài khoản tạo trước 16/10/2026: 210.000 vòng). Cookie phiên `cat_hien_session` là HttpOnly, SameSite=Lax, sống 30 ngày, có cờ Secure khi chạy https.
-- Kết quả quét trước bàn giao: không có giá trị nào của `.dev.vars` trong tệp hay lịch sử git; 11 chỗ khớp mẫu khóa "AIza…" đều nằm trong dữ liệu base64 (dương tính giả).
+- Kết quả quét trước bàn giao (các commit đã push: 70a3135, cb25216 và các commit của nhánh này): không có giá trị nào của `.dev.vars`, không có tệp PDF sách hay dữ liệu dịch; `git grep -E "AIza[0-9A-Za-z_-]{35}" <commit>` không ra kết quả. Chuỗi "AIza" chỉ có trong tài liệu này và khóa giả ở `backend/runtime-config.test.mjs`.
 
 ---
 

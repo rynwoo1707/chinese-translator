@@ -4,7 +4,7 @@ const text=await readFile(new URL('../.dev.vars',import.meta.url),'utf8');
 const setting=name=>[...text.matchAll(new RegExp(`^${name}=([^\\r\\n]*)`,'gm'))].at(-1)?.[1].trim().replace(/^(['"])(.*)\1$/u,'$2')||'';
 const origin=process.argv.find(arg=>/^https?:\/\//u.test(arg))||'http://127.0.0.1:8787';
 const response=await fetch(origin+'/api/status',{headers:{Authorization:`Bearer ${setting('ADMIN_TOKEN')}`},signal:AbortSignal.timeout(10000)}),status=await response.json();
-console.log(JSON.stringify({origin,status:response.status,model:status.model,pdfModel:status.pdfModel,authenticated:status.authenticated,apiKeySource:status.apiKeySource}));
+console.log(JSON.stringify({origin,status:response.status,model:status.model,pdfModel:status.pdfModel,authenticated:status.authenticated,aiConfigured:status.aiConfigured,apiKeySource:status.apiKeySource}));
 if(process.argv.includes('--models')){
  const dashboard=await fetch(origin+'/api/settings/gemini-models',{headers:{Authorization:`Bearer ${setting('ADMIN_TOKEN')}`},signal:AbortSignal.timeout(30000)}),available=await dashboard.json();
  console.log(JSON.stringify({dashboardCatalogStatus:dashboard.status,models:(available.models||[]).map(m=>m.id),error:available.error}));

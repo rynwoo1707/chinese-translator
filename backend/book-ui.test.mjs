@@ -5,7 +5,8 @@ import {createRequire} from 'node:module';
 
 // Layout rules of the cover row (study page) and the whole-book panel (reader), checked in a real browser engine with
 // the real stylesheets and markup: the panel is drawn by app.js's own template. Skipped when Microsoft Edge is missing.
-const read=path=>readFileSync(new URL(`../${path}`,import.meta.url),'utf8'),styles=(...paths)=>paths.map(path=>read(path).replace(/^@import[^;]*;/gmu,'')).join('\n');
+// LF-normalised so the source slicing below also works on a checkout with CRLF line endings.
+const read=path=>readFileSync(new URL(`../${path}`,import.meta.url),'utf8').replace(/\r\n/gu,'\n'),styles=(...paths)=>paths.map(path=>read(path).replace(/^@import[^;]*;/gmu,'')).join('\n');
 let browser=null;try{browser=await createRequire(import.meta.url)('playwright-core').chromium.launch({channel:'msedge',headless:true});}catch{}
 const skip=browser?false:'Microsoft Edge is not available to playwright-core here';
 test.after(()=>browser?.close());
