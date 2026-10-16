@@ -10,6 +10,7 @@ const STDOUT_LIMIT=100*1024*1024,STDERR_TAIL=16*1024,TIMEOUT_MS=240000;
 // MuPDF's embedded Tesseract prints these on every OCR call; they never explain a failure.
 const TESSERACT_NOISE=[/^Warning: Parameter not found:/u,/^Error opening data file .*\.traineddata$/u,/^Please make sure the TESSDATA_PREFIX environment variable is set/u,/^Failed loading language '/u,/^Image too small to scale!!/u,/^Line cannot be recognized!!/u,/^Empty page!!/u,/^Estimating resolution as \d+/u];
 export const withoutTesseractNoise=text=>String(text||'').split(/\r?\n/u).map(line=>line.trimEnd()).filter(line=>line.trim()&&!TESSERACT_NOISE.some(pattern=>pattern.test(line.trim()))).join('\n');
+export const PYTHON_SHORTCUT_MESSAGE='Máy chạy dịch vụ PDF chưa có Python thật: lệnh "python" đang mở lối tắt Microsoft Store. Cài Python 3 từ python.org (tích "Add python.exe to PATH"), mở cửa sổ terminal mới, chạy "npm run setup" rồi khởi động lại "npm run dev:pdf-layout".';
 const WINDOWS_CRASHES={0xC0000005:'lỗi truy cập bộ nhớ',0xC00000FD:'tràn ngăn xếp',0xC0000409:'thư viện dừng khẩn cấp',0xC0000017:'hết bộ nhớ',0xC000013A:'bị ngắt'};
 
 // One short sentence for the student, whatever way the Python process ended.
@@ -17,6 +18,8 @@ export function pythonFailureMessage({code=null,signal=null,stdout='',stderr='',
  if(timedOut)return 'Tách PDF vượt thời gian cho phép. Hãy chọn ít trang hơn cho mỗi lượt.';
  if(killedForSize)return 'Kết quả tách PDF vượt giới hạn dung lượng của dịch vụ. Hãy chọn ít trang hơn cho mỗi lượt.';
  try{const parsed=JSON.parse(String(stdout).trim());if(parsed&&typeof parsed.error==='string'&&parsed.error.trim())return parsed.error.trim().slice(0,500);}catch{}
+ // 9009: Windows ran the Microsoft Store "python" shortcut (no real Python); its localized text is not UTF-8.
+ if(code===9009)return PYTHON_SHORTCUT_MESSAGE;
  const crash=typeof code==='number'?WINDOWS_CRASHES[code>>>0]:null;
  if(crash||signal)return `Dịch vụ PDF dừng đột ngột khi xử lý các trang đã chọn (${crash?`mã 0x${(code>>>0).toString(16).toUpperCase()}: ${crash}`:`tín hiệu ${signal}${signal==='SIGKILL'?', có thể do hết bộ nhớ':''}`}). Hãy thử lại với ít trang hơn; nếu vẫn lỗi, hãy kiểm tra tệp PDF.`;
  const last=withoutTesseractNoise(stderr).split('\n').filter(Boolean).at(-1);

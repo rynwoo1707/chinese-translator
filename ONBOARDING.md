@@ -81,7 +81,7 @@ npm.cmd run setup
 |---|---|---|
 | 1 | tải mô hình PaddleOCR, khoảng 21 MB, có kiểm checksum (= `npm run prepare:ocr`) | `frontend/vendor/paddle/models/` |
 | 2 | chép pdf.js, pdf-lib, tesseract, onnx, tessdata `.gz` (= `npm run prepare:vendor`) | `frontend/vendor/` |
-| 3 | tìm Python 3.10+ (`python`, `python3`, `py -3`; bỏ qua bí danh Microsoft Store) và cài PyMuPDF 1.26.7 | `.runtime/pdf-python` |
+| 3 | tìm Python 3.10+ (`python`, `python3`, `py -3`; bỏ qua lối tắt Microsoft Store), cài PyMuPDF 1.26.7 và ghi đường dẫn đầy đủ của Python đó vào `PDF_PYTHON` | `.runtime/pdf-python`, `.dev.vars` |
 | 4 | dữ liệu OCR `chi_sim` + `eng` cho dịch vụ PDF (= `npm run prepare:pdf-ocr`) | `.runtime/tessdata` |
 | 5 | tìm Edge/Chrome/Chromium và phông Times New Roman/DejaVu Serif để xuất PDF | ghi đường dẫn vào `.dev.vars` nếu máy cần |
 | 6 | tạo `.dev.vars` từ `.dev.vars.example`, sinh `ADMIN_TOKEN` và `PDF_LAYOUT_SERVICE_TOKEN` ngẫu nhiên (không in ra) | `.dev.vars` |
@@ -134,7 +134,7 @@ node backend/check-gemini-runtime.mjs        # chỉ gọi /api/status bằng AD
 ### 3.2 macOS / Linux (chưa chạy thử)
 
 - Các bước giống Windows, dùng `npm`/`npx` (bỏ `.cmd`). URL thường là `http://localhost:8787`.
-- `npm run setup` tìm `python3` khi không có `python`, tìm Chrome/Edge/Chromium (kể cả trong `/Applications`) và phông (Times New Roman trên macOS; DejaVu Serif hoặc Liberation Serif trên Linux), rồi ghi `PDF_PYTHON`, `CHROMIUM_EXECUTABLE_PATH`, `PDF_FONT_PATH` vào `.dev.vars` khi máy cần. `npm run dev:pdf-layout` đọc ba biến này từ `.dev.vars`; biến cùng tên đặt trong shell được ưu tiên.
+- `npm run setup` tìm `python3` khi không có `python`, tìm Chrome/Edge/Chromium (kể cả trong `/Applications`) và phông (Times New Roman trên macOS; DejaVu Serif hoặc Liberation Serif trên Linux), rồi ghi đường dẫn Python vào `PDF_PYTHON`, và `CHROMIUM_EXECUTABLE_PATH`, `PDF_FONT_PATH` khi máy cần, vào `.dev.vars`. `npm run dev:pdf-layout` đọc ba biến này từ `.dev.vars`; biến cùng tên đặt trong shell được ưu tiên.
 - Linux: cài trước `python3-pip` (nếu `setup` báo thiếu pip), `chromium` và `fonts-dejavu-core`. Cài PyMuPDF kiểu `--target` như `setup` làm không bị chặn bởi PEP 668.
 - Kiểm tra token: `t=$(grep '^PDF_LAYOUT_SERVICE_TOKEN=.' .dev.vars | tail -n 1 | cut -d= -f2- | tr -d '\r'); curl -s -H "Authorization: Bearer $t" http://127.0.0.1:8091/health`
 - Thay cho `dev:pdf-layout`, có thể chạy dịch vụ bằng Docker (image chưa build thử):
@@ -331,7 +331,7 @@ Biến của dịch vụ PDF (đặt trong shell, container hoặc nền tảng)
 | `PDF_LAYOUT_SERVICE_TOKEN` | (bắt buộc) | dưới 24 ký tự thì dịch vụ không khởi động |
 | `PORT` | `8091` | |
 | `PDF_LAYOUT_HOST` | `127.0.0.1` | Docker: `0.0.0.0` |
-| `PDF_PYTHON` | `python` | Docker: `/opt/pdf-venv/bin/python`; macOS/Linux: `python3` (`npm run setup` tự ghi vào `.dev.vars`) |
+| `PDF_PYTHON` | `python` | Docker: `/opt/pdf-venv/bin/python`; `npm run setup` ghi đường dẫn đầy đủ của Python đã cài PyMuPDF vào `.dev.vars` |
 | `TESSDATA_PREFIX` | `.runtime/tessdata` nếu có | Docker: `/opt/tessdata` |
 | `CHROMIUM_EXECUTABLE_PATH` | tự dò Edge, `/usr/bin/chromium`, `/usr/bin/chromium-browser` | Docker: `/usr/bin/chromium`; macOS bắt buộc |
 | `PDF_FONT_PATH` | Windows: `times.ttf`; nơi khác: DejaVu Serif | macOS bắt buộc |
@@ -396,7 +396,7 @@ Thứ tự đề xuất: `git pull` → `npm ci` → `npx wrangler d1 migrations
 | "Dịch vụ PDF dừng đột ngột… (mã 0xC0000005…/tín hiệu SIGKILL, có thể do hết bộ nhớ)…" / "Không đủ bộ nhớ để xử lý các trang đã chọn…" | Hết RAM hoặc crash trong thư viện native | Ít trang hơn; tăng RAM |
 | "Không tìm thấy Python để chạy dịch vụ PDF (python). Hãy cài Python hoặc đặt PDF_PYTHON." | Không có lệnh `python` (hay gặp trên macOS/Linux) | Cài Python rồi chạy `npm run setup` (tự ghi `PDF_PYTHON` vào `.dev.vars`), rồi khởi động lại `dev:pdf-layout` |
 | "Dịch vụ PDF gặp lỗi: ModuleNotFoundError: No module named 'pymupdf'" | Thiếu `.runtime/pdf-python`, hoặc đã cài bằng một Python khác kiến trúc | `npm run setup`, rồi khởi động lại `dev:pdf-layout` |
-| "Dịch vụ PDF gặp lỗi: Python was not found…" (chưa gặp thật) | Bí danh Microsoft Store của Windows | Tắt alias trong App execution aliases, hoặc đặt `PDF_PYTHON` = đường dẫn python.exe |
+| "Máy chạy dịch vụ PDF chưa có Python thật: lệnh "python" đang mở lối tắt Microsoft Store…" (bản cũ hiện chữ lỗi như "Dịch vụ PDF gặp lỗi: Python t�m th…" hoặc "Python was not found…") | Máy chưa cài Python thật, hoặc cửa sổ chạy dịch vụ mở từ trước khi cài Python, nên lệnh `python` rơi vào lối tắt Microsoft Store (mã thoát 9009) | Cài Python 3 từ python.org, tích "Add python.exe to PATH". Đóng hết cửa sổ terminal cũ, mở cửa sổ mới, chạy `npm.cmd run setup` (bước 3 phải in "PyMuPDF 1.26.7 OK"; `setup` ghi đường dẫn Python vào `PDF_PYTHON` trong `.dev.vars`), rồi khởi động lại `npm.cmd run dev:pdf-layout` |
 | "Không chạy được PyMuPDF (mã thoát N)." / "PyMuPDF trả dữ liệu không hợp lệ." | Lỗi bên trong `extract.py` | Đọc các dòng `[pdf-layout] …` trong cửa sổ dịch vụ |
 | "Trang N là scan nhưng không chạy được OCR Tesseract (…)…" | Thiếu tessdata, hoặc `TESSDATA_PREFIX` trỏ sai | `npm run setup` (hoặc `npm run prepare:pdf-ocr`) |
 | `ENOENT … frontend/vendor/tessdata/chi_sim.traineddata.gz` | Chưa chép thư viện vào `frontend/vendor/` | `npm run setup` |

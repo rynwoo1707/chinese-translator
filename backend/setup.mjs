@@ -80,7 +80,9 @@ function choose(key,auto,other){
 const machine={};
 // Write a value when the service could not find it alone, or when it replaces a stale line in .dev.vars.
 const remember=(key,choice)=>{if(choice&&choice.from!=='file'&&(choice.from!=='auto'||(saved&&valueIn(saved,key))))machine[key]=choice.value;};
-if(python)remember('PDF_PYTHON',{from:python.from,value:python.executable});
+// Always pin the interpreter that has PyMuPDF: the service may run in another terminal whose PATH resolves "python" to the
+// Microsoft Store shortcut (for example a window opened before Python was installed).
+if(python&&python.from!=='file')machine.PDF_PYTHON=python.executable;
 const browser=choose('CHROMIUM_EXECUTABLE_PATH',AUTO_BROWSERS,OTHER_BROWSERS);
 if(!browser)warnings.push('Không tìm thấy Edge, Chrome hoặc Chromium: dịch vụ PDF sẽ không xuất được PDF. Cài một trình duyệt rồi chạy lại "npm run setup", hoặc ghi CHROMIUM_EXECUTABLE_PATH=<đường dẫn> vào .dev.vars.');
 else{console.log(`Trình duyệt: ${browser.value}`);remember('CHROMIUM_EXECUTABLE_PATH',browser);}

@@ -50,6 +50,9 @@ test('abnormal exits become one short Vietnamese sentence without OCR noise',()=
  assert.match(pythonFailureMessage({code:3221225477}),/0xC0000005/u);
  assert.match(pythonFailureMessage({code:null,signal:'SIGKILL'}),/hết bộ nhớ/u);
  assert.match(pythonFailureMessage({code:1,stderr:NOISE+'Traceback (most recent call last):\nMemoryError'}),/MemoryError/u);
+ // The Microsoft Store "python" shortcut exits 9009 with text in the console code page (garbled as UTF-8 on Vietnamese Windows).
+ const shortcut=pythonFailureMessage({code:9009,stderr:Buffer.from([0x50,0x79,0x74,0x68,0x6f,0x6e,0x20,0x74,0xec,0x6d,0x20,0x74,0x68]).toString('utf8')});
+ assert.match(shortcut,/Microsoft Store/u);assert.match(shortcut,/npm run setup/u);assert.doesNotMatch(shortcut,/�/u);
  assert.equal(withoutTesseractNoise(NOISE),'');
 });
 
