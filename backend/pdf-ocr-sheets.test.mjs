@@ -91,6 +91,16 @@ test('Sheet OCR maps answers to blocks, drops a copied tab label, restores @N la
  }
 });
 
+test('Sheet answers that name strips by their tab labels map to those blocks; mostly empty answers are rejected',async t=>{
+ const document=sheetDocument(),blocks=document.pages[0].blocks,sheets=document.pages[0].ocrSheets;
+ mockGeneration(t,{blocks:[{id:'#3',text:'因为 @1 所以'},{id:'#1',text:REAL[0][2]},{id:'#2',text:REAL[2][2]}],warnings:[]});
+ assert.deepEqual((await recognizePdfBlocks(aiEnv,blocks,sheets)).blocks,[{id:'p7-b1',text:REAL[0][2]},{id:'p7-b5',text:REAL[2][2]},{id:'p7-b6',text:'因为 @@PDF_INLINE_1@@ 所以'}]);
+ t.mock.restoreAll();mockGeneration(t,{blocks:[{id:'p7-b1',text:''},{id:'p7-b5',text:' '},{id:'p7-b6',text:'因为 @1 所以'}],warnings:[]});
+ await assert.rejects(()=>recognizePdfBlocks(aiEnv,blocks,sheets),/không đọc được chữ ở 2\/3 đoạn/u);
+ t.mock.restoreAll();mockGeneration(t,{blocks:[{id:'p7-b1',text:''},{id:'p7-b5',text:REAL[2][2]},{id:'p7-b6',text:'因为 @1 所以'}],warnings:[]});
+ const one=await recognizePdfBlocks(aiEnv,blocks,sheets);assert.equal(one.blocks[0].text,REAL[0][1]);assert.match(one.warnings[0],/p7-b1/u);
+});
+
 test('An answer whose texts were swapped between strips is rejected and not returned',async t=>{
  const document=sheetDocument(),blocks=document.pages[0].blocks,sheets=document.pages[0].ocrSheets;
  mockGeneration(t,{blocks:[{id:'p7-b1',text:REAL[2][2]},{id:'p7-b5',text:REAL[0][2]},{id:'p7-b6',text:'因为 @@PDF_INLINE_1@@ 所以'}],warnings:[]});

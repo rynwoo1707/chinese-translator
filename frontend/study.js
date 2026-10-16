@@ -573,7 +573,7 @@ async function adoptPdfLayout(result){
 async function correctPdfOcr(model){
  // A manifest with OCR sheets is read a whole sheet (several blocks, one image) at a time.
  const pages=pdfLayoutDocument.pages.filter(p=>p.ocr),blocks=pages.flatMap(p=>p.blocks),pending=blocks.filter(b=>!b.ocrCorrected);
- let done=blocks.length-pending.length;for(const ids of ocrImageBatches(pending,undefined,pages.flatMap(p=>p.ocrSheets||[]))){status(`Đang đọc lại chữ trong ảnh đoạn ${Math.min(done+1,blocks.length)}–${Math.min(done+ids.length,blocks.length)}/${blocks.length}…`);const output=await api('pdf-layout/ocr-blocks',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({assetId:translationState.pdfLayout.assetId,blockIds:ids,apiKey:key(),model})});pdfLayoutDocument=output.document;model=output.model||model;addUsage(output.usage);done+=ids.length;}
+ let done=blocks.length-pending.length;for(const ids of ocrImageBatches(pending,undefined,pages.flatMap(p=>p.ocrSheets||[]))){status(`Đang đọc lại chữ trong ảnh đoạn ${Math.min(done+1,blocks.length)}–${Math.min(done+ids.length,blocks.length)}/${blocks.length}…`);const output=await api('pdf-layout/ocr-blocks',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({assetId:translationState.pdfLayout.assetId,blockIds:ids,apiKey:key(),model})});pdfLayoutDocument=output.document;model=output.model||model;addUsage(output.usage);if(output.warnings?.length)$('#warnings').textContent+=output.warnings.join('\n')+'\n';done+=ids.length;}
  // History requires parts to match the manifest, which now holds the corrected sources.
  syncLayoutParts();delete translationState.pdfLayout.ocrPending;syncPdfText();await dualViewer.setDocument(pdfLayoutDocument,[]);
 }

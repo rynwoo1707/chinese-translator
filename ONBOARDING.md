@@ -434,6 +434,7 @@ Thứ tự đề xuất: `git pull` → `npm ci` → `npx wrangler d1 migrations
 | "Gemini từ chối yêu cầu (400/401/403)…" | Khóa sai hoặc bị giới hạn, API chưa bật. Chưa kiểm chứng: lỗi 400 chỉ gặp trên production có thể là "User location is not supported" do vị trí data-center của Worker | Kiểm tra khóa trong AI Studio |
 | "Model Gemini “X” không khả dụng với khóa này…" | Model không mở cho project của khóa (họ 2.5 có thể 404) | `GEMINI_MODEL=gemini-3.6-flash`, để trống `GEMINI_PDF_BLOCK_MODEL`, khởi động lại; người học dùng "Kiểm tra model của khóa" |
 | "Gemini đã hết hạn mức yêu cầu trong ngày…" | Hết quota trong ngày | Bật billing hoặc chờ |
+| "Kết quả đọc ảnh có mã đoạn lạ …" · "Kết quả đọc ảnh trả trùng đoạn …" · "Gemini không đọc được chữ ở N/M đoạn…" (bản trước 16/10/2026 chỉ báo "Kết quả đọc ảnh sai ID hoặc nội dung.") | Câu trả lời đọc ảnh của Gemini lệch với các đoạn đã gửi; lượt đó không được lưu (vẫn tốn token của lượt) | Bấm "Bắt đầu dịch →" lại: app chỉ đọc lại các đoạn chưa đọc xong. Nếu lặp lại ở cùng trang, ghi lại đúng câu báo (có mã đoạn) và trang đó để báo lỗi |
 | "Hãy đăng nhập để dùng không gian dịch học tập." / "Phiên đăng nhập đã hết hạn…" | Chưa đăng nhập hoặc hết phiên | Đăng nhập ở `/#account` |
 | "Nguồn yêu cầu không hợp lệ." | Header Origin khác URL của Worker | Chỉ dùng một host (không trộn `localhost` với `127.0.0.1`) |
 | "Email hoặc mật khẩu không đúng." / "Email này đã có tài khoản." / "Mật khẩu cần từ 8 đến 128 ký tự." | Tài khoản chỉ có trong D1 của môi trường đã tạo nó (local khác production) | Tạo tài khoản trên môi trường đang dùng |
@@ -513,6 +514,7 @@ Các script khác (không nằm trong `npm test`):
 - Chữ "年" trong "1949年" ở tiêu đề bảng chưa được dịch.
 - Chữ dọc: cả trang thành một khối, thứ tự đọc chỉ đúng 5%; chưa thử với Gemini thật.
 - Chữ trong hình vẽ vẫn là tiếng Trung; nhãn chú thích được dịch làm thay đổi 1,2% điểm ảnh của hình; icon cạnh tiêu đề bị xóa theo; tiêu đề màu in ra gần như đen.
+- Đoạn mà Gemini đọc ra trống (thường là hình hoặc ký hiệu bị nhận nhầm là đoạn văn) giữ chữ OCR máy (Tesseract, có thể sai) hoặc `[□]`, kèm cảnh báo "Gemini không đọc được chữ ở đoạn …" dưới nút dịch; hãy kiểm tra và sửa đoạn đó bằng "Chỉnh bản dịch từng đoạn".
 - Renderer: hằng số trục công thức (0,38 em) được chỉnh trên sách giáo khoa tiếng Trung; `prepareLayout` chưa có unit test; LaTeX trần trong bản dịch sẽ bị vẽ thành công thức khi xuất.
 
 **Hiệu năng và token**

@@ -83,13 +83,22 @@ test('Block OCR sends no separate crop for a formula labeled inside the paragrap
 test('Block OCR rejects missing, duplicate and unknown result IDs instead of assigning text by position',async t=>{
  let answer;let calls=0;
  t.mock.method(globalThis,'fetch',async()=>{calls++;return generationResponse({blocks:answer,warnings:[]});});
- for(const invalid of [
-  [corrected()[0]],
-  [corrected()[0],corrected()[0]],
-  [corrected()[0],{id:'p999-b0',text:'Invented block'}],
-  [corrected()[0],{id:'p4-b1',text:''}]
- ]){answer=invalid;await assert.rejects(()=>recognizePdfBlocks(aiEnv,blocks()));}
- assert.equal(calls,4);
+ for(const [invalid,message] of [
+  [[corrected()[0]],/đọc thiếu/u],
+  [[corrected()[0],corrected()[0]],/trùng đoạn p4-b0/u],
+  [[corrected()[0],{id:'p999-b0',text:'Invented block'}],/mã đoạn lạ "p999-b0"/u]
+ ]){answer=invalid;await assert.rejects(()=>recognizePdfBlocks(aiEnv,blocks()),message);}
+ assert.equal(calls,3);
+});
+
+test('Block OCR keeps the machine OCR text of a strip Gemini reads as empty and accepts a re-cased ID',async t=>{
+ let answer;t.mock.method(globalThis,'fetch',async()=>generationResponse({blocks:answer,warnings:['Ảnh mờ.']}));
+ answer=[{id:'P4-B0 ',text:corrected()[0].text},{id:'p4-b1',text:'  '}];
+ const result=await recognizePdfBlocks(aiEnv,blocks());
+ assert.deepEqual(result.blocks,corrected());assert.match(result.warnings[0],/đoạn p4-b1/u);assert.equal(result.warnings[1],'Ảnh mờ.');
+ // A hint without any letter or digit becomes the unreadable mark, still carrying the block's formula token once.
+ const marks=blocks();marks[1].source='. , @@PDF_INLINE_0@@';answer=[corrected()[0],{id:'p4-b1',text:''}];
+ assert.equal((await recognizePdfBlocks(aiEnv,marks)).blocks[1].text,'[□] @@PDF_INLINE_0@@');
 });
 
 test('Block OCR requires every supplied formula token exactly once and forbids invented formula tokens',async t=>{

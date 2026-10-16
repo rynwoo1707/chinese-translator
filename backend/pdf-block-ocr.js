@@ -34,13 +34,33 @@ export function ocrRequest(blocks,sheets=[]){
  return {parts,instruction:sheets.length?sheetInstruction:instruction};
 }
 export async function recognizePdfBlocks(env,blocks,sheets=[]){
- const request=ocrRequest(blocks,sheets),ids=new Set(blocks.map(b=>b.id)),tabs=new Map(sheets.flatMap(s=>s.strips.map(strip=>[strip.blockId,strip.label])));
+ const request=ocrRequest(blocks,sheets),byId=new Map(blocks.map(b=>[b.id,b])),tabs=new Map(sheets.flatMap(s=>s.strips.map(strip=>[strip.blockId,strip.label])));
+ // An answer may name a strip by its tab label (#N) or re-case the ID; either still names exactly one block of this call.
+ const tabBlocks=new Map([...tabs].map(([id,label])=>[label,id])),resolveId=value=>{const raw=String(value??'').trim();return byId.has(raw)?raw:tabBlocks.get(raw)||(byId.has(raw.toLowerCase())?raw.toLowerCase():null);};
  // A correct answer takes about one token per hint character (case19 page 7: 795 tokens for 909); the cap only stops a
  // degenerate repetition loop, which otherwise runs to 32,768 output tokens.
  const result=await generate(env,request.parts,request.instruction,true,{schema,maxOutputTokens:Math.min(32768,1024+4*blocks.reduce((n,b)=>n+String(b.source||'').length,0))});if(!Array.isArray(result.blocks)||result.blocks.length!==blocks.length)throw new Error('Gemini đọc thiếu đoạn văn từ ảnh.');
- const output=new Map();for(const b of result.blocks){if(!ids.has(b.id)||output.has(b.id)||typeof b.text!=='string'||!b.text.trim()||b.text.length>8000)throw new Error('Kết quả đọc ảnh sai ID hoặc nội dung.');const original=blocks.find(item=>item.id===b.id);const text=restoreLabels(dropTab(b.text,tabs.get(b.id)),original.inlines);for(const inline of original.inlines||[])if(text.split(inline.token).length-1!==1)throw new Error(`Đọc ảnh không bảo toàn công thức của ${b.id}.`);if((text.match(/@@PDF_INLINE_\d+@@/gu)||[]).length!==(original.inlines||[]).length)throw new Error('Đọc ảnh trả mã công thức không hợp lệ.');output.set(b.id,normalizeOcrMath(spaceGluedTokens(text.trim(),original)));}
+ // A strip with no legible text (a figure or mark taken for a paragraph) comes back empty and keeps its machine OCR text
+ // instead of failing the page on every retry; most of a call coming back empty is a failed reading, not blank strips.
+ const empty=result.blocks.filter(b=>typeof b?.text==='string'&&!b.text.trim()).length,notes=[];
+ if(blocks.length>=3&&empty*2>blocks.length)throw new Error(`Gemini không đọc được chữ ở ${empty}/${blocks.length} đoạn; kết quả chưa được lưu, hãy thử lại.`);
+ const output=new Map();for(const answer of result.blocks){
+  const id=resolveId(answer?.id);
+  if(!id)throw new Error(`Kết quả đọc ảnh có mã đoạn lạ "${String(answer?.id??'').slice(0,40)}"; kết quả chưa được lưu, hãy thử lại.`);
+  if(output.has(id))throw new Error(`Kết quả đọc ảnh trả trùng đoạn ${id}; kết quả chưa được lưu, hãy thử lại.`);
+  if(typeof answer.text!=='string'||answer.text.length>8000)throw new Error(`Kết quả đọc ảnh sai nội dung ở đoạn ${id}.`);
+  const original=byId.get(id);let read=answer.text;
+  if(!read.trim()){read=unreadableFallback(original);notes.push(`Gemini không đọc được chữ ở đoạn ${id}; đoạn này tạm giữ chữ OCR máy, hãy kiểm tra lại.`);}
+  const text=restoreLabels(dropTab(read,tabs.get(id)),original.inlines);for(const inline of original.inlines||[])if(text.split(inline.token).length-1!==1)throw new Error(`Đọc ảnh không bảo toàn công thức của ${id}.`);if((text.match(/@@PDF_INLINE_\d+@@/gu)||[]).length!==(original.inlines||[]).length)throw new Error('Đọc ảnh trả mã công thức không hợp lệ.');output.set(id,normalizeOcrMath(spaceGluedTokens(text.trim(),original)));
+ }
  const swapped=misassignedBlocks(blocks,output);if(swapped.length)throw new Error(`Gemini gán lẫn chữ giữa các đoạn ${[...new Set(swapped.flatMap(s=>[s.id,s.matches]))].join(', ')}; kết quả chưa được lưu, hãy thử lại.`);
- return {blocks:blocks.map(b=>({id:b.id,text:output.get(b.id)})),warnings:Array.isArray(result.warnings)?result.warnings.filter(w=>typeof w==='string').slice(0,30):[],usage:result.__usage,model:result.__model||env.GEMINI_MODEL};
+ return {blocks:blocks.map(b=>({id:b.id,text:output.get(b.id)})),warnings:[...notes,...(Array.isArray(result.warnings)?result.warnings.filter(w=>typeof w==='string'):[])].slice(0,30),usage:result.__usage,model:result.__model||env.GEMINI_MODEL};
+}
+// The machine OCR hint when it has any letter or digit, else the unreadable mark; each formula token stays exactly once.
+function unreadableFallback(block){
+ const hint=String(block.source||'').trim();let text=/[\p{L}\p{N}]/u.test(hint.replace(/@@PDF_INLINE_\d+@@/gu,''))?hint:'[□]';
+ for(const {token} of block.inlines||[])if(text.split(token).length-1!==1)text=`${text.split(token).join(' ').trim()} ${token}`;
+ return text;
 }
 // A strip's own tab label copied at the start of its text is not part of the page.
 function dropTab(text,tab){return tab?text.replace(new RegExp(`^\\s*${tab}(?!\\d)[\\s:：.、]*`,'u'),''):text;}
