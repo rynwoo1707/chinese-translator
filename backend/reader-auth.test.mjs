@@ -25,6 +25,22 @@ test('Local registration hashes the password and creates an HttpOnly session',as
  const credential=runs.find(item=>item.sql.startsWith('INSERT INTO reader_credentials'));assert.ok(credential);assert.equal(credential.args[1],'reader@example.com');assert.notEqual(credential.args[2],'mat-khau-rieng');assert.ok(credential.args[2].length>20);assert.ok(runs.some(item=>item.sql.startsWith('INSERT INTO reader_sessions')));
 });
 
+test('Password hashes stay within the deployed PBKDF2 limit and older 210,000-iteration hashes still log in',async()=>{
+ const credentials=new Map(),sessions=[];
+ const env={DB:{prepare(sql){return {sql,args:[],bind(...args){this.args=args;return this;},async first(){return sql.startsWith('SELECT')?credentials.get(this.args[0])||null:null;},async run(){if(sql.startsWith('INSERT INTO reader_sessions'))sessions.push(this.args);return {};}};},async batch(items){for(const item of items)if(item.sql.startsWith('INSERT INTO reader_credentials'))credentials.set(item.args[1],{user_id:item.args[0],password_hash:item.args[2],password_salt:item.args[3]});return items.map(()=>({meta:{changes:1}}));}}};
+ const call=(path,body)=>{const request=new Request('https://cat-hien.example'+path,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});return authRoute(request,env,new URL(request.url),path);};
+ assert.equal((await call('/api/auth/register',{name:'Lan',email:'lan@example.test',password:'mat-khau-moi'})).status,201);
+ assert.match(credentials.get('lan@example.test').password_hash,/^pbkdf2-sha256\$100000\$[A-Za-z0-9+/]{43}=$/);
+ assert.equal((await call('/api/auth/login',{email:'lan@example.test',password:'mat-khau-moi'})).status,200);
+ assert.equal((await call('/api/auth/login',{email:'lan@example.test',password:'mat-khau-sai'})).status,401);
+ const salt=crypto.getRandomValues(new Uint8Array(16)),key=await crypto.subtle.importKey('raw',new TextEncoder().encode('mat-khau-cu'),'PBKDF2',false,['deriveBits']);
+ const legacy=new Uint8Array(await crypto.subtle.deriveBits({name:'PBKDF2',hash:'SHA-256',salt,iterations:210000},key,256)),base64=bytes=>btoa(String.fromCharCode(...bytes));
+ credentials.set('cu@example.test',{user_id:'old-user',password_hash:base64(legacy),password_salt:base64(salt)});
+ assert.equal((await call('/api/auth/login',{email:'cu@example.test',password:'mat-khau-cu'})).status,200);
+ assert.equal((await call('/api/auth/login',{email:'cu@example.test',password:'mat-khau-moi'})).status,401);
+ assert.equal(sessions.length,3);
+});
+
 test('Local registration rejects short passwords and cross-origin requests',async()=>{
  const env={DB:{prepare(){throw new Error('Database must not be touched');}}};
  const crossOrigin=new Request('https://cat-hien.example/api/auth/register',{method:'POST',headers:{'Content-Type':'application/json',Origin:'https://evil.example'},body:'{}'});assert.equal((await authRoute(crossOrigin,env,new URL(crossOrigin.url),'/api/auth/register')).status,403);

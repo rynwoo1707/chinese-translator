@@ -1,0 +1,10 @@
+import assert from 'node:assert/strict';
+import {readFile} from 'node:fs/promises';
+const raw=await readFile(new URL('../.dev.vars',import.meta.url),'utf8');
+const variable=name=>[...raw.matchAll(new RegExp(`^${name}=([^\\r\\n]*)`,'gm'))].at(-1)?.[1].trim().replace(/^(['"])(.*)\1$/u,'$2');
+const origin=variable('PDF_LAYOUT_SERVICE_URL'),token=variable('PDF_LAYOUT_SERVICE_TOKEN');
+assert.ok(origin&&token,'Start dev:pdf-layout first');
+assert.equal((await fetch(origin+'/health')).status,401);
+const headers={Authorization:`Bearer ${token}`},health=await fetch(origin+'/health',{headers});assert.equal(health.status,200);assert.equal((await health.json()).engine,'pymupdf-puppeteer');
+const response=await fetch(origin+'/extract',{method:'POST',headers:{...headers,'Content-Type':'application/pdf','X-PDF-Pages':'2'},body:await readFile(new URL('../tmp/pdf-layout/source.pdf',import.meta.url)),signal:AbortSignal.timeout(30000)});assert.equal(response.status,200);const result=await response.json();assert.equal(result.document.pages.length,1);assert.equal(result.document.pages[0].number,2);assert.equal(result.document.pages[0].width,650);assert.equal(Buffer.from(result.originalPdfBase64,'base64').subarray(0,5).toString(),'%PDF-');
+console.log('Live PDF service passed: authentication, streamed extraction, selected page and original PDF.');

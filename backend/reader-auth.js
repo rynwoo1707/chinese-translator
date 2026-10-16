@@ -11,7 +11,12 @@ export function cookieValue(request,name){
 export async function hashToken(value){return [...new Uint8Array(await crypto.subtle.digest('SHA-256',enc.encode(value)))].map(x=>x.toString(16).padStart(2,'0')).join('');}
 const bytesToBase64=bytes=>btoa(String.fromCharCode(...bytes));
 const base64ToBytes=value=>Uint8Array.from(atob(value),c=>c.charCodeAt(0));
-async function passwordHash(password,salt){const key=await crypto.subtle.importKey('raw',enc.encode(password),'PBKDF2',false,['deriveBits']);return new Uint8Array(await crypto.subtle.deriveBits({name:'PBKDF2',hash:'SHA-256',salt,iterations:210000},key,256));}
+// Deployed Workers reject PBKDF2 above 100,000 iterations (wrangler dev allows more), so new hashes use that maximum and
+// record it; an unprefixed hash is from before this change and was made with 210,000 iterations.
+const PBKDF2_ITERATIONS=100000,LEGACY_PBKDF2_ITERATIONS=210000;
+async function passwordHash(password,salt,iterations=PBKDF2_ITERATIONS){const key=await crypto.subtle.importKey('raw',enc.encode(password),'PBKDF2',false,['deriveBits']);return new Uint8Array(await crypto.subtle.deriveBits({name:'PBKDF2',hash:'SHA-256',salt,iterations},key,256));}
+const storedHash=hash=>`pbkdf2-sha256$${PBKDF2_ITERATIONS}$${bytesToBase64(hash)}`;
+function parseStoredHash(value){const match=/^pbkdf2-sha256\$(\d{1,7})\$(.+)$/.exec(value);return match?{iterations:Number(match[1]),hash:base64ToBytes(match[2])}:{iterations:LEGACY_PBKDF2_ITERATIONS,hash:base64ToBytes(value)};}
 function equalBytes(a,b){if(a.length!==b.length)return false;let difference=0;for(let i=0;i<a.length;i++)difference|=a[i]^b[i];return difference===0;}
 function normalizeEmail(value){const email=String(value||'').trim().toLowerCase();if(email.length>320||!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email))throw new Error('Email không hợp lệ.');return email;}
 function validatePassword(value){const password=String(value||'');if(password.length<8||password.length>128)throw new Error('Mật khẩu cần từ 8 đến 128 ký tự.');return password;}
@@ -32,13 +37,13 @@ export async function authRoute(request,env,url,path){
   const body=await request.json(),email=normalizeEmail(body.email),password=validatePassword(body.password),name=String(body.name||'').trim();if(!name||name.length>100)throw new Error('Tên hiển thị cần từ 1 đến 100 ký tự.');
   if(await env.DB.prepare('SELECT user_id FROM reader_credentials WHERE email_normalized=?').bind(email).first())return Response.json({error:'Email này đã có tài khoản.'},{status:409});
   const uid=crypto.randomUUID(),salt=crypto.getRandomValues(new Uint8Array(16)),hash=await passwordHash(password,salt);
-  try{await env.DB.batch([env.DB.prepare('INSERT INTO reader_users(id,google_sub,email,name) VALUES(?,?,?,?)').bind(uid,`local:${uid}`,email,name),env.DB.prepare('INSERT INTO reader_credentials(user_id,email_normalized,password_hash,password_salt) VALUES(?,?,?,?)').bind(uid,email,bytesToBase64(hash),bytesToBase64(salt))]);}catch{return Response.json({error:'Không thể tạo tài khoản. Email có thể đã được sử dụng.'},{status:409});}
+  try{await env.DB.batch([env.DB.prepare('INSERT INTO reader_users(id,google_sub,email,name) VALUES(?,?,?,?)').bind(uid,`local:${uid}`,email,name),env.DB.prepare('INSERT INTO reader_credentials(user_id,email_normalized,password_hash,password_salt) VALUES(?,?,?,?)').bind(uid,email,storedHash(hash),bytesToBase64(salt))]);}catch{return Response.json({error:'Không thể tạo tài khoản. Email có thể đã được sử dụng.'},{status:409});}
   return Response.json({ok:true},{status:201,headers:{'Set-Cookie':await createSession(env,uid,url),'Cache-Control':'no-store'}});
  }
  if(path==='/api/auth/login'&&request.method==='POST'){
   const origin=request.headers.get('Origin');if(origin&&origin!==url.origin)return Response.json({error:'Nguồn yêu cầu không hợp lệ.'},{status:403});
   const body=await request.json(),email=normalizeEmail(body.email),password=validatePassword(body.password),credential=await env.DB.prepare('SELECT user_id,password_hash,password_salt FROM reader_credentials WHERE email_normalized=?').bind(email).first();
-  const valid=credential&&equalBytes(await passwordHash(password,base64ToBytes(credential.password_salt)),base64ToBytes(credential.password_hash));if(!valid)return Response.json({error:'Email hoặc mật khẩu không đúng.'},{status:401});
+  const stored=credential&&parseStoredHash(String(credential.password_hash)),valid=stored&&equalBytes(await passwordHash(password,base64ToBytes(credential.password_salt),stored.iterations),stored.hash);if(!valid)return Response.json({error:'Email hoặc mật khẩu không đúng.'},{status:401});
   return Response.json({ok:true},{headers:{'Set-Cookie':await createSession(env,credential.user_id,url),'Cache-Control':'no-store'}});
  }
  if(path==='/api/auth/google/start'&&request.method==='GET'){

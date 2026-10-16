@@ -5,11 +5,13 @@ import {readFile} from 'node:fs/promises';
 import worker, {processJob,acceptReaderRequest} from './worker.js';
 import pdfLibrary from './pdf.cjs';
 import {preparePdf,getPdfManifest,assembleBook} from './pdf-pipeline.js';
-import {recognizeDocument,generate} from './ai.js';
+import {PROMPT_VERSION,recognizeDocument,generate} from './ai.js';
+import {renderMathText,mathStyles} from '../frontend/math-text.js';
+import {termMatcher,highlightTerms,bindTermPopover} from '../frontend/reader-terms.js';
 
 test('Readers cannot access management APIs or private configuration',async()=>{
  const env={ADMIN_TOKEN:'test-admin',GEMINI_API_KEY:'private-key',DB:{prepare(){throw new Error('Private database accessed');}}};
- for(const [path,method] of [['/stories','GET'],['/stories','POST'],['/users','GET'],['/user-library','GET'],['/jobs','GET'],['/jobs','POST'],['/jobs/test/run','POST'],['/jobs/test/publish','POST'],['/jobs/test/file','GET'],['/requests','GET'],['/requests/test','PATCH'],['/stories/test','PATCH']]){
+ for(const [path,method] of [['/stories','GET'],['/stories','POST'],['/users','GET'],['/user-library','GET'],['/jobs','GET'],['/jobs','POST'],['/jobs/test/run','POST'],['/jobs/test/publish','POST'],['/jobs/test/file','GET'],['/requests','GET'],['/requests/test','PATCH'],['/stories/test','PATCH'],['/settings/gemini-key','PUT'],['/settings/gemini-key','DELETE']]){
   const response=await worker.fetch(new Request('https://test/api'+path,{method}),env,{});
   assert.equal(response.status,401,`${method} ${path}`);
  }
@@ -20,7 +22,7 @@ test('Readers cannot access management APIs or private configuration',async()=>{
 test('Public library and reading remain available; requests require Google login',async()=>{
  const env={DB:{prepare(){return {bind(){return this;},async first(){return {id:'story',visibility:'public'};},async all(){return {results:[]};},async run(){return {};}};}}};
  for(const path of ['/library','/read/story'])assert.equal((await worker.fetch(new Request('https://test/api'+path),env,{})).status,200);
- const request=new Request('https://test/api/requests',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({title:'Truyện muốn đọc'})});
+ const request=new Request('https://test/api/requests',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({title:'Tài liệu cần dịch'})});
  assert.equal((await worker.fetch(request,env,{})).status,401);
 });
 
@@ -35,9 +37,13 @@ test('Upload accepts exactly 25 MB and rejects larger files before storage',asyn
 });
 
 test('Reader and admin layouts stay separated, including direct hashes and logout',async()=>{
- const source=(await readFile(new URL('../frontend/app.js',import.meta.url),'utf8')).replace(/^import .*music\.js';\r?\n/,'');
+ const source=(await readFile(new URL('../frontend/app.js',import.meta.url),'utf8')).replace(/^import .*\r?\n/gmu,'');
+ const runJobSource=source.slice(source.indexOf('async function runJob'),source.indexOf('function requestStory'));
+ assert.match(runJobSource,/chờ người quản trị đối chiếu/);
+ assert.doesNotMatch(runJobSource,/\/publish/,'Hoàn tất dịch không được tự động công bố');
+ assert.doesNotMatch(source,/import-website|data-ai-cover|generateAiCover|\/web-import|\/generate-cover/);
  function browser(pathname,hash=''){
-  const app={innerHTML:''};const context=vm.createContext({musicMarkup:()=>'',bindMusic(){},location:{pathname,hash},document:{querySelector:s=>s==='#app'?app:s==='#modal'?{close(){}}:null,querySelectorAll:()=>[]},localStorage:{getItem:()=>null},window:{addEventListener(){}},fetch:async()=>({ok:true,json:async()=>pathname.startsWith('/admin')?{authenticated:false}:[]}),setTimeout,clearTimeout,clearInterval,FormData,console});
+  const app={innerHTML:''};const context=vm.createContext({musicMarkup:()=>'',bindMusic(){},renderMathText,mathStyles,termMatcher,highlightTerms,bindTermPopover,hideTermPopover:()=>{},location:{pathname,hash},document:{querySelector:s=>s==='#app'?app:s==='#modal'?{close(){}}:null,querySelectorAll:()=>[]},localStorage:{getItem:()=>null},window:{addEventListener(){}},fetch:async()=>({ok:true,json:async()=>pathname.startsWith('/admin')?{authenticated:false}:[]}),setTimeout,clearTimeout,clearInterval,FormData,console});
   vm.runInContext(source,context);return {app,context};
  }
  for(const hash of ['','#translate','#requests','#users','#settings','#review']){
@@ -46,6 +52,18 @@ test('Reader and admin layouts stay separated, including direct hashes and logou
  const {app,context}=browser('/admin','#review');assert.match(app.innerHTML,/Đăng nhập quản trị/);assert.doesNotMatch(app.innerHTML,/sidebar/);
  vm.runInContext("state.status={authenticated:true};render()",context);assert.match(app.innerHTML,/sidebar/);assert.match(app.innerHTML,/admin-logout/);
  await vm.runInContext('logout()',context);assert.match(app.innerHTML,/Đăng nhập quản trị/);assert.doesNotMatch(app.innerHTML,/sidebar/);
+ const parsed=vm.runInContext("readerFootnotes('Nội dung có dẫn chứng [1].\\n\\n[1] Hồng Nghiệp, tr. 412.\\n[2] Cùng sách trên, trang 413.\\n[3] Tác phẩm dẫn trên, xem tr. 835.')",context);
+ assert.equal(parsed.body,'Nội dung có dẫn chứng [1].');assert.equal(parsed.notes.length,3);assert.equal(parsed.notes[0].content,'Hồng Nghiệp.');assert.equal(parsed.notes[1].content,'Cùng sách trên.');assert.equal(parsed.notes[2].content,'Tác phẩm dẫn trên.');
+ const saved=vm.runInContext("readerProse('Vectơ AB⃗ có độ dài |AB⃗|. Các vectơ OA⃗, OB⃗, OC⃗. AB và OA là điểm; [□] chưa đọc được.')",context);
+ assert.equal((saved.html.match(/class="math-vector"/gu)||[]).length,5);assert.doesNotMatch(saved.html,/⃗/gu);assert.match(saved.html,/AB và OA là điểm; \[□\]/u);
+});
+
+test('Removed fiction import and AI cover APIs are unavailable',async()=>{
+ const env={ADMIN_TOKEN:'test-admin',DB:{prepare(){throw new Error('Removed route accessed the database');}}};
+ for(const path of ['/web-import','/web-import/preview','/stories/document/generate-cover']){
+  const response=await worker.fetch(new Request('https://test/api'+path,{method:'POST',headers:{Authorization:'Bearer test-admin','Content-Type':'application/json'},body:'{}'}),env,{});
+  assert.equal(response.status,404,path);
+ }
 });
 
 test('Large OCR streams to Files API, uses file reference, then cleans up',async t=>{
@@ -76,12 +94,12 @@ test('Covers are saved as images, readable publicly, and editable only by admin'
  assert.equal(objects.size,1);
 });
 
-test('Admin can update translation genre; invalid genres do not change the story',async()=>{
- let genre='Tiên hiệp';
+test('Admin can update academic field; invalid values do not change the document',async()=>{
+ let genre='Chuyên khảo · Nghiên cứu';
  const env={ADMIN_TOKEN:'test-admin',DB:{prepare(sql){return {bind(...args){this.args=args;return this;},async first(){return {id:'story'};},async run(){if(sql.startsWith('UPDATE stories SET genre'))genre=this.args[0];return {};}};}}};
  async function update(value){return worker.fetch(new Request('https://test/api/stories/story',{method:'PATCH',headers:{Authorization:'Bearer test-admin','Content-Type':'application/json'},body:JSON.stringify({genre:value})}),env,{});}
- assert.equal((await update('Ngôn tình')).status,200);assert.equal(genre,'Ngôn tình');
- assert.equal((await update('invalid')).status,400);assert.equal(genre,'Ngôn tình');
+ assert.equal((await update('Lịch sử Trung Hoa')).status,200);assert.equal(genre,'Lịch sử Trung Hoa');
+ assert.equal((await update('invalid')).status,400);assert.equal(genre,'Lịch sử Trung Hoa');
 });
 
 test('Accepting a reader request creates its story and translation job directly from the uploaded file',async()=>{
@@ -97,8 +115,8 @@ test('Admin can rename a story and invalid names are rejected',async()=>{
  let title='Tên cũ';
  const env={ADMIN_TOKEN:'test-admin',DB:{prepare(sql){return {bind(...args){this.args=args;return this;},async first(){return sql.startsWith('SELECT id FROM stories')?{id:'story'}:null;},async run(){if(sql.startsWith('UPDATE stories SET title'))title=this.args[0];return {};}};}}};
  async function rename(value){return worker.fetch(new Request('https://test/api/stories/story',{method:'PATCH',headers:{Authorization:'Bearer test-admin','Content-Type':'application/json'},body:JSON.stringify({title:value})}),env,{});}
- const response=await rename('  Tên truyện mới  ');assert.equal(response.status,200);assert.equal(title,'Tên truyện mới');
- assert.equal((await rename('   ')).status,400);assert.equal(title,'Tên truyện mới');
+ const response=await rename('  Tên tài liệu mới  ');assert.equal(response.status,200);assert.equal(title,'Tên tài liệu mới');
+ assert.equal((await rename('   ')).status,400);assert.equal(title,'Tên tài liệu mới');
 });
 
 
@@ -108,7 +126,7 @@ test('PDF OCR checkpoints survive timeouts and resume without repeating saved pa
  const job={id:'pdf-job',story_id:'story',file_key:'original',mime:'application/pdf',source:''};
  const env={GEMINI_API_KEY:'test',DB:{prepare(sql){return {bind(){return this;},async first(){return sql.includes('FROM jobs')?job:{context:'',glossary:'{}',genre:'Khác'};},async run(){return {};}};}},FILES:{async get(key){if(key==='original')return new Blob([bytes]);const value=objects.get(key);return value?(typeof value==='string'?{json:async()=>JSON.parse(value)}:new Blob([value])):null;},async put(key,value){objects.set(key,value);}}};
  t.mock.method(globalThis,'fetch',async(url,options)=>{
-  const body=JSON.parse(options.body);if(fail)throw new DOMException('timeout','TimeoutError');if(!body.contents[0].parts[0].inlineData){const data=body.systemInstruction.parts[0].text.startsWith('Analyze')?{context:'Bối cảnh',glossary:{}}:{translation:'Bản dịch tiếng Việt'};return Response.json({candidates:[{finishReason:'STOP',content:{parts:[{text:JSON.stringify(data)}]}}]});}const data=body.contents[0].parts[0].inlineData.data;
+  const body=JSON.parse(options.body);if(fail)throw new DOMException('timeout','TimeoutError');if(!body.contents[0].parts[0].inlineData){const data={translation:'Bản dịch tiếng Việt',contextUpdate:'Bối cảnh',glossaryUpdates:{}};return Response.json({candidates:[{finishReason:'STOP',content:{parts:[{text:JSON.stringify(data)}]}}]});}const data=body.contents[0].parts[0].inlineData.data;
   const part=await pdfLibrary.PDFDocument.load(Buffer.from(data,'base64'));seen.push(part.getPageCount());
   return Response.json({candidates:[{finishReason:'STOP',content:{parts:[{text:JSON.stringify({text:'原文',warnings:[]})}]}}]});
  });
@@ -175,14 +193,43 @@ test('Long TXT passes upload, translates all chunks, and retains full content ou
  const source='今天是新的一天。'.repeat(10000),objects=new Map();let job;
  const env={ADMIN_TOKEN:'test-admin',GEMINI_API_KEY:'test',DB:{prepare(sql){return {bind(...args){this.args=args;return this;},async first(){return sql.includes('FROM jobs')?job:{id:'story',context:'',genre:'Khác',glossary:'{}'};},async run(){
   if(sql.startsWith('INSERT INTO jobs')){const [id,story_id,filename,file_key,mime,source,source_key]=this.args;job={id,story_id,filename,file_key,mime,source,source_key};}
-  if(sql.startsWith('UPDATE jobs SET source=')){assert.ok(this.args[0].length<=20000);assert.ok(this.args[1].length<=20000);Object.assign(job,{source:this.args[0],translation:this.args[1],source_key:this.args[2],translation_key:this.args[3],status:this.args[5]});}
+  if(sql.startsWith('UPDATE jobs SET source=')){assert.ok(this.args[0].length<=20000);assert.ok(this.args[1].length<=20000);Object.assign(job,{source:this.args[0],translation:this.args[1],source_key:this.args[2],translation_key:this.args[3],status:this.args[5],prompt_tokens:this.args[7],output_tokens:this.args[8],total_tokens:this.args[9],ai_requests:this.args[10],ai_cache_hits:this.args[11],model:this.args[12],prompt_version:this.args[13]});}
   if(sql.includes("status='failed'"))throw new Error(this.args[0]);return {};
  }};}},FILES:{async put(key,value){objects.set(key,value);},async get(key){const value=objects.get(key);return value===undefined?null:{text:async()=>value,json:async()=>JSON.parse(value)};}}};
  const form=new FormData();form.set('story_id','story');form.set('file',new File([source],'long.txt'));
  const response=await worker.fetch(new Request('https://test/api/jobs',{method:'POST',headers:{Authorization:'Bearer test-admin'},body:form}),env,{});assert.equal(response.status,201);assert.equal(objects.get(job.source_key),source);
- let translatedSource='';t.mock.method(globalThis,'fetch',async(url,options)=>{const request=JSON.parse(options.body);const context=request.systemInstruction.parts[0].text.startsWith('Analyze');if(!context)translatedSource+=JSON.parse(request.contents[0].parts[0].text).source;return Response.json({candidates:[{finishReason:'STOP',content:{parts:[{text:JSON.stringify(context?{context:'Context',glossary:{}}:{translation:'Bản dịch '.repeat(800)})}]}}]});});
+ let translatedSource='';t.mock.method(globalThis,'fetch',async(url,options)=>{const request=JSON.parse(options.body);translatedSource+=JSON.parse(request.contents[0].parts[0].text).source;return Response.json({usageMetadata:{promptTokenCount:120,candidatesTokenCount:80,totalTokenCount:200},candidates:[{finishReason:'STOP',content:{parts:[{text:JSON.stringify({translation:'Bản dịch '.repeat(800),contextUpdate:'Context',glossaryUpdates:{}})}]}}]});});
  for(let n=0;n<100&&job.status!=='review';n++)await processJob(job.id,env);
  assert.equal(job.status,'review');assert.equal(translatedSource,source);assert.ok(objects.get(job.translation_key).length>20000);assert.equal(objects.get(`books/${job.id}.txt`),objects.get(job.translation_key));
+ assert.equal(job.prompt_version,PROMPT_VERSION);assert.equal(job.model,'gemini-2.5-flash');assert.ok(job.ai_requests>0);assert.equal(job.total_tokens,job.ai_requests*200);
+});
+
+test('Admin book pipeline repairs a dropped citation marker before marking review, same as the study workspace',async t=>{
+ const source='原文[12]。',objects=new Map();let job;
+ const env={ADMIN_TOKEN:'test-admin',GEMINI_API_KEY:'test',DB:{prepare(sql){return {bind(...args){this.args=args;return this;},async first(){return sql.includes('FROM jobs')?job:{id:'story',context:'',genre:'Khác',glossary:'{}'};},async run(){
+  if(sql.startsWith('INSERT INTO jobs')){const [id,story_id,filename,file_key,mime,source,source_key]=this.args;job={id,story_id,filename,file_key,mime,source,source_key,warnings:'[]'};}
+  if(sql.startsWith('UPDATE jobs SET source=')){Object.assign(job,{source:this.args[0],translation:this.args[1],source_key:this.args[2],translation_key:this.args[3],warnings:this.args[4],status:this.args[5]});}
+  if(sql.includes("status='failed'"))throw new Error(this.args[0]);return {};
+ }};}},FILES:{async put(key,value){objects.set(key,value);},async get(key){const value=objects.get(key);return value===undefined?null:{text:async()=>value,json:async()=>JSON.parse(value)};}}};
+ const form=new FormData();form.set('story_id','story');form.set('file',new File([source],'short.txt'));
+ const response=await worker.fetch(new Request('https://test/api/jobs',{method:'POST',headers:{Authorization:`Bearer test-admin`},body:form}),env,{});assert.equal(response.status,201);
+ let calls=0;t.mock.method(globalThis,'fetch',async()=>{calls++;const translation=calls===1?'Bản dịch thiếu dẫn chứng.':'Bản dịch có dẫn chứng [12].';return Response.json({usageMetadata:{promptTokenCount:10,candidatesTokenCount:8,totalTokenCount:18},candidates:[{finishReason:'STOP',content:{parts:[{text:JSON.stringify({translation,contextUpdate:'',glossaryUpdates:{}})}]}}]});});
+ for(let n=0;n<10&&job.status!=='review';n++)await processJob(job.id,env);
+ assert.equal(calls,2);assert.equal(job.status,'review');assert.match(job.translation,/\[12\]/);assert.deepEqual(JSON.parse(job.warnings),[]);
+});
+
+test('A configured GEMINI_QUALITY_MODEL is used only for the repair retry, never for routine translation',async t=>{
+ const source='原文[12]。',objects=new Map();let job;
+ const env={ADMIN_TOKEN:'test-admin',GEMINI_API_KEY:'test',GEMINI_MODEL:'gemini-2.5-flash',GEMINI_QUALITY_MODEL:'gemini-3.0-pro',DB:{prepare(sql){return {bind(...args){this.args=args;return this;},async first(){return sql.includes('FROM jobs')?job:{id:'story',context:'',genre:'Khác',glossary:'{}'};},async run(){
+  if(sql.startsWith('INSERT INTO jobs')){const [id,story_id,filename,file_key,mime,source,source_key]=this.args;job={id,story_id,filename,file_key,mime,source,source_key,warnings:'[]'};}
+  if(sql.startsWith('UPDATE jobs SET source=')){Object.assign(job,{source:this.args[0],translation:this.args[1],source_key:this.args[2],translation_key:this.args[3],warnings:this.args[4],status:this.args[5]});}
+  if(sql.includes("status='failed'"))throw new Error(this.args[0]);return {};
+ }};}},FILES:{async put(key,value){objects.set(key,value);},async get(key){const value=objects.get(key);return value===undefined?null:{text:async()=>value,json:async()=>JSON.parse(value)};}}};
+ const form=new FormData();form.set('story_id','story');form.set('file',new File([source],'short.txt'));
+ const response=await worker.fetch(new Request('https://test/api/jobs',{method:'POST',headers:{Authorization:`Bearer test-admin`},body:form}),env,{});assert.equal(response.status,201);
+ const models=[];t.mock.method(globalThis,'fetch',async(endpoint)=>{models.push(endpoint);const translation=models.length===1?'Bản dịch thiếu dẫn chứng.':'Bản dịch có dẫn chứng [12].';return Response.json({usageMetadata:{promptTokenCount:10,candidatesTokenCount:8,totalTokenCount:18},candidates:[{finishReason:'STOP',content:{parts:[{text:JSON.stringify({translation,contextUpdate:'',glossaryUpdates:{}})}]}}]});});
+ for(let n=0;n<10&&job.status!=='review';n++)await processJob(job.id,env);
+ assert.equal(models.length,2);assert.match(models[0],/gemini-2\.5-flash/);assert.match(models[1],/gemini-3\.0-pro/);assert.equal(job.status,'review');assert.match(job.translation,/\[12\]/);
 });
 
 

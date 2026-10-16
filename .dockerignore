@@ -1,0 +1,16 @@
+# Build context of services/pdf-layout/Dockerfile (docker build -f services/pdf-layout/Dockerfile .).
+# The image copies only package*.json and the service files; keep secrets, local data and large folders out of the context.
+.git
+.dev.vars
+.dev.vars.*
+.env
+.env.*
+.wrangler
+.runtime
+node_modules
+dist
+tmp
+output
+frontend/vendor
+*.pdf
+**/__pycache__

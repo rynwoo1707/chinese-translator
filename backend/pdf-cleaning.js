@@ -1,3 +1,5 @@
+import {normalizeVietnameseText} from './vietnamese-text.js';
+
 const PAGE_MARKER=/^\[(?:Trang\s+PDF|Trang|Page)\s*\d+(?:\s*[–—-]\s*\d+)?\]$/iu;
 const PAGE_NUMBER=/^(?:[-–—]\s*)?(?:(?:trang|page)\s*)?\d+(?:\s*[\/／]\s*\d+)?(?:\s*(?:页|頁))?(?:\s*[-–—])?$/iu;
 const CJK=/[\u3400-\u9fff\uf900-\ufaff]/u;
@@ -19,5 +21,5 @@ export function cleanExtractedPdfText(text){
 export function cleanReaderText(text){
  const lines=String(text||'').replace(/\r\n?/g,'\n').split('\n'),firstMetadata=lines.findIndex(raw=>BIBLIOGRAPHIC.test(normalize(raw))),dropLeadingThrough=firstMetadata>=0&&firstMetadata<=15?firstMetadata:-1,clean=[];
  for(let index=0;index<lines.length;index++){const line=normalize(lines[index]);if(index<=dropLeadingThrough||READER_PAGE_MARKER.test(line)||PAGE_NUMBER.test(line)||BIBLIOGRAPHIC.test(line)||CLASSIFICATION.test(line))continue;if(!line){if(clean.at(-1)!=='')clean.push('');continue;}clean.push(line);}
- return clean.join('\n').replace(/^\s+|\s+$/g,'').replace(/\n{3,}/g,'\n\n');
+ return normalizeVietnameseText(clean.join('\n').replace(/^\s+|\s+$/g,'').replace(/\n{3,}/g,'\n\n'));
 }
