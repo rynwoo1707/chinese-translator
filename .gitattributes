@@ -6,3 +6,6 @@
 *.pdf binary
 *.tar binary
 *.wasm binary
+# Windows batch files need CRLF: cmd.exe misreads labels in LF-only files.
+*.cmd text eol=crlf
+*.bat text eol=crlf

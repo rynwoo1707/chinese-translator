@@ -6,6 +6,7 @@ import {existsSync,readFileSync,writeFileSync,readdirSync} from 'node:fs';
 import {randomBytes} from 'node:crypto';
 import {fileURLToPath} from 'node:url';
 import {join} from 'node:path';
+import {createInterface} from 'node:readline';
 
 const root=fileURLToPath(new URL('../',import.meta.url));process.chdir(root);
 const STEPS=7,windows=process.platform==='win32',warnings=[],problems=[];
@@ -38,8 +39,23 @@ step(2,'Thư viện giao diện (frontend/vendor)');
 const vendor=models?attempt('Chưa chép được thư viện giao diện vào frontend/vendor.',()=>{node('backend/vendor.mjs');console.log('Xong.');}):(console.log('Bỏ qua vì thiếu mô hình PaddleOCR (bước 1).'),false);
 
 step(3,'Python 3.10+ và PyMuPDF cho dịch vụ PDF giữ bố cục');
+// Python installed without "Add python.exe to PATH", or by winget during this run, is still found in its usual folders.
+function windowsPythons(){
+ if(!windows)return [];
+ const found=[];
+ for(const folder of [join(process.env.LOCALAPPDATA||'','Programs','Python'),process.env.ProgramFiles||'C:\\Program Files','C:\\'])try{for(const name of readdirSync(folder)){const version=/^Python3(\d+)$/iu.exec(name),exe=join(folder,name,'python.exe');if(version&&existsSync(exe))found.push({version:Number(version[1]),exe});}}catch{}
+ return found.sort((a,b)=>b.version-a.version).map(({exe})=>({from:'other',cmd:[exe]}));
+}
+// Interactive Windows runs offer to install Python (per user, no administrator rights) instead of only reporting it.
+async function offerPython(){
+ if(!windows||!process.stdin.isTTY||spawnSync('winget',['--version'],{windowsHide:true}).status!==0)return false;
+ const prompt=createInterface({input:process.stdin,output:process.stdout});
+ const answer=await new Promise(resolve=>prompt.question('Máy chưa có Python 3.10+. Cài Python 3.13 bằng winget ngay bây giờ? (C = có / K = không) ',resolve));prompt.close();
+ if(/^\s*k/iu.test(answer))return false;
+ return spawnSync('winget',['install','-e','--id','Python.Python.3.13','--scope','user','--silent','--accept-package-agreements','--accept-source-agreements'],{stdio:'inherit',windowsHide:true}).status===0;
+}
 function findPython(){
- const candidates=[process.env.PDF_PYTHON&&{from:'env',cmd:[process.env.PDF_PYTHON]},saved&&valueIn(saved,'PDF_PYTHON')&&{from:'file',cmd:[valueIn(saved,'PDF_PYTHON')]},{from:'auto',cmd:['python']},{from:'other',cmd:['python3']},windows&&{from:'other',cmd:['py','-3']}].filter(Boolean);
+ const candidates=[process.env.PDF_PYTHON&&{from:'env',cmd:[process.env.PDF_PYTHON]},saved&&valueIn(saved,'PDF_PYTHON')&&{from:'file',cmd:[valueIn(saved,'PDF_PYTHON')]},{from:'auto',cmd:['python']},{from:'other',cmd:['python3']},windows&&{from:'other',cmd:['py','-3']},...windowsPythons()].filter(Boolean);
  for(const {from,cmd:[command,...args]} of candidates){
   // The Microsoft Store alias "python" exits with an error instead of printing a version, so it is skipped here.
   const probe=spawnSync(command,[...args,'-c','import sys;print(sys.version_info>=(3,10));print(sys.executable)'],{encoding:'utf8',windowsHide:true});
@@ -49,7 +65,8 @@ function findPython(){
  return null;
 }
 // Without Python only the layout-preserving PDF mode is unavailable, so the remaining steps still run.
-const python=findPython();
+let python=findPython();
+if(!python&&await offerPython())python=findPython();
 if(!python)problems.push('Không tìm thấy Python 3.10 trở lên nên chế độ "Giữ bố cục PDF" chưa dùng được. Cài Python 3 (Windows: python.org, chọn "Add python.exe to PATH"), mở terminal mới rồi chạy lại "npm run setup".');
 else attempt('Chưa cài được PyMuPDF nên chế độ "Giữ bố cục PDF" chưa dùng được.',()=>{
  console.log(`Dùng ${python.executable}`);
@@ -112,7 +129,9 @@ for(const problem of problems)console.error(`\nLỖI: ${problem}`);
 if(problems.length)process.exitCode=1;
 let layoutPort='8091';try{layoutPort=new URL(current('PDF_LAYOUT_SERVICE_URL')).port||layoutPort;}catch{}
 const npm=windows?'npm.cmd':'npm';
-console.log(`
+// start.cmd starts both services itself right after setup.
+if(process.argv.includes('--launcher'))console.log(problems.length?'\nĐã làm xong các bước còn lại.':'\nCài đặt xong.');
+else console.log(`
 ${problems.length?'Đã làm xong các bước còn lại; sửa LỖI ở trên rồi chạy lại "npm run setup".':'Cài đặt xong.'} Chạy app (2 cửa sổ terminal, đều ở thư mục dự án):
   1) ${npm} run dev:pdf-layout   (dịch vụ PDF giữ bố cục, cổng ${layoutPort})
   2) ${npm} run dev              (web, mở địa chỉ wrangler in ra, thường là http://127.0.0.1:8787)

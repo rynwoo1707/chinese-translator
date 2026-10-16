@@ -2,18 +2,13 @@
 
 > Cập nhật 16/10/2026, nhánh `handoff/2026-10-16`. Dành cho người có kỹ thuật nhận chạy app trên máy để dịch sách và deploy lên Cloudflare (không phải người viết code ban đầu). Mọi lệnh chạy ở **thư mục gốc repo**. Chỗ ghi **(chưa kiểm chứng)** là chưa được chạy thử thật.
 
-**Chạy nhanh trên Windows** (cần Git, Node.js 22.13+ và Python 3.10+; chi tiết ở mục 2–3):
+**Chạy nhanh trên Windows** (chỉ cần Git; chi tiết ở mục 3):
 
 ```powershell
-git clone -b handoff/2026-10-16 https://github.com/rynwoo1707/chinese-translator.git
-cd chinese-translator
-npm.cmd ci
-npm.cmd run setup             # 1 lần: mô hình OCR, thư viện, PyMuPDF, dữ liệu OCR, .dev.vars, D1 local
-npm.cmd run dev:pdf-layout    # cửa sổ PowerShell 1: dịch vụ PDF giữ bố cục (để chạy)
-npm.cmd run dev               # cửa sổ PowerShell 2: web, mặc định http://127.0.0.1:8787
+git clone -b handoff/2026-10-16 https://github.com/rynwoo1707/chinese-translator.git C:\src\chinese-translator
 ```
 
-Rồi mở `http://127.0.0.1:8787/#account` → "Tạo tài khoản" → mở `http://127.0.0.1:8787/study.html` → nhập "Tên nội dung" (bắt buộc) → dán khóa Gemini API của bạn (tạo miễn phí ở https://aistudio.google.com/apikey) → chọn PDF, chọn 1–3 trang → "Bắt đầu dịch →". Trên Windows, clone vào thư mục có đường dẫn ngắn (ví dụ `C:\src`), xem mục 3.1.
+Rồi mở thư mục `C:\src\chinese-translator` và **bấm đúp `start.cmd`**. Lần đầu nó hỏi rồi tự cài Node.js và Python nếu máy chưa có (bằng winget), cài thư viện, chạy `npm run setup`, bật dịch vụ PDF và web trong cùng cửa sổ, rồi mở trình duyệt ở `http://127.0.0.1:8787/#account`. Các lần sau, bấm đúp `start.cmd` là chạy, kèm cập nhật code mới nhất (`git pull`). Trong trình duyệt: "Tạo tài khoản" → "Xưởng dịch học tập" → nhập "Tên nội dung" (bắt buộc) → dán khóa Gemini API của bạn (tạo miễn phí ở https://aistudio.google.com/apikey) → chọn PDF, chọn 1–3 trang → "Bắt đầu dịch →". Giữ cửa sổ `start.cmd` mở trong lúc dùng; đóng cửa sổ hoặc bấm Ctrl+C để tắt.
 
 **5 điều không được quên khi deploy**
 
@@ -57,6 +52,14 @@ Hoa Trí là web app dịch sách và tài liệu tiếng Trung sang tiếng Vi�
 ### 3.1 Windows 11 (PowerShell)
 
 Dùng `npm.cmd`/`npx.cmd` để khỏi gặp lỗi "running scripts is disabled". Nếu PowerShell cho chạy script thì gõ `npm`/`npx` cũng được.
+
+**Cách nhanh nhất:** clone vào thư mục ngắn rồi bấm đúp `start.cmd` (hoặc gõ `.\start.cmd` trong PowerShell). Lệnh này làm thay bạn các bước 1–4 dưới đây:
+- Thiếu Node.js thì hỏi rồi cài bằng `winget install OpenJS.NodeJS.LTS` (Windows có thể hỏi quyền quản trị).
+- Thiếu Python thì `setup` hỏi rồi cài Python 3.13 cho riêng người dùng bằng winget, không cần quyền quản trị.
+- Chạy `git pull --ff-only` (không được thì vẫn chạy bản hiện có), rồi `npm ci` khi `package-lock.json` đổi, rồi `npm run setup`.
+- Bật dịch vụ PDF và web trong cùng cửa sổ (dòng log có tiền tố `[PDF]` / `[WEB]`), rồi mở trình duyệt khi cả hai đã sẵn sàng.
+
+Máy không có winget: cài Node.js LTS (https://nodejs.org) và Python 3 (python.org, tích "Add python.exe to PATH") bằng tay rồi bấm đúp `start.cmd`. Đã cài đặt xong thì cũng có thể chạy `npm.cmd start` để bật cả hai dịch vụ trong một cửa sổ, thay cho bước 3–4.
 
 **Bước 1: lấy code và cài gói**
 
@@ -405,6 +408,7 @@ Thứ tự đề xuất: `git pull` → `npm ci` → `npx wrangler d1 migrations
 | "Đặt PDF_LAYOUT_SERVICE_TOKEN tối thiểu 24 ký tự." | Token thiếu hoặc ngắn khi chạy `server.mjs`/Docker | Dùng ≥ 24 ký tự |
 | "Đã cấu hình dịch vụ PDF bên ngoài. Chạy server.mjs với cấu hình của môi trường đó." | `PDF_LAYOUT_SERVICE_URL` trong `.dev.vars` không phải localhost | Dev local phải dùng `http://127.0.0.1:<cổng>` |
 | `Error: listen EADDRINUSE … 127.0.0.1:8091` (cửa sổ vẫn mở với "Waiting for file changes before restarting..." nhưng dịch vụ không chạy) | Cổng đang bị chiếm (một instance khác hoặc container Docker) | Bấm Ctrl+C. Chạy `netstat -ano \| findstr :8091`, xem đó là chương trình gì bằng `Get-Process -Id <pid>`; chỉ `taskkill /PID <pid> /F` khi đó là dịch vụ cũ của bạn, nếu không thì đổi cổng trong `PDF_LAYOUT_SERVICE_URL` (ví dụ `http://127.0.0.1:8092`) rồi khởi động lại cả hai |
+| `[PDF] Cổng của dịch vụ PDF đang bận…` rồi `[PDF] đã dừng (mã 1)` (cửa sổ `start.cmd`/`npm start`) | Hoa Trí đang chạy ở một cửa sổ khác, hoặc còn một `npm run dev:pdf-layout` cũ | Đóng cửa sổ kia (hoặc bấm Ctrl+C ở đó), rồi bấm đúp `start.cmd` lại |
 | "PDF có mật khẩu; hãy mở khóa trước khi dịch." · "Trang N quá lớn để render an toàn…" · "Tệp không phải PDF." · "Hãy dịch và lưu đủ các block trước khi xuất PDF." | Đúng như nội dung thông báo | Làm theo thông báo |
 
 ### 6.2 Build, Worker, D1
