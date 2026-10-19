@@ -15,13 +15,26 @@ import {listStudyModels} from './gemini-models.js';
 import {fileDisposition} from './download-filename.js';
 import {readerTerms} from './reader-glossary.js';
 import {saveCover} from './covers.js';
-const json=(data,status=200)=>Response.json(data,{status,headers:{'Cache-Control':'no-store','X-Content-Type-Options':'nosniff'}});
+import {json,withSecurityHeaders,limitBody,crossOrigin,originRefused,errorResponse,isLoopback} from './http.js';
+import {healthRoute} from './health.js';
+import {accountRoute,adminAccountRoute} from './account.js';
+import {rateLimit,dailyMax} from './rate-limit.js';
+import {SAMPLE_PREFIX,validSlug,isSampleBook,libraryRows,readChapters,libraryPublicRoute,libraryAdminRoute,bookPagesReady,rangedPdfResponse} from './library-books.js';
+import {removeFile} from './study-history.js';
 const id=()=>crypto.randomUUID();
 const TRANSLATION_CHUNK_SIZE=10000;
 const GENRES=['Chuyên khảo · Nghiên cứu','Toán học · STEM','Lịch sử Trung Hoa','Cổ văn · Hán Nôm','Triết học · Tư tưởng','Văn hóa · Xã hội','Địa lý · Khảo cổ','Giáo dục','Ngôn ngữ học','Tài liệu khác'];
 function required(value,max=200){if(typeof value!=='string'||!value.trim()||value.length>max)throw new Error('Nội dung trống hoặc vượt giới hạn cho phép.');return value.trim();}
-async function isAdmin(request,env){const token=request.headers.get('Authorization')?.replace(/^Bearer /,'')||'';if(!env.ADMIN_TOKEN||!token)return false;const enc=new TextEncoder();const a=new Uint8Array(await crypto.subtle.digest('SHA-256',enc.encode(token))),b=new Uint8Array(await crypto.subtle.digest('SHA-256',enc.encode(env.ADMIN_TOKEN)));let d=0;for(let i=0;i<a.length;i++)d|=a[i]^b[i];return d===0;}
-async function canReadStory(request,env,storyId,admin=false){const story=await env.DB.prepare('SELECT id,visibility,owner_user_id FROM stories WHERE id=?').bind(storyId).first();if(!story)return null;if(story.visibility!=='private'||admin)return story;const reader=await currentReader(request,env);return reader&&reader.id===story.owner_user_id?story:null;}
+// Empty means the column default, "Chưa cập nhật".
+function cleanAuthor(value){const author=String(value??'').normalize('NFC').trim();if(author.length>200||/[\u0000-\u001f\u007f]/u.test(author))throw new Error('Tên tác giả tối đa 200 ký tự, trên một dòng.');return author;}
+const UNKNOWN_AUTHOR='Chưa cập nhật';
+// Students' own study books: their visibility and author belong to the student's workspace, never to the admin.
+const NOT_STUDY_BOOK="COALESCE(source_url,'') NOT LIKE 'study:%' AND COALESCE(source_url,'') NOT LIKE 'study-book:%'";
+// A short ADMIN_TOKEN can be guessed, so it opens nothing outside this machine; setup generates 64 hex characters.
+const MIN_ADMIN_TOKEN=32;
+const adminTokenUsable=(env,url)=>String(env.ADMIN_TOKEN||'').length>=MIN_ADMIN_TOKEN||Boolean(env.ADMIN_TOKEN)&&isLoopback(url.hostname);
+async function isAdmin(request,env,url){const token=request.headers.get('Authorization')?.replace(/^Bearer /,'')||'';if(!adminTokenUsable(env,url)||!token)return false;const enc=new TextEncoder();const a=new Uint8Array(await crypto.subtle.digest('SHA-256',enc.encode(token))),b=new Uint8Array(await crypto.subtle.digest('SHA-256',enc.encode(env.ADMIN_TOKEN)));let d=0;for(let i=0;i<a.length;i++)d|=a[i]^b[i];return d===0;}
+async function canReadStory(request,env,storyId,admin=false){const story=await env.DB.prepare('SELECT id,visibility,owner_user_id,source_url FROM stories WHERE id=?').bind(storyId).first();if(!story)return null;if(story.visibility!=='private'||admin)return story;const reader=await currentReader(request,env);return reader&&reader.id===story.owner_user_id?story:null;}
 function validRequestFile(file){const ext=String(file?.name||'').split('.').pop().toLowerCase();const types={pdf:'application/pdf',epub:'application/epub+zip',azw3:'application/vnd.amazon.ebook',docx:'application/vnd.openxmlformats-officedocument.wordprocessingml.document',txt:'text/plain',png:'image/png',jpg:'image/jpeg',jpeg:'image/jpeg',webp:'image/webp'};return {ext,mime:types[ext]};}
 export async function sha256Hex(data){return [...new Uint8Array(await crypto.subtle.digest('SHA-256',data))].map(x=>x.toString(16).padStart(2,'0')).join('');}
 async function prepareJobRows(env,sid,{source,parts,filename,mime,fileKey,firstId,warnings=[],progress='',sha256=null}){
@@ -108,19 +121,33 @@ export async function processJob(jobId,env){
  }catch(e){const message=['TimeoutError','AbortError'].includes(e.name)?'Gemini phản hồi quá lâu. Tiến độ đã được lưu; bấm Tiếp tục dịch để thử lại phần hiện tại.':e.message;await env.DB.prepare("UPDATE jobs SET status='failed',error=? WHERE id=?").bind(message,jobId).run();}
  finally{await env.DB.prepare('UPDATE jobs SET lease_until=0 WHERE id=?').bind(jobId).run();}
 }
+// Every API answer passes here: health first (no login, no body), then the origin and size checks that hold for all
+// routes, then the routes. Whatever a route throws becomes a JSON error; internal ones are logged with the request's ray.
 export default {async fetch(request,env,ctx){
- const url=new URL(request.url),path=url.pathname,method=request.method;
+ const url=new URL(request.url),path=url.pathname;
  if(!path.startsWith('/api/'))return env.ASSETS.fetch(request);
+ let body;
  try{
-  const admin=await isAdmin(request,env);
+  const health=await healthRoute(request,env,path);if(health)return withSecurityHeaders(health);
+  if(crossOrigin(request,url))return withSecurityHeaders(originRefused());
+  body=limitBody(request,path);if(body instanceof Response)return withSecurityHeaders(body);
+  return withSecurityHeaders(await route(body.request,env,ctx,url,path));
+ }catch(error){return withSecurityHeaders(errorResponse(error,{request,url,path,body}));}
+}};
+async function route(request,env,ctx,url,path){
+  const method=request.method,admin=await isAdmin(request,env,url);
   const authResponse=await authRoute(request,env,url,path);if(authResponse)return authResponse;
+  const accountResponse=await accountRoute(request,env,url,path);if(accountResponse)return accountResponse;
   const studyResponse=await studyRoute(request,env,url,path);if(studyResponse)return studyResponse;
   if(path==='/api/status'){
-   if(!admin)return json({authenticated:false});
+   if(!admin)return json({authenticated:false,...(env.ADMIN_TOKEN&&!adminTokenUsable(env,url)?{adminTokenTooShort:true}:{})});
    const keyStatus=await geminiKeyStatus(env);
-   return json({aiConfigured:keyStatus.configured,apiKeySource:keyStatus.source,apiKeyUpdatedAt:keyStatus.updatedAt,adminConfigured:!!env.ADMIN_TOKEN,authenticated:true,model:env.GEMINI_MODEL||'gemini-2.5-flash',pdfModel:studyModelConfig(env).pdf,runtimeVersion:studyModelConfig(env).runtimeVersion});
+   // samples: this server keeps sample books (tools/samples asks); pages: migration 0015 is applied, so parts can carry
+   // the original pages they translate. sampleFeatures: an excerpt original keeps the book's page numbers
+   // (X-Book-Pages), and a book's cover can be removed (DELETE /api/stories/:id/cover).
+   return json({aiConfigured:keyStatus.configured,apiKeySource:keyStatus.source,apiKeyUpdatedAt:keyStatus.updatedAt,adminConfigured:!!env.ADMIN_TOKEN,authenticated:true,model:env.GEMINI_MODEL||'gemini-2.5-flash',pdfModel:studyModelConfig(env).pdf,runtimeVersion:studyModelConfig(env).runtimeVersion,samples:{pages:await bookPagesReady(env)},sampleFeatures:{bookPages:true,clearCover:true}});
   }
-  if(path==='/api/library'&&method==='GET'){const placeholders=GENRES.map(()=>'?').join(',');return json((await env.DB.prepare(`SELECT s.id,s.title,s.author,s.genre,s.cover_key,s.source_url,COUNT(c.id) AS chapters,(SELECT status FROM jobs j WHERE j.story_id=s.id ORDER BY j.created_at DESC LIMIT 1) AS translation_status FROM stories s LEFT JOIN chapters c ON c.story_id=s.id WHERE s.visibility='public' AND s.genre IN (${placeholders}) GROUP BY s.id ORDER BY s.created_at DESC`).bind(...GENRES).all()).results);}
+  if(path==='/api/library'&&method==='GET')return json(await libraryRows(env,GENRES));
   if(path==='/api/my/requests'&&method==='GET'){const reader=await currentReader(request,env);if(!reader)return json({error:'Hãy đăng nhập Google để xem yêu cầu của bạn.'},401);return json((await env.DB.prepare('SELECT id,title,source_url,notes,status,visibility,filename,story_id,created_at FROM requests WHERE user_id=? ORDER BY created_at DESC').bind(reader.id).all()).results);}
   if(path==='/api/my/library'&&method==='GET'){const reader=await currentReader(request,env);if(!reader)return json({error:'Hãy đăng nhập để xem thư viện cá nhân.'},401);return json((await env.DB.prepare('SELECT s.id,s.title,s.author,s.genre,s.cover_key,s.source_url,s.visibility,COUNT(c.id) AS chapters,(SELECT status FROM jobs j WHERE j.story_id=s.id ORDER BY j.created_at DESC LIMIT 1) AS translation_status FROM stories s LEFT JOIN chapters c ON c.story_id=s.id WHERE s.owner_user_id=? GROUP BY s.id ORDER BY s.created_at DESC').bind(reader.id).all()).results);}
   const glossaryMatch=path.match(/^\/api\/glossary\/([^/]+)$/);
@@ -128,13 +155,15 @@ export default {async fetch(request,env,ctx){
    if(!await canReadStory(request,env,glossaryMatch[1],admin))return json({error:'Không tìm thấy tài liệu hoặc bạn không có quyền đọc.'},404);
    return json({terms:readerTerms(await env.DB.prepare('SELECT genre,glossary FROM stories WHERE id=?').bind(glossaryMatch[1]).first())});
   }
-  if(path.startsWith('/api/read/')&&method==='GET'){const sid=path.split('/').pop();if(!await canReadStory(request,env,sid,admin))return json({error:'Không tìm thấy tài liệu hoặc bạn không có quyền đọc.'},404);const chapters=(await env.DB.prepare('SELECT id,title,content,mime,text_key,source_url FROM chapters WHERE story_id=? ORDER BY CASE WHEN position IS NULL THEN 1 ELSE 0 END,position,created_at,id').bind(sid).all()).results;for(const chapter of chapters){chapter.content=cleanReaderText(await fullText(env,chapter.text_key,chapter.content));delete chapter.text_key;}return json(chapters);}
+  // Each part also says whether the book is a sample and which pages of its original it translates.
+  if(path.startsWith('/api/read/')&&method==='GET'){const sid=path.split('/').pop(),story=await canReadStory(request,env,sid,admin);if(!story)return json({error:'Không tìm thấy tài liệu hoặc bạn không có quyền đọc.'},404);const chapters=await readChapters(env,sid),sample=isSampleBook(story)?1:0;for(const chapter of chapters){chapter.content=cleanReaderText(await fullText(env,chapter.text_key,chapter.content));delete chapter.text_key;chapter.sample=sample;}return json(chapters);}
   const publicFile=path.match(/^\/api\/chapter-file\/([^/]+)$/);
   if(publicFile&&method==='GET'){
    const chapter=await env.DB.prepare('SELECT c.file_key,c.story_id,c.title FROM chapters c WHERE c.id=?').bind(publicFile[1]).first();
    if(!chapter||!await canReadStory(request,env,chapter.story_id,admin))return json({error:'Không tìm thấy tài liệu hoặc bạn không có quyền đọc.'},404);
-   const file=chapter?.file_key?await env.FILES.get(chapter.file_key):null;if(!file)return json({error:'Không tìm thấy tài liệu đã đăng.'},404);
-   return new Response(file.body,{headers:{'Content-Type':'application/pdf','Content-Disposition':fileDisposition(`${chapter.title||'Bản dịch Hoa Trí'}.vi.pdf`),'Cache-Control':'no-store','X-Content-Type-Options':'nosniff'}});
+   if(!chapter.file_key)return json({error:'Không tìm thấy tài liệu đã đăng.'},404);
+   // By byte ranges, like the originals: "Đọc song ngữ" fetches only the pages it shows of a long part too.
+   return rangedPdfResponse(request,env,chapter.file_key,'Không tìm thấy tài liệu đã đăng.',{disposition:fileDisposition(`${chapter.title||'Bản dịch Hoa Trí'}.vi.pdf`)});
   }
   const coverMatch=path.match(/^\/api\/covers\/([^/]+)$/);
   if(coverMatch&&method==='GET'){
@@ -144,21 +173,28 @@ export default {async fetch(request,env,ctx){
    if(!cover)return json({error:'Chưa có ảnh bìa.'},404);
    return new Response(cover.body,{headers:{'Content-Type':cover.httpMetadata.contentType,'Cache-Control':'no-cache','X-Content-Type-Options':'nosniff'}});
   }
+  const libraryResponse=await libraryPublicRoute(request,env,path,admin);if(libraryResponse)return libraryResponse;
   if(path==='/api/requests'&&method==='POST'){
    const reader=await currentReader(request,env);if(!reader)return json({error:'Hãy đăng nhập trước khi gửi yêu cầu dịch tài liệu.'},401);
+   const fast=await rateLimit(env,[{binding:'HEAVY_LIMITER',key:`upload:${reader.id}`}]);if(fast)return fast;
    const form=await request.formData(),title=required(form.get('title')),notes=String(form.get('notes')||'').slice(0,2000),source=String(form.get('source_url')||'').trim().slice(0,1000),visibility=form.get('visibility')==='public'?'public':'private',file=form.get('file');
    if(source&&!/^https?:\/\//i.test(source))return json({error:'Liên kết phải bắt đầu bằng http:// hoặc https://'},400);
    const hasFile=file&&typeof file!=='string'&&file.size>0;if(!hasFile&&!source)return json({error:'Hãy tải lên một tệp hoặc nhập liên kết nguyên tác.'},400);
-   const rid=id();let key=null,filename=null,mime=null;if(hasFile){if(file.size>25*1024*1024)throw new Error('Tệp yêu cầu tối đa 25 MB.');const type=validRequestFile(file);if(!type.mime)throw new Error('Chỉ hỗ trợ PDF, EPUB, AZW3, DOCX, TXT, JPG, PNG hoặc WebP.');key=`requests/${rid}/original`;filename=String(file.name).slice(0,240);mime=type.mime;await env.FILES.put(key,await file.arrayBuffer(),{httpMetadata:{contentType:mime}});}
+   const type=hasFile?validRequestFile(file):null;if(hasFile){if(file.size>25*1024*1024)throw new Error('Tệp yêu cầu tối đa 25 MB.');if(!type.mime)throw new Error('Chỉ hỗ trợ PDF, EPUB, AZW3, DOCX, TXT, JPG, PNG hoặc WebP.');}
+   // Counted once the request is valid, so a rejected form never uses up the day's requests.
+   const daily=await rateLimit(env,[{daily:`upload:${reader.id}`,max:dailyMax(env,'DAILY_REQUESTS_PER_USER',20),label:'gửi yêu cầu dịch'}]);if(daily)return daily;
+   const rid=id();let key=null,filename=null,mime=null;if(hasFile){key=`requests/${rid}/original`;filename=String(file.name).slice(0,240);mime=type.mime;await env.FILES.put(key,await file.arrayBuffer(),{httpMetadata:{contentType:mime}});}
    try{await env.DB.prepare('INSERT INTO requests(id,title,source_url,notes,user_id,visibility,file_key,filename,mime) VALUES(?,?,?,?,?,?,?,?,?)').bind(rid,title,source,notes,reader.id,visibility,key,filename,mime).run();}catch(e){if(key)await env.FILES.delete(key);throw e;}return json({ok:true,id:rid},201);
   }
   if(!admin)return json({error:'Hãy mở Cài đặt và nhập mã quản trị để tiếp tục.'},401);
+  const userResponse=await adminAccountRoute(request,env,path);if(userResponse)return userResponse;
   if(path==='/api/settings/gemini-models'&&method==='GET'){const scoped=await withRuntimeGeminiKey(env);return json({models:await listStudyModels(scoped.GEMINI_API_KEY)});}
   if(path==='/api/settings/gemini-key'&&method==='PUT')return json(await saveGeminiApiKey(env,(await request.json()).apiKey));
   if(path==='/api/settings/gemini-key'&&method==='DELETE')return json(await clearGeminiApiKey(env));
   const contentResponse=await adminContent(request,env,path);if(contentResponse)return contentResponse;
+  const sourcesResponse=await libraryAdminRoute(request,env,path);if(sourcesResponse)return sourcesResponse;
   if(path==='/api/stories'&&method==='GET')return json((await env.DB.prepare('SELECT s.*,u.name AS owner_name,u.email AS owner_email,COUNT(c.id) AS chapters FROM stories s LEFT JOIN reader_users u ON u.id=s.owner_user_id LEFT JOIN chapters c ON c.story_id=s.id GROUP BY s.id ORDER BY s.created_at DESC').all()).results);
-  if(path==='/api/users'&&method==='GET')return json((await env.DB.prepare(`SELECT u.id,u.email,u.name,u.picture,u.created_at,u.updated_at,
+  if(path==='/api/users'&&method==='GET')return json((await env.DB.prepare(`SELECT u.id,u.email,u.name,u.picture,u.created_at,u.updated_at,u.disabled_at,u.terms_version,u.terms_accepted_at,
    (SELECT COUNT(*) FROM requests r WHERE r.user_id=u.id) AS requests,
    (SELECT COUNT(*) FROM requests r WHERE r.user_id=u.id AND r.status='pending') AS pending_requests,
    (SELECT COUNT(*) FROM stories s WHERE s.owner_user_id=u.id) AS books,
@@ -171,19 +207,38 @@ export default {async fetch(request,env,ctx){
    const multipart=request.headers.get('Content-Type')?.includes('multipart/form-data');
    const form=multipart?await request.formData():null,b=form?Object.fromEntries(form):await request.json(),sid=id();
    const title=required(b.title),genre=required(b.genre),visibility=b.visibility==='private'?'private':'public',owner=typeof b.owner_user_id==='string'&&b.owner_user_id?b.owner_user_id:null;if(!GENRES.includes(genre))throw new Error('Lĩnh vực không hợp lệ.');
+   // A sample (tools/samples) is keyed by its slug: one book per slug, kept by the library, never by a student.
+   const author=cleanAuthor(b.author),sample=b.sample===undefined||b.sample===null||b.sample===''?null:b.sample;
+   if(sample!==null&&!validSlug(sample))throw new Error('Mã ví dụ mẫu chỉ gồm chữ thường a-z, số và dấu gạch ngang (2–64 ký tự).');
+   if(sample&&owner)throw new Error('Ví dụ mẫu thuộc kho Hoa Trí, không gắn với tài khoản người học.');
+   const taken=async()=>sample?await env.DB.prepare('SELECT id FROM stories WHERE source_url=?').bind(SAMPLE_PREFIX+sample).first():null;
+   const existing=await taken();if(existing)return json({error:`Đã có ví dụ mẫu “${sample}”.`,id:existing.id},409);
    const cover=b.cover?.size?await saveCover(b.cover,sid,env):null;
-   try{await env.DB.prepare('INSERT INTO stories(id,title,genre,cover_key,owner_user_id,visibility) VALUES(?,?,?,?,?,?)').bind(sid,title,genre,cover,owner,visibility).run();}
-   catch(e){if(cover)await env.FILES.delete(cover);throw e;}
+   try{await env.DB.prepare('INSERT INTO stories(id,title,genre,cover_key,owner_user_id,visibility,author,source_url) VALUES(?,?,?,?,?,?,?,?)').bind(sid,title,genre,cover,owner,visibility,author||UNKNOWN_AUTHOR,sample?SAMPLE_PREFIX+sample:null).run();}
+   catch(e){if(cover)await env.FILES.delete(cover);const raced=/UNIQUE/iu.test(String(e?.message||''))&&await taken();if(raced)return json({error:`Đã có ví dụ mẫu “${sample}”.`,id:raced.id},409);throw e;}
    return json({id:sid},201);
   }
   const storyCover=path.match(/^\/api\/stories\/([^/]+)\/cover$/);
   if(storyCover&&method==='POST'){
    const sid=storyCover[1],story=await env.DB.prepare('SELECT cover_key FROM stories WHERE id=?').bind(sid).first();
    if(!story)return json({error:'Không tìm thấy tài liệu.'},404);
-   const form=await request.formData(),key=await saveCover(form.get('cover'),sid,env);
-   try{await env.DB.prepare('UPDATE stories SET cover_key=? WHERE id=?').bind(key,sid).run();}
+   // page and sha256 (optional): the image is that page of a stored original, which stays the original page in the book.
+   const form=await request.formData(),page=String(form.get('page')||''),sha256=String(form.get('sha256')||'').toLowerCase();
+   if(page&&!/^[1-9]\d{0,5}$/u.test(page)||sha256&&!/^[a-f\d]{64}$/u.test(sha256))throw new Error('Trang bìa hoặc mã tệp không hợp lệ.');
+   const key=await saveCover(form.get('cover'),sid,env);
+   try{await env.DB.prepare('UPDATE stories SET cover_key=?,cover_page=?,cover_source_sha256=? WHERE id=?').bind(key,page?Number(page):null,page&&sha256||null,sid).run();}
    catch(e){await env.FILES.delete(key);throw e;}
+   if(story.cover_key?.startsWith('covers/')&&story.cover_key!==key)await removeFile(env,story.cover_key);
    return json({ok:true,cover_key:key});
+  }
+  // A book without a cover any more (a sample replaced by one whose sample.json says "cover": "none"): the image goes,
+  // with the page of the original it was taken from.
+  if(storyCover&&method==='DELETE'){
+   const sid=storyCover[1],story=await env.DB.prepare('SELECT cover_key FROM stories WHERE id=?').bind(sid).first();
+   if(!story)return json({error:'Không tìm thấy tài liệu.'},404);
+   await env.DB.prepare('UPDATE stories SET cover_key=NULL,cover_page=NULL,cover_source_sha256=NULL WHERE id=?').bind(sid).run();
+   if(story.cover_key?.startsWith('covers/'))await removeFile(env,story.cover_key);
+   return json({ok:true,cover_key:null});
   }
   if(/^\/api\/stories\/[^/]+$/.test(path)&&method==='PATCH'){const b=await request.json();
    if('title' in b){
@@ -197,6 +252,17 @@ export default {async fetch(request,env,ctx){
     const sid=path.split('/').pop();
     if(!await env.DB.prepare('SELECT id FROM stories WHERE id=?').bind(sid).first())return json({error:'Không tìm thấy tài liệu.'},404);
     await env.DB.prepare('UPDATE stories SET genre=? WHERE id=?').bind(b.genre,sid).run();return json({ok:true});
+   }
+   // Publish or hide a library book (no owner); a sample needs a part before it goes public.
+   if('visibility' in b){
+    if(!['public','private'].includes(b.visibility))throw new Error('Chế độ hiển thị phải là public hoặc private.');
+    const sid=path.split('/').pop(),updated=await env.DB.prepare(`UPDATE stories SET visibility=? WHERE id=? AND owner_user_id IS NULL AND ${NOT_STUDY_BOOK} AND (?='private' OR COALESCE(source_url,'') NOT LIKE '${SAMPLE_PREFIX}%' OR EXISTS (SELECT 1 FROM chapters WHERE story_id=stories.id))`).bind(b.visibility,sid,b.visibility).run();
+    if(!updated.meta?.changes){const story=await env.DB.prepare(`SELECT id FROM stories WHERE id=? AND owner_user_id IS NULL AND ${NOT_STUDY_BOOK}`).bind(sid).first();return story?json({error:'Ví dụ mẫu chưa có phần nào.'},409):json({error:'Chỉ đổi được chế độ hiển thị của sách trong kho Hoa Trí.'},404);}
+    return json({ok:true,visibility:b.visibility});
+   }
+   if('author' in b){
+    const author=cleanAuthor(b.author)||UNKNOWN_AUTHOR,updated=await env.DB.prepare(`UPDATE stories SET author=? WHERE id=? AND ${NOT_STUDY_BOOK}`).bind(author,path.split('/').pop()).run();
+    return updated.meta?.changes?json({ok:true,author}):json({error:'Không tìm thấy tài liệu trong kho Hoa Trí.'},404);
    }
    if(!b.glossary||typeof b.glossary!=='object'||Array.isArray(b.glossary)||Object.entries(b.glossary).some(([k,v])=>k.length>100||typeof v!=='string'||v.length>100))throw new Error('Bảng tên phải là các cặp tên Trung–Việt.');await env.DB.prepare('UPDATE stories SET glossary=? WHERE id=?').bind(JSON.stringify(b.glossary),path.split('/').pop()).run();return json({ok:true});}
   if(path==='/api/jobs'&&method==='GET')return json((await env.DB.prepare('SELECT j.*,s.title AS story_title,s.genre FROM jobs j JOIN stories s ON s.id=j.story_id ORDER BY j.created_at DESC').all()).results);
@@ -277,5 +343,4 @@ export default {async fetch(request,env,ctx){
   const requestFile=path.match(/^\/api\/requests\/([^/]+)\/file$/);if(requestFile&&method==='GET'){const item=await env.DB.prepare('SELECT file_key,filename,mime FROM requests WHERE id=?').bind(requestFile[1]).first(),file=item?.file_key?await env.FILES.get(item.file_key):null;if(!file)return json({error:'Yêu cầu này không có tệp nguồn.'},404);return new Response(file.body,{headers:{'Content-Type':item.mime||'application/octet-stream','Content-Disposition':"attachment; filename*=UTF-8''"+encodeURIComponent(item.filename||'nguyen-tac'),'X-Content-Type-Options':'nosniff'}});}
   if(/^\/api\/requests\/[^/]+$/.test(path)&&method==='PATCH'){const b=await request.json();if(!['accepted','done','pending'].includes(b.status))throw new Error('Trạng thái không hợp lệ.');const storyId=typeof b.story_id==='string'&&b.story_id?b.story_id:null;await env.DB.prepare('UPDATE requests SET status=?,story_id=COALESCE(?,story_id) WHERE id=?').bind(b.status,storyId,path.split('/').pop()).run();return json({ok:true});}
   return json({error:'Không tìm thấy chức năng.'},404);
- }catch(e){return json({error:e.message||'Không thể xử lý. Vui lòng thử lại.'},400);}
-}};
+}

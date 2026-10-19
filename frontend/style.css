@@ -225,3 +225,123 @@ h1,h2,h3,.serif{font-family:var(--font-ui);letter-spacing:normal}
 .reader.night .book-pick .book-pick-errors{color:#f0a89b}
 .reader.night .book-download-notes{color:#d9c08f}
 .reader.night .book-cover-offer{border-color:#46514d;background:#273029;color:#e1e6dd}
+
+/* Account: terms consent (also gates the Google button), registration policy, account deletion. */
+.auth-forms .terms-check{display:flex;gap:9px;align-items:flex-start;font-size:13px;line-height:1.5;color:#3f443d}
+.auth-forms .terms-check input{width:auto;margin:3px 0 0;flex:none}
+.auth-forms .terms-check a{color:inherit;text-decoration:underline;text-underline-offset:2px}
+.auth-forms .google-terms-check{margin-top:18px}
+.auth-forms .terms-check[hidden]{display:none}
+.google-terms{display:block;margin-top:10px;color:#5f645b;font-size:12px;line-height:1.6;text-align:center}
+.auth-forms .google-login[aria-disabled="true"]{opacity:.55;cursor:not-allowed;box-shadow:none}
+.auth-form label small{display:block;margin-top:6px;color:#5f645b;font-size:12px;line-height:1.5}
+.auth-form-title{margin:0 0 4px;font-size:20px}
+.auth-note{margin:4px 0 0;padding:10px 12px;border-radius:10px;background:#f6f1e4;color:#5c4f2c;font-size:13px;line-height:1.6}
+.account-delete{max-width:760px;padding:22px 24px;border:1px solid #e7c8c0;border-radius:14px;background:rgba(255,248,245,.94)}
+.account-delete h2{color:#8f3b2e}
+.account-delete p{margin:10px 0 0;color:#57504b;font-size:13px;line-height:1.7}
+.account-delete-links a{color:#8f3b2e;text-decoration:underline;text-underline-offset:2px}
+.account-delete .danger{min-height:44px;margin-top:16px}
+.modal-field{display:block;margin-top:16px}
+.modal-error{margin:16px 0 0;padding:10px 12px;border-radius:8px;background:#fbe9e5;color:#8f2f24;font-size:13px;line-height:1.6}
+.modal-error[hidden]{display:none}
+.primary.danger-solid{background:#a03c32;border-color:#a03c32;color:#fff}
+.primary.danger-solid:not(:disabled):hover{background:#86302a;border-color:#86302a}
+.user-badges .user-locked{background:#f8e5e3;color:#9c382f}
+.user-admin-row{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:10px 16px;padding:12px 24px;border-bottom:1px solid #eceee6;background:#fdfdf9}
+.user-admin-row small{color:#5f645b;font-size:12px;line-height:1.6}
+.user-actions{display:flex;flex-wrap:wrap;gap:8px}
+.user-actions button{min-height:40px;padding:8px 12px;font-size:12px}
+.story-flags{display:flex;flex-wrap:wrap;gap:6px;margin:0 0 10px}
+.story-flags span{padding:4px 9px;border-radius:20px;font-size:12px;font-weight:700}
+.story-flags .sample-flag{background:#f6e4dc;color:#8a3b2e}
+.story-flags .draft-flag{background:#eeeeea;color:#55594f}
+/* The reader toolbar gained the 字 group: on a phone its groups wrap instead of pushing past the screen edge. */
+@media(max-width:680px){.reader-options{flex-wrap:wrap;row-gap:8px}}
+@media(max-width:430px){.reader-toolbar .reader-icon{width:36px}.reader-control-group{gap:4px}}
+/* A closed footnote tooltip still widened the page on a phone (an absolute box past the right edge); it is drawn only when open. */
+.footnote-ref:not(:hover):not(:focus-visible):not(.is-open)::after{display:none}
+/* The music button stays fixed at the bottom left; the footer leaves room so its last lines can scroll above it. */
+.public-shell>.site-footer{padding-bottom:96px}
+.noscript-note{max-width:640px;margin:40px auto;padding:16px 20px;border-radius:12px;background:#fffef8;color:#2f352c;font-size:15px;line-height:1.7}
+.noscript-note a{color:#8f3b2e;text-decoration:underline}
+
+/* "Ví dụ mẫu": sample books translated by AI to show the result, never reviewed by a teacher. */
+.sample-badge{position:absolute;top:10px;left:10px;z-index:2;max-width:calc(100% - 20px);padding:4px 9px;border-radius:6px;background:#8a3b2e;color:#fbf3e4;font-size:11px;font-weight:700;line-height:1.4;letter-spacing:.06em;text-transform:uppercase;box-shadow:0 2px 8px #0000004d;pointer-events:none}
+.book-reveal .sample-card-pages{color:#f0e2bd}
+.book-reveal .sample-card-note{color:#f3dfc9;font-style:italic}
+.sample-intro{max-width:600px;margin:14px auto 0;padding:10px 14px;border:1px dashed #c9b38a;border-radius:10px;background:#fffaf0;color:#5c4b2e;font-size:13px;line-height:1.6}
+.sample-notice{margin:18px 0 0;padding:12px 16px;border:1px solid #e3cfa9;border-left:4px solid #8a3b2e;border-radius:10px;background:#fff8ea;color:#4d4130;font-size:14px;line-height:1.7}
+.sample-notice a{color:#8a3b2e;text-decoration:underline;text-underline-offset:2px}
+.reader.night .sample-notice{border-color:#5b4a37;border-left-color:#d58f7c;background:#2b2a24;color:#e7ddc8}
+.reader.night .sample-notice a{color:#f0b3a3}
+
+/* "Đọc song ngữ": the original page and its Vietnamese page side by side, stacked on narrow screens. */
+.reader-pdf-tools{display:flex;flex-wrap:wrap;align-items:center;gap:6px 14px;margin-top:16px}
+.reader-pdf-tools:empty{display:none}
+.bilingual-toggle{display:inline-flex;align-items:center;gap:8px;min-height:44px;font-weight:600}
+.bilingual-toggle svg{width:18px;height:18px}
+.bilingual-toggle[aria-pressed="true"]{border-color:#536b43;background:#edf3e5;color:#2f4426;box-shadow:inset 0 0 0 1px #536b43}
+.bilingual-toggle-hint{color:#5f6758;font-size:13px}
+.bilingual-original-link{display:inline-flex;align-items:center;min-height:44px;color:#8f3b2e;font-size:13px;text-decoration:underline;text-underline-offset:2px}
+.bilingual{display:grid;gap:10px;margin-top:16px}
+.bilingual-bar{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:10px}
+.bilingual-nav,.bilingual-zoom{display:flex;flex-wrap:wrap;align-items:center;gap:8px}
+.bilingual button{min-width:44px;min-height:44px;padding:8px 12px;border-radius:10px;background:#fffdf8;font-size:13px}
+.bilingual-position{min-width:92px;text-align:center;color:#4b5744;font-size:13px;font-weight:600;font-variant-numeric:tabular-nums}
+.bilingual-zoom output{min-width:48px;text-align:center;color:#4b5744;font-size:13px;font-variant-numeric:tabular-nums}
+.bilingual-hint{margin:0;color:#5f6758;font-size:12px}
+.bilingual-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px;align-items:start}
+.bilingual-side{min-width:0;margin:0}
+.bilingual-side figcaption{margin:0 0 6px;color:#4b5744;font-size:12px;font-weight:700;letter-spacing:.04em}
+.bilingual-scroll{max-width:100%;overflow:auto;border-radius:8px;background:#e9e8de}
+.bilingual-scroll:focus-visible{outline:2px solid #536b43;outline-offset:2px}
+.bilingual-sheet{min-height:120px}
+.bilingual-page{position:relative;margin:0 auto;background:#fff;box-shadow:0 1px 4px #2a35211f;--user-unit:1;--total-scale-factor:calc(var(--scale-factor) * var(--user-unit));--scale-round-x:1px;--scale-round-y:1px}
+.bilingual-page>canvas{position:absolute;inset:0;width:100%;height:100%}
+.bilingual-empty{margin:0;padding:40px 16px;text-align:center;color:#5f6758;font-size:13px;line-height:1.6}
+.bilingual-status{margin:0;color:#5f6758;font-size:13px;line-height:1.6}
+.bilingual-status button{min-height:36px;margin-left:6px}
+.bilingual-nav-end{justify-content:center}
+/* pdf.js text layer (from pdf_viewer.css): transparent text over the page picture, for selection and screen readers. */
+.bilingual .textLayer{position:absolute;inset:0;z-index:0;overflow:clip;opacity:1;line-height:1;text-align:initial;letter-spacing:normal;word-spacing:normal;-webkit-text-size-adjust:none;text-size-adjust:none;forced-color-adjust:none;transform-origin:0 0;caret-color:CanvasText;--min-font-size:1;--text-scale-factor:calc(var(--total-scale-factor) * var(--min-font-size));--min-font-size-inv:calc(1 / var(--min-font-size))}
+.bilingual .textLayer :is(span,br){position:absolute;color:transparent;white-space:pre;cursor:text;transform-origin:0% 0%}
+.bilingual .textLayer>:not(.markedContent),.bilingual .textLayer .markedContent span:not(.markedContent){z-index:1;--font-height:0;font-size:calc(var(--text-scale-factor) * var(--font-height));--scale-x:1;--rotate:0deg;transform:rotate(var(--rotate)) scaleX(var(--scale-x)) scale(var(--min-font-size-inv))}
+.bilingual .textLayer .markedContent{display:contents}
+.bilingual .textLayer span[role="img"]{user-select:none;cursor:default}
+.bilingual .textLayer ::selection{background:rgba(0,90,255,.25);color:transparent}
+.bilingual .textLayer br::selection{background:transparent}
+.bilingual .textLayer .endOfContent{position:absolute;inset:100% 0 0;z-index:0;display:block;cursor:default;user-select:none}
+.bilingual .textLayer.selecting .endOfContent{top:0}
+.reader.night .bilingual button{border-color:#526059;background:#303a36;color:#edf0e9}
+.reader.night .bilingual-scroll{background:#1a201e}
+.reader.night :is(.bilingual-side figcaption,.bilingual-position,.bilingual-zoom output,.bilingual-hint,.bilingual-status,.bilingual-empty,.bilingual-toggle-hint){color:#c6cdc4}
+.reader.night .bilingual-toggle[aria-pressed="true"]{border-color:#a9c48f;background:#2e3d2c;color:#e3eedb}
+.reader.night .bilingual-original-link{color:#f0b3a3}
+@media(max-width:760px){.bilingual-grid{grid-template-columns:1fr}.bilingual-hint{display:none}.bilingual-bar{justify-content:center}}
+@media(max-width:480px){.bilingual-label{display:none}.bilingual-nav,.bilingual-zoom{justify-content:center}}
+
+/* Legal pages (dieu-khoan.html, quyen-rieng-tu.html): one readable column on the site background. */
+.legal-body{display:flex;flex-direction:column;min-height:100vh;min-height:100dvh}
+.skip-link{position:absolute;top:-80px;left:12px;z-index:60;padding:10px 14px;border-radius:8px;background:#35472f;color:#fff}
+.skip-link:focus{top:12px}
+.legal-page{flex:1 0 auto;width:min(calc(100% - 24px),860px);margin:40px auto 48px;padding:40px 48px;border:1px solid #dedecb;border-radius:18px;background:#fffef8;box-shadow:0 15px 55px #273c2520}
+.legal-article{color:#2f352c;font-size:15px;line-height:1.75;overflow-wrap:anywhere}
+.legal-article h1{margin:4px 0 6px;font:600 34px/1.3 var(--font-reading);color:#283028;letter-spacing:normal}
+.legal-meta{margin:0 0 22px;color:#5b6354;font-size:13px}
+.legal-summary{margin:0 0 24px;padding:16px 20px;border:1px solid #dfe3d4;border-left:4px solid #536b43;border-radius:12px;background:#f5f8ef}
+.legal-article .legal-summary>p:first-child{margin:0}
+.legal-summary ul{margin:6px 0 0;padding-left:20px}
+.legal-toc{margin:0 0 28px;padding:16px 20px;border:1px solid #e4e4dc;border-radius:12px;background:#fbfbf6}
+.legal-toc ol{margin:0;padding-left:22px;columns:2 240px}
+.legal-toc li{break-inside:avoid}
+.legal-toc a{display:inline-block;padding:4px 0;color:#3f5a34;text-decoration:underline;text-underline-offset:2px}
+.legal-article section{margin-top:32px;scroll-margin-top:120px}
+.legal-article h2{margin:0 0 10px;font:600 22px/1.4 var(--font-ui);color:#30402b}
+.legal-article h3{margin:18px 0 6px;font-size:16px;color:#3a4a33}
+.legal-article p{margin:10px 0 0}
+.legal-article ul{margin:8px 0 0;padding-left:22px}
+.legal-article li+li{margin-top:6px}
+.legal-article a{color:#8f3b2e;text-decoration:underline;text-underline-offset:2px}
+.legal-article code{padding:1px 5px;border-radius:5px;background:#f0efe6;font-size:.88em}
+@media(max-width:680px){.legal-page{width:calc(100% - 20px);margin:16px auto 28px;padding:24px 18px;border-radius:14px}.legal-article h1{font-size:28px}.legal-article h2{font-size:19px}}

@@ -1,9 +1,13 @@
 # Local settings for `wrangler dev`. `npm run setup` copies this file to .dev.vars (git-ignored) and fills in
 # ADMIN_TOKEN and PDF_LAYOUT_SERVICE_TOKEN with random values. Never commit .dev.vars.
 # Keep plain KEY=value lines: no `export`, no comment after a value.
+# Non-secret defaults (model names, REGISTRATION_MODE) live in "vars" of wrangler.jsonc and apply to production too;
+# a line here overrides one only on this machine. The secrets below exist only here locally; production gets them with
+# `wrangler secret put` or `npm run deploy -- --secrets-file <file outside the repo>`, never from this file.
 
 # Optional server key, used only by the admin book pipeline (/admin). Students paste their own key in /study.html.
 GEMINI_API_KEY=
+# Same as the wrangler.jsonc default; local scripts (backend/check-gemini-runtime.mjs) read it from here.
 GEMINI_MODEL=gemini-3.6-flash
 # Optional: model for repairing a verified missing footnote/year marker and for the student "Đối chiếu kỹ" mode; empty = defaults.
 GEMINI_QUALITY_MODEL=

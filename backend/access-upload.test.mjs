@@ -8,10 +8,13 @@ import {preparePdf,getPdfManifest,assembleBook} from './pdf-pipeline.js';
 import {PROMPT_VERSION,recognizeDocument,generate} from './ai.js';
 import {renderMathText,mathStyles} from '../frontend/math-text.js';
 import {termMatcher,highlightTerms,bindTermPopover} from '../frontend/reader-terms.js';
+import {footerHtml} from '../frontend/site-footer.js';
+import {isSample,sampleBadge,sampleCardNote,sampleIntro,sampleReaderNotice,SAMPLE_LABEL} from '../frontend/library-samples.js';
+import {bilingualSource} from '../frontend/bilingual-reader.js';
 
 test('Readers cannot access management APIs or private configuration',async()=>{
- const env={ADMIN_TOKEN:'test-admin',GEMINI_API_KEY:'private-key',DB:{prepare(){throw new Error('Private database accessed');}}};
- for(const [path,method] of [['/stories','GET'],['/stories','POST'],['/users','GET'],['/user-library','GET'],['/jobs','GET'],['/jobs','POST'],['/jobs/test/run','POST'],['/jobs/test/publish','POST'],['/jobs/test/file','GET'],['/requests','GET'],['/requests/test','PATCH'],['/stories/test','PATCH'],['/settings/gemini-key','PUT'],['/settings/gemini-key','DELETE']]){
+ const env={ADMIN_TOKEN:'test-admin-token-0123456789abcdef',GEMINI_API_KEY:'private-key',DB:{prepare(){throw new Error('Private database accessed');}}};
+ for(const [path,method] of [['/stories','GET'],['/stories','POST'],['/users','GET'],['/user-library','GET'],['/jobs','GET'],['/jobs','POST'],['/jobs/test/run','POST'],['/jobs/test/publish','POST'],['/jobs/test/file','GET'],['/requests','GET'],['/requests/test','PATCH'],['/stories/test','PATCH'],['/stories/test/cover','POST'],['/stories/test/cover','DELETE'],['/settings/gemini-key','PUT'],['/settings/gemini-key','DELETE']]){
   const response=await worker.fetch(new Request('https://test/api'+path,{method}),env,{});
   assert.equal(response.status,401,`${method} ${path}`);
  }
@@ -28,10 +31,10 @@ test('Public library and reading remain available; requests require Google login
 
 test('Upload accepts exactly 25 MB and rejects larger files before storage',async()=>{
  let stored=0;
- const env={ADMIN_TOKEN:'test-admin',DB:{prepare(){return {bind(){return this;},async first(){return {id:'story'};},async run(){return {};}};}},FILES:{async put(key,data){stored=data.byteLength;}}};
+ const env={ADMIN_TOKEN:'test-admin-token-0123456789abcdef',DB:{prepare(){return {bind(){return this;},async first(){return {id:'story'};},async run(){return {};}};}},FILES:{async put(key,data){stored=data.byteLength;}}};
  for(const [size,status] of [[25*1024*1024,201],[25*1024*1024+1,400],[0,400]]){
   stored=0;const form=new FormData();form.set('story_id','story');form.set('file',new File([new Uint8Array(size)],'test.pdf',{type:'application/pdf'}));
-  const request=new Request('https://test/api/jobs',{method:'POST',headers:{Authorization:'Bearer test-admin'},body:form});
+  const request=new Request('https://test/api/jobs',{method:'POST',headers:{Authorization:'Bearer test-admin-token-0123456789abcdef'},body:form});
   const response=await worker.fetch(request,env,{});assert.equal(response.status,status);assert.equal(stored,status===201?size:0);
  }
 });
@@ -43,7 +46,7 @@ test('Reader and admin layouts stay separated, including direct hashes and logou
  assert.doesNotMatch(runJobSource,/\/publish/,'Hoàn tất dịch không được tự động công bố');
  assert.doesNotMatch(source,/import-website|data-ai-cover|generateAiCover|\/web-import|\/generate-cover/);
  function browser(pathname,hash=''){
-  const app={innerHTML:''};const context=vm.createContext({musicMarkup:()=>'',bindMusic(){},renderMathText,mathStyles,termMatcher,highlightTerms,bindTermPopover,hideTermPopover:()=>{},location:{pathname,hash},document:{querySelector:s=>s==='#app'?app:s==='#modal'?{close(){}}:null,querySelectorAll:()=>[]},localStorage:{getItem:()=>null},window:{addEventListener(){}},fetch:async()=>({ok:true,json:async()=>pathname.startsWith('/admin')?{authenticated:false}:[]}),setTimeout,clearTimeout,clearInterval,FormData,console});
+  const app={innerHTML:''};const context=vm.createContext({musicMarkup:()=>'',bindMusic(){},renderMathText,mathStyles,termMatcher,highlightTerms,bindTermPopover,hideTermPopover:()=>{},attachHanziLookup(){},openHanziPanel(){},closeHanziPanel(){},setHanziTheme(){},footerHtml,isSample,sampleBadge,sampleCardNote,sampleIntro,sampleReaderNotice,SAMPLE_LABEL,bilingualSource,mountBilingual(){return {destroy(){}};},releaseBilingual(){},location:{pathname,hash},document:{querySelector:s=>s==='#app'?app:s==='#modal'?{close(){}}:null,querySelectorAll:()=>[]},localStorage:{getItem:()=>null},window:{addEventListener(){}},fetch:async()=>({ok:true,json:async()=>pathname.startsWith('/admin')?{authenticated:false}:[]}),setTimeout,clearTimeout,clearInterval,FormData,console});
   vm.runInContext(source,context);return {app,context};
  }
  for(const hash of ['','#translate','#requests','#users','#settings','#review']){
@@ -59,9 +62,9 @@ test('Reader and admin layouts stay separated, including direct hashes and logou
 });
 
 test('Removed fiction import and AI cover APIs are unavailable',async()=>{
- const env={ADMIN_TOKEN:'test-admin',DB:{prepare(){throw new Error('Removed route accessed the database');}}};
+ const env={ADMIN_TOKEN:'test-admin-token-0123456789abcdef',DB:{prepare(){throw new Error('Removed route accessed the database');}}};
  for(const path of ['/web-import','/web-import/preview','/stories/document/generate-cover']){
-  const response=await worker.fetch(new Request('https://test/api'+path,{method:'POST',headers:{Authorization:'Bearer test-admin','Content-Type':'application/json'},body:'{}'}),env,{});
+  const response=await worker.fetch(new Request('https://test/api'+path,{method:'POST',headers:{Authorization:'Bearer test-admin-token-0123456789abcdef','Content-Type':'application/json'},body:'{}'}),env,{});
   assert.equal(response.status,404,path);
  }
 });
@@ -83,9 +86,9 @@ test('Large OCR streams to Files API, uses file reference, then cleans up',async
 
 test('Covers are saved as images, readable publicly, and editable only by admin',async()=>{
  const objects=new Map();let coverKey=null;
- const env={ADMIN_TOKEN:'test-admin',DB:{prepare(sql){return {bind(...args){this.args=args;return this;},async first(){return {cover_key:coverKey};},async run(){if(sql.startsWith('UPDATE stories SET cover_key'))coverKey=this.args[0];return {};}};}},FILES:{async put(key,data,options){objects.set(key,{data,httpMetadata:options.httpMetadata});},async get(key){const f=objects.get(key);return f?{body:f.data,httpMetadata:f.httpMetadata}:null;}}};
+ const env={ADMIN_TOKEN:'test-admin-token-0123456789abcdef',DB:{prepare(sql){return {bind(...args){this.args=args;return this;},async first(){return {cover_key:coverKey};},async run(){if(sql.startsWith('UPDATE stories SET cover_key'))coverKey=this.args[0];return {};}};}},FILES:{async put(key,data,options){objects.set(key,{data,httpMetadata:options.httpMetadata});},async get(key){const f=objects.get(key);return f?{body:f.data,httpMetadata:f.httpMetadata}:null;}}};
  const png=Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aD1sAAAAASUVORK5CYII=','base64');
- async function upload(bytes,authenticated=true){const form=new FormData();form.set('cover',new File([bytes],'cover.png',{type:'image/png'}));return worker.fetch(new Request('https://test/api/stories/story/cover',{method:'POST',headers:authenticated?{Authorization:'Bearer test-admin'}:{},body:form}),env,{});}
+ async function upload(bytes,authenticated=true){const form=new FormData();form.set('cover',new File([bytes],'cover.png',{type:'image/png'}));return worker.fetch(new Request('https://test/api/stories/story/cover',{method:'POST',headers:authenticated?{Authorization:'Bearer test-admin-token-0123456789abcdef'}:{},body:form}),env,{});}
  assert.equal((await upload(png,false)).status,401);assert.equal(objects.size,0);
  assert.equal((await upload(png)).status,200);assert.ok(coverKey);
  const cover=await worker.fetch(new Request('https://test/api/covers/story'),env,{});assert.equal(cover.status,200);assert.equal(cover.headers.get('Content-Type'),'image/png');assert.deepEqual(Buffer.from(await cover.arrayBuffer()),png);
@@ -96,8 +99,8 @@ test('Covers are saved as images, readable publicly, and editable only by admin'
 
 test('Admin can update academic field; invalid values do not change the document',async()=>{
  let genre='Chuyên khảo · Nghiên cứu';
- const env={ADMIN_TOKEN:'test-admin',DB:{prepare(sql){return {bind(...args){this.args=args;return this;},async first(){return {id:'story'};},async run(){if(sql.startsWith('UPDATE stories SET genre'))genre=this.args[0];return {};}};}}};
- async function update(value){return worker.fetch(new Request('https://test/api/stories/story',{method:'PATCH',headers:{Authorization:'Bearer test-admin','Content-Type':'application/json'},body:JSON.stringify({genre:value})}),env,{});}
+ const env={ADMIN_TOKEN:'test-admin-token-0123456789abcdef',DB:{prepare(sql){return {bind(...args){this.args=args;return this;},async first(){return {id:'story'};},async run(){if(sql.startsWith('UPDATE stories SET genre'))genre=this.args[0];return {};}};}}};
+ async function update(value){return worker.fetch(new Request('https://test/api/stories/story',{method:'PATCH',headers:{Authorization:'Bearer test-admin-token-0123456789abcdef','Content-Type':'application/json'},body:JSON.stringify({genre:value})}),env,{});}
  assert.equal((await update('Lịch sử Trung Hoa')).status,200);assert.equal(genre,'Lịch sử Trung Hoa');
  assert.equal((await update('invalid')).status,400);assert.equal(genre,'Lịch sử Trung Hoa');
 });
@@ -113,8 +116,8 @@ test('Accepting a reader request creates its story and translation job directly 
 
 test('Admin can rename a story and invalid names are rejected',async()=>{
  let title='Tên cũ';
- const env={ADMIN_TOKEN:'test-admin',DB:{prepare(sql){return {bind(...args){this.args=args;return this;},async first(){return sql.startsWith('SELECT id FROM stories')?{id:'story'}:null;},async run(){if(sql.startsWith('UPDATE stories SET title'))title=this.args[0];return {};}};}}};
- async function rename(value){return worker.fetch(new Request('https://test/api/stories/story',{method:'PATCH',headers:{Authorization:'Bearer test-admin','Content-Type':'application/json'},body:JSON.stringify({title:value})}),env,{});}
+ const env={ADMIN_TOKEN:'test-admin-token-0123456789abcdef',DB:{prepare(sql){return {bind(...args){this.args=args;return this;},async first(){return sql.startsWith('SELECT id FROM stories')?{id:'story'}:null;},async run(){if(sql.startsWith('UPDATE stories SET title'))title=this.args[0];return {};}};}}};
+ async function rename(value){return worker.fetch(new Request('https://test/api/stories/story',{method:'PATCH',headers:{Authorization:'Bearer test-admin-token-0123456789abcdef','Content-Type':'application/json'},body:JSON.stringify({title:value})}),env,{});}
  const response=await rename('  Tên tài liệu mới  ');assert.equal(response.status,200);assert.equal(title,'Tên tài liệu mới');
  assert.equal((await rename('   ')).status,400);assert.equal(title,'Tên tài liệu mới');
 });
@@ -165,39 +168,39 @@ test('Book assembly requires every source segment and preserves translation orde
 });
 
 test('A partial book cannot be downloaded as a completed volume',async()=>{
- const env={ADMIN_TOKEN:'test-admin',DB:{prepare(){return {bind(){return this;},async first(){return {id:'job',status:'translating',translation:'Chưa đủ'};}};}}};
- const response=await worker.fetch(new Request('https://test/api/jobs/job/book',{headers:{Authorization:'Bearer test-admin'}}),env,{});assert.equal(response.status,409);
+ const env={ADMIN_TOKEN:'test-admin-token-0123456789abcdef',DB:{prepare(){return {bind(){return this;},async first(){return {id:'job',status:'translating',translation:'Chưa đủ'};}};}}};
+ const response=await worker.fetch(new Request('https://test/api/jobs/job/book',{headers:{Authorization:'Bearer test-admin-token-0123456789abcdef'}}),env,{});assert.equal(response.status,409);
  const denied=await worker.fetch(new Request('https://test/api/jobs/job/book'),env,{});assert.equal(denied.status,401);
 });
 
 test('Readers cannot upload or delete library content',async()=>{
  for(const [path,method] of [['/api/import-preview','POST'],['/api/stories/story/chapters','POST'],['/api/stories/story/chapters','GET'],['/api/stories/story','DELETE'],['/api/jobs/job','DELETE'],['/api/chapters/chapter','DELETE'],['/api/requests/request','DELETE']]){
-  const response=await worker.fetch(new Request('https://test'+path,{method}),{ADMIN_TOKEN:'test-admin'},{});assert.equal(response.status,401,path);
+  const response=await worker.fetch(new Request('https://test'+path,{method}),{ADMIN_TOKEN:'test-admin-token-0123456789abcdef'},{});assert.equal(response.status,401,path);
  }
 });
 
 test('Direct publishing requires confirmation and preserves plain text without interpreting HTML',async()=>{
- const stored=[];const env={ADMIN_TOKEN:'test-admin',DB:{prepare(sql){return {bind(...values){this.values=values;return this;},async first(){return {id:'story'};},async run(){stored.push(this.values);return {};}};}}};
- async function upload(confirmed){const form=new FormData();form.set('title','Chương thử');form.set('file',new File(['Xin chào <script>alert(1)</script>'],'story.txt'));if(confirmed)form.set('confirmed','true');return worker.fetch(new Request('https://test/api/stories/story/chapters',{method:'POST',headers:{Authorization:'Bearer test-admin'},body:form}),env,{});}
+ const stored=[];const env={ADMIN_TOKEN:'test-admin-token-0123456789abcdef',DB:{prepare(sql){return {bind(...values){this.values=values;return this;},async first(){return {id:'story'};},async run(){stored.push(this.values);return {};}};}}};
+ async function upload(confirmed){const form=new FormData();form.set('title','Chương thử');form.set('file',new File(['Xin chào <script>alert(1)</script>'],'story.txt'));if(confirmed)form.set('confirmed','true');return worker.fetch(new Request('https://test/api/stories/story/chapters',{method:'POST',headers:{Authorization:'Bearer test-admin-token-0123456789abcdef'},body:form}),env,{});}
  assert.equal((await upload(false)).status,400);assert.equal(stored.length,0);
  assert.equal((await upload(true)).status,201);assert.equal(stored[0][3],'Xin chào <script>alert(1)</script>');
 });
 
 test('Deletion refuses a currently leased job without deleting its files',async()=>{
- let removed=false;const env={ADMIN_TOKEN:'test-admin',DB:{prepare(){return {bind(){return this;},async first(){return {id:'job',file_key:'original',lease_until:Date.now()+60000};},async all(){return {results:[]};}};},async batch(){return [{meta:{changes:0}},{meta:{changes:0}}];}},FILES:{async delete(){removed=true;}}};
- const response=await worker.fetch(new Request('https://test/api/jobs/job',{method:'DELETE',headers:{Authorization:'Bearer test-admin'}}),env,{});assert.equal(response.status,409);assert.equal(removed,false);
+ let removed=false;const env={ADMIN_TOKEN:'test-admin-token-0123456789abcdef',DB:{prepare(){return {bind(){return this;},async first(){return {id:'job',file_key:'original',lease_until:Date.now()+60000};},async all(){return {results:[]};}};},async batch(){return [{meta:{changes:0}},{meta:{changes:0}}];}},FILES:{async delete(){removed=true;}}};
+ const response=await worker.fetch(new Request('https://test/api/jobs/job',{method:'DELETE',headers:{Authorization:'Bearer test-admin-token-0123456789abcdef'}}),env,{});assert.equal(response.status,409);assert.equal(removed,false);
 });
 
 
 test('Long TXT passes upload, translates all chunks, and retains full content outside D1',async t=>{
  const source='今天是新的一天。'.repeat(10000),objects=new Map();let job;
- const env={ADMIN_TOKEN:'test-admin',GEMINI_API_KEY:'test',DB:{prepare(sql){return {bind(...args){this.args=args;return this;},async first(){return sql.includes('FROM jobs')?job:{id:'story',context:'',genre:'Khác',glossary:'{}'};},async run(){
+ const env={ADMIN_TOKEN:'test-admin-token-0123456789abcdef',GEMINI_API_KEY:'test',DB:{prepare(sql){return {bind(...args){this.args=args;return this;},async first(){return sql.includes('FROM jobs')?job:{id:'story',context:'',genre:'Khác',glossary:'{}'};},async run(){
   if(sql.startsWith('INSERT INTO jobs')){const [id,story_id,filename,file_key,mime,source,source_key]=this.args;job={id,story_id,filename,file_key,mime,source,source_key};}
   if(sql.startsWith('UPDATE jobs SET source=')){assert.ok(this.args[0].length<=20000);assert.ok(this.args[1].length<=20000);Object.assign(job,{source:this.args[0],translation:this.args[1],source_key:this.args[2],translation_key:this.args[3],status:this.args[5],prompt_tokens:this.args[7],output_tokens:this.args[8],total_tokens:this.args[9],ai_requests:this.args[10],ai_cache_hits:this.args[11],model:this.args[12],prompt_version:this.args[13]});}
   if(sql.includes("status='failed'"))throw new Error(this.args[0]);return {};
  }};}},FILES:{async put(key,value){objects.set(key,value);},async get(key){const value=objects.get(key);return value===undefined?null:{text:async()=>value,json:async()=>JSON.parse(value)};}}};
  const form=new FormData();form.set('story_id','story');form.set('file',new File([source],'long.txt'));
- const response=await worker.fetch(new Request('https://test/api/jobs',{method:'POST',headers:{Authorization:'Bearer test-admin'},body:form}),env,{});assert.equal(response.status,201);assert.equal(objects.get(job.source_key),source);
+ const response=await worker.fetch(new Request('https://test/api/jobs',{method:'POST',headers:{Authorization:'Bearer test-admin-token-0123456789abcdef'},body:form}),env,{});assert.equal(response.status,201);assert.equal(objects.get(job.source_key),source);
  let translatedSource='';t.mock.method(globalThis,'fetch',async(url,options)=>{const request=JSON.parse(options.body);translatedSource+=JSON.parse(request.contents[0].parts[0].text).source;return Response.json({usageMetadata:{promptTokenCount:120,candidatesTokenCount:80,totalTokenCount:200},candidates:[{finishReason:'STOP',content:{parts:[{text:JSON.stringify({translation:'Bản dịch '.repeat(800),contextUpdate:'Context',glossaryUpdates:{}})}]}}]});});
  for(let n=0;n<100&&job.status!=='review';n++)await processJob(job.id,env);
  assert.equal(job.status,'review');assert.equal(translatedSource,source);assert.ok(objects.get(job.translation_key).length>20000);assert.equal(objects.get(`books/${job.id}.txt`),objects.get(job.translation_key));
@@ -206,13 +209,13 @@ test('Long TXT passes upload, translates all chunks, and retains full content ou
 
 test('Admin book pipeline repairs a dropped citation marker before marking review, same as the study workspace',async t=>{
  const source='原文[12]。',objects=new Map();let job;
- const env={ADMIN_TOKEN:'test-admin',GEMINI_API_KEY:'test',DB:{prepare(sql){return {bind(...args){this.args=args;return this;},async first(){return sql.includes('FROM jobs')?job:{id:'story',context:'',genre:'Khác',glossary:'{}'};},async run(){
+ const env={ADMIN_TOKEN:'test-admin-token-0123456789abcdef',GEMINI_API_KEY:'test',DB:{prepare(sql){return {bind(...args){this.args=args;return this;},async first(){return sql.includes('FROM jobs')?job:{id:'story',context:'',genre:'Khác',glossary:'{}'};},async run(){
   if(sql.startsWith('INSERT INTO jobs')){const [id,story_id,filename,file_key,mime,source,source_key]=this.args;job={id,story_id,filename,file_key,mime,source,source_key,warnings:'[]'};}
   if(sql.startsWith('UPDATE jobs SET source=')){Object.assign(job,{source:this.args[0],translation:this.args[1],source_key:this.args[2],translation_key:this.args[3],warnings:this.args[4],status:this.args[5]});}
   if(sql.includes("status='failed'"))throw new Error(this.args[0]);return {};
  }};}},FILES:{async put(key,value){objects.set(key,value);},async get(key){const value=objects.get(key);return value===undefined?null:{text:async()=>value,json:async()=>JSON.parse(value)};}}};
  const form=new FormData();form.set('story_id','story');form.set('file',new File([source],'short.txt'));
- const response=await worker.fetch(new Request('https://test/api/jobs',{method:'POST',headers:{Authorization:`Bearer test-admin`},body:form}),env,{});assert.equal(response.status,201);
+ const response=await worker.fetch(new Request('https://test/api/jobs',{method:'POST',headers:{Authorization:`Bearer test-admin-token-0123456789abcdef`},body:form}),env,{});assert.equal(response.status,201);
  let calls=0;t.mock.method(globalThis,'fetch',async()=>{calls++;const translation=calls===1?'Bản dịch thiếu dẫn chứng.':'Bản dịch có dẫn chứng [12].';return Response.json({usageMetadata:{promptTokenCount:10,candidatesTokenCount:8,totalTokenCount:18},candidates:[{finishReason:'STOP',content:{parts:[{text:JSON.stringify({translation,contextUpdate:'',glossaryUpdates:{}})}]}}]});});
  for(let n=0;n<10&&job.status!=='review';n++)await processJob(job.id,env);
  assert.equal(calls,2);assert.equal(job.status,'review');assert.match(job.translation,/\[12\]/);assert.deepEqual(JSON.parse(job.warnings),[]);
@@ -220,13 +223,13 @@ test('Admin book pipeline repairs a dropped citation marker before marking revie
 
 test('A configured GEMINI_QUALITY_MODEL is used only for the repair retry, never for routine translation',async t=>{
  const source='原文[12]。',objects=new Map();let job;
- const env={ADMIN_TOKEN:'test-admin',GEMINI_API_KEY:'test',GEMINI_MODEL:'gemini-2.5-flash',GEMINI_QUALITY_MODEL:'gemini-3.0-pro',DB:{prepare(sql){return {bind(...args){this.args=args;return this;},async first(){return sql.includes('FROM jobs')?job:{id:'story',context:'',genre:'Khác',glossary:'{}'};},async run(){
+ const env={ADMIN_TOKEN:'test-admin-token-0123456789abcdef',GEMINI_API_KEY:'test',GEMINI_MODEL:'gemini-2.5-flash',GEMINI_QUALITY_MODEL:'gemini-3.0-pro',DB:{prepare(sql){return {bind(...args){this.args=args;return this;},async first(){return sql.includes('FROM jobs')?job:{id:'story',context:'',genre:'Khác',glossary:'{}'};},async run(){
   if(sql.startsWith('INSERT INTO jobs')){const [id,story_id,filename,file_key,mime,source,source_key]=this.args;job={id,story_id,filename,file_key,mime,source,source_key,warnings:'[]'};}
   if(sql.startsWith('UPDATE jobs SET source=')){Object.assign(job,{source:this.args[0],translation:this.args[1],source_key:this.args[2],translation_key:this.args[3],warnings:this.args[4],status:this.args[5]});}
   if(sql.includes("status='failed'"))throw new Error(this.args[0]);return {};
  }};}},FILES:{async put(key,value){objects.set(key,value);},async get(key){const value=objects.get(key);return value===undefined?null:{text:async()=>value,json:async()=>JSON.parse(value)};}}};
  const form=new FormData();form.set('story_id','story');form.set('file',new File([source],'short.txt'));
- const response=await worker.fetch(new Request('https://test/api/jobs',{method:'POST',headers:{Authorization:`Bearer test-admin`},body:form}),env,{});assert.equal(response.status,201);
+ const response=await worker.fetch(new Request('https://test/api/jobs',{method:'POST',headers:{Authorization:`Bearer test-admin-token-0123456789abcdef`},body:form}),env,{});assert.equal(response.status,201);
  const models=[];t.mock.method(globalThis,'fetch',async(endpoint)=>{models.push(endpoint);const translation=models.length===1?'Bản dịch thiếu dẫn chứng.':'Bản dịch có dẫn chứng [12].';return Response.json({usageMetadata:{promptTokenCount:10,candidatesTokenCount:8,totalTokenCount:18},candidates:[{finishReason:'STOP',content:{parts:[{text:JSON.stringify({translation,contextUpdate:'',glossaryUpdates:{}})}]}}]});});
  for(let n=0;n<10&&job.status!=='review';n++)await processJob(job.id,env);
  assert.equal(models.length,2);assert.match(models[0],/gemini-2\.5-flash/);assert.match(models[1],/gemini-3\.0-pro/);assert.equal(job.status,'review');assert.match(job.translation,/\[12\]/);

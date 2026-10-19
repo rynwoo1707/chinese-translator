@@ -13,6 +13,8 @@ class Statement{
  bind(...args){this.args=args;return this;}
  async first(){
   if(this.sql.includes('FROM study_sessions WHERE id=? AND user_id=?')){const row=this.db.sessions.get(this.args[0]);return row?.user_id===this.args[1]?row:null;}
+  // The account a save belongs to still exists (a save checks this after writing its files).
+  if(/FROM reader_users\b/u.test(this.sql))return {id:this.args[0],active:1};
   if(this.sql.includes('AS parts FROM stories s WHERE s.id=? AND s.owner_user_id=?')){const story=this.db.stories.get(this.args[0]);return story?.owner_user_id===this.args[1]?{title:story.title,parts:[...this.db.chapters.values()].filter(row=>row.story_id===story.id).length}:null;}
   return null;
  }
@@ -29,9 +31,9 @@ class MemoryDB{
  apply({sql,args}){
   const query=sql.trim();
   if(query.startsWith('INSERT INTO study_sessions')){
-   const [id,user_id,title,filename,domain,mode,status,state_key,source_preview,translation_preview,translated_parts,total_parts,source_characters,translation_characters,storyId,library_chapter_id,page_start,page_end,source_total_pages,source_sha256]=args,previous=this.sessions.get(id),now=new Date().toISOString();
+   const [id,user_id,title,filename,domain,subject,mode,status,state_key,source_preview,translation_preview,translated_parts,total_parts,source_characters,translation_characters,storyId,library_chapter_id,page_start,page_end,source_total_pages,source_sha256]=args,previous=this.sessions.get(id),now=new Date().toISOString();
    const library_story_id=previous?.library_chapter_id&&previous.library_chapter_id===library_chapter_id?previous.library_story_id:storyId;
-   this.sessions.set(id,{id,user_id,title,filename,domain,mode,status,state_key,source_preview,translation_preview,translated_parts,total_parts,source_characters,translation_characters,library_story_id,library_chapter_id,page_start,page_end,source_total_pages,source_sha256,created_at:previous?.created_at||now,updated_at:now});return;
+   this.sessions.set(id,{id,user_id,title,filename,domain,subject,mode,status,state_key,source_preview,translation_preview,translated_parts,total_parts,source_characters,translation_characters,library_story_id,library_chapter_id,page_start,page_end,source_total_pages,source_sha256,created_at:previous?.created_at||now,updated_at:now});return;
   }
   if(query.startsWith('INSERT INTO stories')){const [id,title,author,genre,source_url,owner_user_id,glossary]=args;this.stories.set(id,{id,title,author,genre,source_url,owner_user_id,visibility:'private',glossary});return;}
   if(query.startsWith('INSERT INTO chapters')){const [id,story_id,title,content,text_key,mime,position]=args;this.chapters.set(id,{id,story_id,title,content,text_key,mime,position});return;}

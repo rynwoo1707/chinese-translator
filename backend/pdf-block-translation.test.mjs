@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {translatePdfBlocks} from './pdf-block-translation.js';
 import {studyRoute} from './study-translation.js';
+import {errorResponse} from './http.js';
 
 const env={GEMINI_API_KEY:'student-key-long-enough',GEMINI_MODEL:'gemini-2.5-flash',GEMINI_THINKING:'minimal'};
 const blocks=[{id:'p4-b0',source:'定义向量。'},{id:'p4-b1',source:'两个向量相同。'}];
@@ -95,6 +96,26 @@ test('Block translation asks for single punctuation and the source line structur
 test('Block translation refuses missing years or citations',async t=>{
  t.mock.method(globalThis,'fetch',async()=>gemini(result([{id:'p1-b0',translation:'Nghiên cứu được ghi chép.'}])));
  await assert.rejects(()=>translatePdfBlocks(env,{blocks:[{id:'p1-b0',source:'2024年研究记载[12]。'}]}),/thiếu số hoặc dẫn chứng/);
+});
+
+test('A refused answer still reports every billed call: a number dropped twice, a wrong ID, a retry that fails',async t=>{
+ const usage=calls=>({prompt:20*calls,output:10*calls,thinking:0,total:30*calls,requests:calls,cacheHits:0}),source=[{id:'p3-b1',source:'今年是2026年。'}];
+ let calls=0,answers=[];t.mock.method(globalThis,'fetch',async()=>{const answer=answers[Math.min(calls,answers.length-1)];calls++;return typeof answer==='function'?answer():gemini(answer);});
+ const refused=async(body={blocks:source})=>{try{await translatePdfBlocks(env,body);}catch(error){return error;}assert.fail('expected a refusal');};
+ // The year is dropped by the first answer and by the retry of that block: both answers were billed.
+ answers=[result([{id:'p3-b1',translation:'Năm nay là năm tốt.'}])];let error=await refused();
+ assert.equal(calls,2);assert.match(error.message,/thiếu số hoặc dẫn chứng: 2026/u);assert.deepEqual(error.usage,usage(2));
+ assert.deepEqual((await errorResponse(error).json()).usage,usage(2),'the browser receives what was spent');
+ // A wrong or repeated ID fails the first answer at once.
+ for(const blocks of [[{id:'p3-b9',translation:'Năm 2026.'}],[{id:'p3-b1',translation:'Năm 2026.'},{id:'p3-b1',translation:'Năm 2026.'}]]){calls=0;answers=[result(blocks)];error=await refused();assert.equal(calls,1);assert.deepEqual(error.usage,usage(1));}
+ // The retry comes back with a wrong ID, or is blocked: the block's own problem is reported with both calls.
+ calls=0;answers=[result([{id:'p3-b1',translation:'Năm nay.'}]),result([{id:'p3-b7',translation:'x'}])];error=await refused();
+ assert.equal(calls,2);assert.match(error.message,/2026/u);assert.deepEqual(error.usage,usage(2));
+ calls=0;answers=[result([{id:'p3-b1',translation:'Năm nay.'}]),()=>Response.json({candidates:[{finishReason:'SAFETY',content:{parts:[]}}],usageMetadata:{promptTokenCount:20,candidatesTokenCount:10,totalTokenCount:30}})];
+ error=await refused();assert.equal(calls,2);assert.equal(error.finishReason,'SAFETY');assert.deepEqual(error.usage,usage(2));
+ // An accepted retry reports both calls with the translation, as before.
+ calls=0;answers=[result([{id:'p3-b1',translation:'Năm nay.'}]),result([{id:'p3-b1',translation:'Năm 2026.'}])];
+ assert.deepEqual((await translatePdfBlocks(env,{blocks:source})).usage,usage(2));
 });
 
 test('Block translation composes Vietnamese Unicode and repairs detached tones',async t=>{

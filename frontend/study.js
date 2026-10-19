@@ -9,6 +9,8 @@ import {extractPageFigures} from './document-figures.js';
 import {blockBatches,ocrImageBatches,validateBlockTranslations} from './pdf-box-layout.js';
 import {PdfDualViewer} from './pdf-dual-viewer.js';
 import {excludeCover,detectCoverInFile,pageJpeg} from './cover-detect.js';
+import {attachHanziLookup,openHanziPanel,lookupTextarea,hasHan} from './hanzi-lookup.js';
+import * as wholeBook from './whole-book.js';
 const $=selector=>document.querySelector(selector);
 const readingStyle=document.createElement('style');readingStyle.textContent=readingStyles;document.head.append(readingStyle);
 let sessionKey='',selectedFile=null,pdfAnalysis=null,running=false,starting=false,stopRequested=false;
@@ -17,7 +19,8 @@ let preparedPages=new Map(),pageImages=new Map(),translationState=null,preparedR
 let ocrWarnings=[];
 let selectionVersion=0;
 let selectionTask=Promise.resolve();
-let historyItems=[],activeHistoryId='',activeHistoryMeta={},historySave=Promise.resolve(),historyWarningShown=false;
+// historyIdToCreate: the id a whole-book chunk's first save asks for, so that save sent again creates nothing new.
+let historyItems=[],activeHistoryId='',historyIdToCreate='',activeHistoryMeta={},historySave=Promise.resolve(),historyWarningShown=false;
 let pdfLayoutDocument=null,pdfLayoutRange='',pdfExportUrl='',layoutConfig={configured:false};
 // A finished range becomes one part of a private book. bookTarget survives resetHistoryIdentity(), so a new range or a
 // refreshed copy of the same file keeps going into the book the student chose.
@@ -26,6 +29,17 @@ let studyBooks=[],bookTarget={id:'',replaceChapterId:''},bookChoiceTouched=false
 // cover image. page 0 = no cover; source = who decided it: the detector, the book (remembered for this file) or the student.
 let cover={page:0,detected:0,detectedJpeg:null,jpeg:null,url:'',source:'',replace:false,synced:'',task:0,note:'',detecting:false},autoRange='';
 let modelCatalogFingerprint='',modelCatalogPurpose='',checkedModelMode='';
+// "Dịch cả quyển" (whole-book.js): the job in the panel, every job of the account (the history groups their parts), the
+// original pdf-lib cuts chunks from, the page kinds read on the device, the run in progress and the chunk session it owns.
+// bookPagesEdited: the student changed the page field for the bound job; bookBusy: another device runs it, so the
+// button offers to wait for that run (Chờ rồi dịch tiếp).
+let bookMode=false,bookJob=null,bookJobs=[],bookSource=null,bookSurvey=null,bookRun=null,bookWorking=null,bookChunkId='',bookContext='',bookStatusText='',bookNotes=[],bookHashTask=null,coverTask=Promise.resolve(),lastSavedHistory=null,bookPagesEdited=false,bookBusy=false;
+const wake=wholeBook.createWakeLock();
+// One run id per browser: after a reload this browser goes on with its own run at once, while another device waits until
+// that run stops reporting. Tokens not yet reported are kept here too. Without localStorage both last as long as the page.
+const browserStorage=(()=>{try{const storage=globalThis.localStorage;storage.getItem('hoa-tri-runner');return storage;}catch{return null;}})();
+const bookRunner=(()=>{try{let id=browserStorage?.getItem('hoa-tri-runner');if(!/^[A-Za-z\d-]{8,64}$/u.test(id||'')){id=wholeBook.newId();browserStorage?.setItem('hoa-tri-runner',id);}return id;}catch{return wholeBook.newId();}})();
+const bookReports=wholeBook.reportStore(browserStorage);
 async function ensureStudyModel(purpose='text'){
  const apiKey=key(),digest=await crypto.subtle.digest('SHA-256',new TextEncoder().encode(apiKey)),fingerprint=Array.from(new Uint8Array(digest),n=>n.toString(16).padStart(2,'0')).join(''),mode=$('#mode').value;
  if(modelCatalogFingerprint===fingerprint&&modelCatalogPurpose===purpose&&checkedModelMode===mode&&$('#gemini-model').value)return $('#gemini-model').value;
@@ -38,6 +52,9 @@ async function ensureStudyModel(purpose='text'){
  $('#gemini-model-status').textContent=result.selected===result.requested?`Đang dùng ${result.selected}.`:`Model cấu hình ${result.requested} không khả dụng; đang dùng ${result.selected}.`;return result.selected;
 }
 const dualViewer=new PdfDualViewer($('#pdf-dual-viewer'));
+// Chinese source of a block, looked up in the offline dictionary (no Gemini, no /api).
+const OCR_NOTE='Đoạn này nhận dạng từ ảnh (OCR) và chưa được đọc lại; chữ có thể sai, hãy đối chiếu với trang gốc.';
+dualViewer.onSourceBlock=(block,page,region)=>openHanziPanel({text:block.text||block.source,title:`Nguyên tác · Trang ${page.number} · Đoạn ${page.blocks.indexOf(block)+1}`,note:page.ocr&&!block.ocrCorrected?OCR_NOTE:'',returnFocus:region});
 dualViewer.onEdit=async(id,translation)=>{
  if(running)return;busy(true);try{const blocks=pdfLayoutDocument.pages.flatMap(p=>p.blocks),index=blocks.findIndex(b=>b.id===id);validateBlockTranslations([blocks[index]],[{id,translation}]);translationParts[index]=translation.normalize('NFC');pdfExportUrl='';translationState.pdfLayout.exported=false;syncPdfText();await dualViewer.invalidatePdf();await dualViewer.update(pdfTranslations());if(!await saveHistory())throw new Error('Chưa lưu được đoạn đã sửa. Hãy thử lại.');$('#download-pdf').disabled=translationState.done!==blocks.length;status('Đã lưu đoạn sửa. Bấm Xuất PDF tiếng Việt để dàn trang lại.');}catch(error){fail(error);}finally{busy(false);}
 };
@@ -66,15 +83,20 @@ function workflow(step){document.querySelectorAll('.workflow li').forEach((item,
 async function api(path,options={}){
  const failed=(message,status,data=null)=>Object.assign(new Error(message),{status,data});
  const response=await fetch('/api/my/study/'+path,{credentials:'same-origin',...options}).catch(()=>{throw failed('Không kết nối được máy chủ. Hãy kiểm tra mạng rồi thử lại sau vài giây.',0);});
+ if(response.status===204)return {};
  const data=await response.json().catch(()=>null);
  if(response.status===401)throw failed('Phiên đăng nhập đã hết hạn. Hãy đăng nhập lại rồi mở lại Xưởng dịch.',401);
  // A page instead of JSON usually means the server is restarting or being updated, not that the request was wrong.
  if(!data||typeof data!=='object')throw failed(`Máy chủ trả về phản hồi không đọc được (mã ${response.status}). Có thể máy chủ đang khởi động lại hoặc cập nhật; hãy thử lại sau vài giây.`,response.status);
- if(!response.ok)throw failed(data.error||'Không thể xử lý yêu cầu.',response.status,data);
+ // A refused Gemini answer was still billed: the server sends what it spent, so the counters (and a book's total) count it.
+ // Retry-After lets a whole-book run wait out a limit by itself.
+ if(!response.ok){if(data.usage)addUsage(data.usage);throw Object.assign(failed(data.error||'Không thể xử lý yêu cầu.',response.status,data),{retryAfter:Number(response.headers.get('Retry-After'))||null});}
  return data;
 }
-function resetHistoryIdentity(){activeHistoryId='';activeHistoryMeta={};historyWarningShown=false;renderHistory();}
+function resetHistoryIdentity(){activeHistoryId='';historyIdToCreate='';activeHistoryMeta={};historyWarningShown=false;renderHistory();}
 function historyTitle(){
+ // Every chunk of a whole-book run is saved under the book's name, so the book labels its parts by their pages.
+ if(bookRun&&bookJob){const book=studyBooks.find(entry=>entry.id===bookJob.storyId);return book?.title||bookJob.title;}
  const entered=$('#content-title').value.trim().normalize('NFC');if(entered)return entered;
  if(activeHistoryMeta.title)return activeHistoryMeta.title;
  const filename=selectedFile?.name||activeHistoryMeta.filename||'';
@@ -91,7 +113,8 @@ function requireContentTitle(){
 }
 function downloadFilename(extension){return (historyTitle().replace(/[<>:"/\\|?*\u0000-\u001f\u007f]/gu,'-').replace(/[.\s]+$/u,'').slice(0,150)||'Hoa Trí')+`.vi.${extension}`;}
 function updateTitleControls(){
- const input=$('#content-title'),button=$('#save-title');button.hidden=!activeHistoryId;button.disabled=running||!input.value.trim()||input.value.trim().normalize('NFC')===activeHistoryMeta.title;
+ // A whole-book run keeps the name it started with; its book is renamed in Lịch sử dịch (Sắp xếp phần).
+ const input=$('#content-title'),button=$('#save-title');input.readOnly=Boolean(bookMode&&bookJob);button.hidden=!activeHistoryId||bookMode;button.disabled=running||!input.value.trim()||input.value.trim().normalize('NFC')===activeHistoryMeta.title;
 }
 async function renameHistory(){
  if(running||!activeHistoryId)return;const title=requireContentTitle();if(title===activeHistoryMeta.title)return;
@@ -121,8 +144,10 @@ function renderHistory(){
  updateTitleControls();
  const section=$('#study-history'),root=$('#study-history-list');if(!section||!root)return;
  section.hidden=false;root.replaceChildren();$('#study-history-count').textContent=historyItems.length?`· ${historyItems.length} bản đã lưu`:'· chưa có';
+ // The parts a whole-book run saved (one per chunk) are listed under that book, not one card each.
+ const grouped=new Set([...wholeBook.sessionsByJob(historyItems,bookJobs).values()].flat().map(item=>item.id));renderStudyBooks();
  if(!historyItems.length){const empty=document.createElement('p');empty.className='history-empty';empty.textContent='Chưa có bản dịch nào được lưu trong tài khoản này.';root.append(empty);return;}
- for(const item of historyItems){
+ for(const item of historyItems.filter(item=>!grouped.has(item.id))){
   const card=document.createElement('article'),open=document.createElement('button'),title=document.createElement('strong'),progress=document.createElement('span'),date=document.createElement('time');
   card.className='history-card'+(item.id===activeHistoryId?' is-active':'');open.type='button';open.className='history-card-main';open.dataset.historyOpen=item.id;open.disabled=running;
   title.textContent=item.title||'Bản dịch chưa đặt tên';title.title=title.textContent;open.append(title);
@@ -134,11 +159,11 @@ function renderHistory(){
   const actions=document.createElement('div');actions.className='history-actions';
   if(item.library_chapter_id||item.status==='complete'&&item.library_story_id){const link=document.createElement('a');link.className='history-library';link.href='/#account';link.textContent='Thư viện riêng';actions.append(link);}
   if(item.status==='complete'&&item.library_chapter_id&&studyBooks.some(entry=>entry.id!==item.library_story_id)){const merge=document.createElement('button');merge.type='button';merge.className='history-merge';merge.dataset.historyMerge=item.id;merge.disabled=running;merge.textContent='Gộp vào sách…';actions.append(merge);}
-  if(actions.children.length)card.append(actions);
-  root.append(card);
+  const remove=document.createElement('button');remove.type='button';remove.className='history-delete';remove.dataset.historyDelete=item.id;remove.disabled=running;remove.textContent='Xóa';remove.setAttribute('aria-label',`Xóa “${item.title||'Bản dịch chưa đặt tên'}”`);actions.append(remove);
+  card.append(actions);root.append(card);
  }
 }
-async function loadHistory(){const [rows,books]=await Promise.all([api('history'),api('books').catch(()=>studyBooks)]);historyItems=Array.isArray(rows)?rows:[];setStudyBooks(books);}
+async function loadHistory(){const [rows,books]=await Promise.all([api('history'),api('books').catch(()=>studyBooks),loadBookJobs()]);historyItems=Array.isArray(rows)?rows:[];setStudyBooks(books);}
 async function loadBooks(){setStudyBooks(await api('books'));}
 function setStudyBooks(rows){
  studyBooks=Array.isArray(rows)?rows:[];
@@ -202,7 +227,7 @@ async function prepareBookTarget(version,{suggest=false}={}){
  if(book){
   $('#book-target').value=book.id;delete $('#book-replace-option').dataset.part;
   const suggestion=suggestedRange([...book.parts.filter(part=>part.pageStart&&sameSource(part,source)),...coverSpans()],selectedTotalPages);
-  if(suggest&&suggestion&&$('#page-range').value===autoRange){autoRange=$('#page-range').value=rangeValue(suggestion);setFileStatus(`${selectedTotalPages} trang · sách “${book.title}” đã có các phần trước; đã chọn sẵn ${pageLabel(suggestion.start,suggestion.end)} để dịch tiếp.`);}
+  if(suggest&&suggestion&&$('#page-range').value===autoRange){autoRange=$('#page-range').value=rangeValue(suggestion);if(!bookMode)setFileStatus(`${selectedTotalPages} trang · sách “${book.title}” đã có các phần trước; đã chọn sẵn ${pageLabel(suggestion.start,suggestion.end)} để dịch tiếp.`);}
  }
  await applyBookCover(version);updateBookHint();renderCover();
 }
@@ -218,7 +243,8 @@ function translationRange(){
 function setCoverImage(blob){if(cover.url)URL.revokeObjectURL(cover.url);cover.jpeg=blob||null;cover.url=blob?URL.createObjectURL(blob):'';}
 function resetCover(){setCoverImage(null);cover={page:0,detected:0,detectedJpeg:null,jpeg:null,url:'',source:'',replace:false,synced:'',task:cover.task+1,note:'',detecting:false};$('#cover-translate').checked=false;renderCover();}
 function renderCover(){
- const root=$('#cover-choice');if(!root)return;root.hidden=!/\.pdf$/iu.test(selectedFile?.name||'');if(root.hidden)return;const detecting=cover.detecting&&!cover.page;
+ // A whole-book run keeps the cover it started with (its page state); the panel names it.
+ const root=$('#cover-choice');if(!root)return;root.hidden=!/\.pdf$/iu.test(selectedFile?.name||'')||Boolean(bookMode&&bookJob);if(root.hidden){renderBookPanel();return;}const detecting=cover.detecting&&!cover.page;
  const thumb=$('#cover-thumb');thumb.hidden=!(cover.page&&cover.url);if(!thumb.hidden){thumb.src=cover.url;thumb.alt=`Trang bìa · trang ${cover.page} của tệp`;}
  $('#cover-label').textContent=detecting?'Đang tìm trang bìa…':cover.page?`Bìa: trang ${cover.page}`:['student','book'].includes(cover.source)?'Không dùng bìa':'Không thấy trang bìa';
  $('#cover-change').textContent=cover.page?'Đổi':'Chọn trang bìa';$('#cover-change-group').hidden=detecting;$('#cover-none-group').hidden=detecting||!cover.page;$('#cover-translate-option').hidden=detecting||!cover.page;
@@ -226,8 +252,9 @@ function renderCover(){
  if(!cover.page)$('#cover-translate').checked=false;
  let note=cover.note;
  // A range holding only the cover is explained here at once; other range mistakes are reported on Bắt đầu dịch, as before.
- if(!note&&cover.page){try{const range=translationRange();note=range.excluded?`Trang bìa giữ nguyên ảnh gốc; chỉ dịch trang ${range.text}.`:$('#cover-translate').checked?'Chữ trên bìa sẽ được dịch cùng các trang khác.':'Trang bìa giữ nguyên ảnh gốc và là ảnh bìa sách trong Thư viện riêng.';}catch(error){if(/là bìa/u.test(error.message))note=error.message;}}
- $('#cover-note').textContent=note||'';
+ if(!note&&cover.page&&bookMode)note=$('#cover-translate').checked?'Chữ trên bìa sẽ được dịch cùng các trang khác.':'Trang bìa giữ nguyên ảnh gốc, không gọi Gemini, và là ảnh bìa sách trong Thư viện riêng.';
+ else if(!note&&cover.page){try{const range=translationRange();note=range.excluded?`Trang bìa giữ nguyên ảnh gốc; chỉ dịch trang ${range.text}.`:$('#cover-translate').checked?'Chữ trên bìa sẽ được dịch cùng các trang khác.':'Trang bìa giữ nguyên ảnh gốc và là ảnh bìa sách trong Thư viện riêng.';}catch(error){if(/là bìa/u.test(error.message))note=error.message;}}
+ $('#cover-note').textContent=note||'';renderBookPanel();
 }
 // Detection reads only page 1 (page 2 after a blank flyleaf) on this device; a failure just leaves the file without a cover.
 async function detectSelectedCover(file,version){
@@ -261,7 +288,8 @@ function refreshOfferedRange(){
  const book=$('#pdf-layout-enabled').checked?studyBooks.find(entry=>entry.id===$('#book-target').value):null,siblings=book?book.parts.filter(part=>part.pageStart&&sameSource(part,selectedSource())):[];
  const suggestion=siblings.length?suggestedRange([...siblings,...coverSpans()],selectedTotalPages):null,value=suggestion?rangeValue(suggestion):skipCover(autoRange);
  if(value===autoRange)return;autoRange=$('#page-range').value=value;updateBookHint();renderCover();
- const [start,end=start]=value.split('-').map(Number);setFileStatus(`${selectedTotalPages} trang · đã chọn sẵn ${pageLabel(start,end)}${coverExcluded()?`; trang ${cover.page} là bìa nên giữ nguyên ảnh gốc`:''}. Có thể sửa phạm vi rồi bấm Bắt đầu dịch.`);
+ // The offered range belongs to "Dịch theo phạm vi"; the whole-book panel says what it will do itself.
+ const [start,end=start]=value.split('-').map(Number);if(!bookMode)setFileStatus(`${selectedTotalPages} trang · đã chọn sẵn ${pageLabel(start,end)}${coverExcluded()?`; trang ${cover.page} là bìa nên giữ nguyên ảnh gốc`:''}. Có thể sửa phạm vi rồi bấm Bắt đầu dịch.`);
 }
 function openCoverDialog(){
  if(running||!selectedFile)return;const file=selectedFile,version=selectionVersion,total=selectedTotalPages,book=studyBooks.find(entry=>entry.id===$('#book-target').value);let preview=null,timer=0;
@@ -289,7 +317,8 @@ function coverChanged(){renderCover();refreshOfferedRange();updateBookHint();con
 // Runs after a save that put this range in a book: a new book gets the cover image; a book with a cover keeps it (the
 // server refuses to replace one unless the student confirmed), and the page choice is remembered for this file.
 async function syncBookCover(storyId){
- if(!storyId||!selectedFile||!cover.source)return;
+ // A whole-book run continued from the account has no picked file; its original is bookSource.
+ if(!storyId||!(selectedFile||bookSource)||!cover.source)return;
  const key=`${storyId}:${cover.page}:${cover.replace}`;if(cover.synced===key||cover.page===0&&cover.source!=='student')return;cover.synced=key;
  // A cover this book already remembers for this file, with its image in place, needs nothing more.
  if(cover.source==='book'&&studyBooks.find(book=>book.id===storyId)?.cover?.image)return;
@@ -303,19 +332,51 @@ async function syncBookCover(storyId){
   renderCover();loadBooks().catch(()=>{});
  }catch(error){cover.synced='';$('#warnings').textContent+=`Chưa lưu được ảnh bìa sách: ${error.message}\n`;}
 }
+// Books with several parts, and every whole-book run with its progress: the parts a run saved (one per chunk) are listed
+// in its row, where they open or are deleted, instead of one history card each.
 function renderStudyBooks(){
  const section=$('#study-books'),root=$('#study-books-list');if(!section||!root)return;
- const books=studyBooks.filter(book=>book.parts.length>1);section.hidden=!books.length;root.replaceChildren();
- for(const book of books){
-  const row=document.createElement('article'),text=document.createElement('div'),title=document.createElement('strong'),meta=document.createElement('small'),actions=document.createElement('div'),order=document.createElement('button'),read=document.createElement('a');
-  row.className='study-book';title.textContent=book.title;meta.textContent=`${book.parts.length} phần · ${book.parts.map(part=>part.title).join(' · ')}`;text.append(title,meta);
-  order.type='button';order.dataset.bookOrder=book.id;order.disabled=running;order.textContent='Sắp xếp phần';read.href=`/?read=${encodeURIComponent(book.id)}`;read.textContent='Đọc sách';
-  actions.className='study-book-actions';actions.append(order,read);row.append(text,actions);root.append(row);
- }
+ const jobOf=book=>bookJobs.find(job=>job.storyId===book.id),books=studyBooks.filter(book=>book.parts.length>1||jobOf(book)),loose=bookJobs.filter(job=>!job.storyId||!studyBooks.some(book=>book.id===job.storyId));
+ const opened=new Set([...root.querySelectorAll('details.book-job-parts[open]')].map(details=>details.dataset.job)),groups=wholeBook.sessionsByJob(historyItems,bookJobs);
+ section.hidden=!books.length&&!loose.length;root.replaceChildren();
+ for(const job of loose)root.append(studyBookRow(null,job,opened,groups));
+ for(const book of books)root.append(studyBookRow(book,jobOf(book),opened,groups));
 }
-let dialogSubmit=null;
-function openBookDialog(title,build,submit,label){
- const dialog=$('#book-dialog');$('#book-dialog-title').textContent=title;$('#book-dialog-body').replaceChildren();build($('#book-dialog-body'));$('#book-dialog-status').textContent='';$('#book-dialog-submit').textContent=label;$('#book-dialog-submit').disabled=false;dialogSubmit=submit;
+function studyBookRow(book,job,opened,groups){
+ const row=document.createElement('article'),text=document.createElement('div'),title=document.createElement('strong'),actions=document.createElement('div');
+ const add=(label,data)=>{const button=document.createElement('button');button.type='button';button.disabled=running;button.textContent=label;Object.assign(button.dataset,data);actions.append(button);};
+ row.className=job?'study-book book-job':'study-book';title.textContent=book?.title||job.title;text.append(title);
+ if(job){const progress=document.createElement('small');progress.className='book-job-progress';progress.textContent=[`Dịch cả quyển · ${wholeBook.progressText(job.pageStates)}`,jobStatusLabel(job),job.usage?.total?`${wholeBook.formatTokens(job.usage.total)} token`:'',wholeBook.progressNote(job.pageStates)].filter(Boolean).join(' · ');text.append(progress);}
+ if(book){const meta=document.createElement('small');meta.textContent=`${book.parts.length} phần · ${book.parts.map(part=>part.title).join(' · ')}`;text.append(meta);}
+ const parts=job?[...(groups.get(job.id)||[])].sort((a,b)=>(a.page_start||0)-(b.page_start||0)):[];if(parts.length)text.append(jobPartList(job,parts,opened.has(job.id)));
+ actions.className='study-book-actions';
+ if(job&&/[.f]/u.test(job.pageStates))add(job.pageStates.includes('.')?'Tiếp tục':'Thử lại trang lỗi',{bookResume:job.id});
+ if(book)add('Sắp xếp phần',{bookOrder:book.id});
+ const storyId=book?.id||job?.storyId;if(storyId){const read=document.createElement('a');read.href=`/?read=${encodeURIComponent(storyId)}`;read.textContent='Đọc sách';actions.append(read);}
+ if(job)add('Xóa tiến độ',{bookDelete:job.id});
+ row.append(text,actions);return row;
+}
+function jobPartList(job,parts,expanded){
+ const details=document.createElement('details'),summary=document.createElement('summary'),list=document.createElement('ul');details.className='book-job-parts';details.dataset.job=job.id;details.open=expanded;summary.textContent=`Các phần đã lưu (${parts.length})`;
+ for(const item of parts){
+  const entry=document.createElement('li'),open=document.createElement('button'),remove=document.createElement('button'),label=item.page_start?pageLabel(item.page_start,item.page_end||item.page_start).replace(/^t/u,'T'):item.title||'Phần chưa đặt tên';
+  open.type='button';open.dataset.historyOpen=item.id;open.disabled=running;open.textContent=`${label} · ${item.status==='complete'?'Hoàn tất':item.status==='translating'?'Dịch dở':'Chưa dịch'}`;
+  remove.type='button';remove.className='history-delete';remove.dataset.historyDelete=item.id;remove.disabled=running;remove.textContent='Xóa';remove.setAttribute('aria-label',`Xóa phần ${label}`);
+  entry.append(open,remove);list.append(entry);
+ }
+ details.append(summary,list);return details;
+}
+function jobStatusLabel(job){
+ if(bookRun&&bookJob?.id===job.id)return 'Đang dịch';
+ if(wholeBook.heldElsewhere(job,bookRunner))return 'Đang dịch ở thiết bị khác';
+ if(job.status==='done')return job.pageStates.includes('.')?'Còn trang chưa dịch':'Hoàn tất';
+ if(job.status==='paused')return ({quota_day:'Tạm dừng · hết hạn mức ngày',quota:'Tạm dừng · hết hạn mức',gemini_key:'Tạm dừng · cần khóa hợp lệ',network:'Tạm dừng · mất kết nối',gemini_unavailable:'Tạm dừng · Gemini quá tải',limit:'Tạm dừng · hết lượt trong ngày'})[job.pauseReason]||'Tạm dừng';
+ // "running" with no run in this tab: the tab that ran it was closed; every finished chunk is kept.
+ return job.status==='running'?'Dịch dở':'Chưa bắt đầu';
+}
+let dialogSubmit=null,dialogWorking='Đang lưu…';
+function openBookDialog(title,build,submit,label,working='Đang lưu…'){
+ const dialog=$('#book-dialog');$('#book-dialog-title').textContent=title;$('#book-dialog-body').replaceChildren();build($('#book-dialog-body'));$('#book-dialog-status').textContent='';$('#book-dialog-submit').textContent=label;$('#book-dialog-submit').disabled=false;dialogSubmit=submit;dialogWorking=working;
  if(typeof dialog.showModal==='function')dialog.showModal();else dialog.setAttribute('open','');
  // Start on the heading: focusing the first field would open the keyboard on a phone before the student reads the dialog.
  $('#book-dialog-title').focus();
@@ -360,13 +421,16 @@ function openOrderDialog(bookId){
   await loadBooks();status(`Đã lưu thứ tự ${order.length} phần của sách “${title}”.`);
  },'Lưu thứ tự');
 }
-function currentHistoryRecord(saved,payload){
- return {id:saved.id,title:payload.title,filename:payload.filename,domain:payload.domain,mode:payload.mode,status:saved.status,translated_parts:payload.state.done,total_parts:payload.state.parts.length,source_characters:payload.state.source.length,translation_characters:translationParts.join('\n\n').length,library_story_id:saved.libraryStoryId||null,library_chapter_id:saved.libraryChapterId||null,updated_at:saved.updatedAt};
+// With the page fields of the server's list rows, so a part just saved sorts into its book and its whole-book run at once.
+function currentHistoryRecord(saved,payload,prior=null){
+ const pages=payload.state.pdfLayout&&pdfLayoutDocument?pdfLayoutDocument.pages.map(page=>page.number):[],range=payload.pageRange;
+ return {id:saved.id,title:payload.title,filename:payload.filename,domain:payload.domain,mode:payload.mode,status:saved.status,translated_parts:payload.state.done,total_parts:payload.state.parts.length,source_characters:payload.state.source.length,translation_characters:translationParts.join('\n\n').length,library_story_id:saved.libraryStoryId||null,library_chapter_id:saved.libraryChapterId||null,updated_at:saved.updatedAt,
+  created_at:prior?.created_at||new Date().toISOString(),source_sha256:(pages.length&&pdfLayoutDocument.sourceSha256)||payload.sha256||prior?.source_sha256||null,page_start:pages.length?Math.min(...pages):range?.start??prior?.page_start??null,page_end:pages.length?Math.max(...pages):range?.end??prior?.page_end??null,source_total_pages:(pages.length&&pdfLayoutDocument.totalPages)||range?.total||prior?.source_total_pages||null};
 }
 async function persistHistory(){
  const payload=historyPayload();if(!payload)return null;
- const path=activeHistoryId?`history/${encodeURIComponent(activeHistoryId)}`:'history',method=activeHistoryId?'PUT':'POST',saved=await api(path,{method,headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
- activeHistoryId=saved.id;activeHistoryMeta={title:payload.title,filename:payload.filename};const record=currentHistoryRecord(saved,payload),index=historyItems.findIndex(item=>item.id===saved.id),prior=index>=0?historyItems[index]:null;if(index>=0)historyItems.splice(index,1);historyItems.unshift(record);renderHistory();
+ const path=activeHistoryId?`history/${encodeURIComponent(activeHistoryId)}`:'history',method=activeHistoryId?'PUT':'POST',saved=await api(path,{method,headers:{'Content-Type':'application/json'},body:JSON.stringify(activeHistoryId||!historyIdToCreate?payload:{...payload,id:historyIdToCreate})});
+ activeHistoryId=saved.id;historyIdToCreate='';activeHistoryMeta={title:payload.title,filename:payload.filename};lastSavedHistory=saved;const index=historyItems.findIndex(item=>item.id===saved.id),prior=index>=0?historyItems[index]:null,record=currentHistoryRecord(saved,payload,prior);if(index>=0)historyItems.splice(index,1);historyItems.unshift(record);renderHistory();
  // A range that just became a book part: later ranges of this file default to the same book.
  if(saved.libraryChapterId&&prior?.library_chapter_id!==saved.libraryChapterId){bookTarget={id:saved.libraryStoryId,replaceChapterId:''};loadBooks().catch(()=>{});}
  // The book exists once the range belongs to it (a draft for a chosen book, a new book on completion): it gets its cover.
@@ -377,13 +441,15 @@ async function saveHistory(){
  historySave=historySave.catch(()=>{}).then(persistHistory);
  try{return await historySave;}catch(error){if(!historyWarningShown){historyWarningShown=true;$('#warnings').textContent+=`Không thể tự lưu lịch sử: ${error.message}\n`;}return null;}
 }
+// A whole-book chunk cannot go on from a save that failed (its part would be lost), so these saves report their errors.
+function saveHistoryStrict(){historySave=historySave.catch(()=>{}).then(persistHistory);return historySave;}
 function glossaryText(value){return Object.entries(value||{}).map(([term,translation])=>`${term} = ${translation}`).join('\n');}
 async function openHistory(id){
  if(running)return;
  const version=++selectionVersion;busy(true);
  try{
  await dualViewer.clear();pdfLayoutDocument=null;pdfExportUrl='';$('#download-pdf').disabled=true;
- const item=await api(`history/${encodeURIComponent(id)}`),state=item.state||{};if(version!==selectionVersion)return;selectedFile=null;selectedHash=Promise.resolve('');selectedSha256='';selectedTotalPages=0;resetCover();autoRange='';bookTarget={id:item.library_story_id||'',replaceChapterId:''};pdfAnalysis=null;preparedPages=new Map();preparedRangeKey=null;clearPageImages();ocrWarnings=[];$('#source').readOnly=false;$('#source-file').value='';$('#pdf-range-options').hidden=true;$('#page-range').value='';
+ const item=await api(`history/${encodeURIComponent(id)}`),state=item.state||{};if(version!==selectionVersion)return;unbindBook();selectedFile=null;selectedHash=Promise.resolve('');selectedSha256='';selectedTotalPages=0;resetCover();autoRange='';bookTarget={id:item.library_story_id||'',replaceChapterId:''};pdfAnalysis=null;preparedPages=new Map();preparedRangeKey=null;clearPageImages();ocrWarnings=[];$('#source').readOnly=false;$('#source-file').value='';$('#pdf-range-options').hidden=true;$('#page-range').value='';
  activeHistoryId=item.id;activeHistoryMeta={title:item.title,filename:item.filename};historyWarningShown=false;$('#content-title').value=item.title||'';$('#content-title').setCustomValidity('');$('#content-title').removeAttribute('aria-invalid');$('#content-title-hint').textContent='Có thể đổi tên rồi bấm Lưu tên; bản dịch đã lưu được giữ nguyên.';$('#source').value=state.source||'';$('#domain').value=item.domain||'general';$('#mode').value=item.mode||'economy';$('#glossary').value=glossaryText(state.manualGlossary);
  const parts=Array.isArray(state.parts)?state.parts:[],plan=parts.map(text=>({text,pages:[],blockIds:{}}));translationParts=Array.isArray(state.translationParts)?state.translationParts.slice(0,parts.length):[];while(translationParts.length<parts.length)translationParts.push('');
  translationState={source:state.source||'',domain:item.domain||'general',mode:item.mode||'economy',parts,plan,done:Math.min(Number(state.done)||0,parts.length),context:state.context||'',glossary:state.glossary||{},manualGlossary:state.manualGlossary||{},previousSource:state.previousSource||'',previousTranslation:state.previousTranslation||''};
@@ -409,8 +475,8 @@ function rejectKey(error){
  if(!/Gemini từ chối|Khóa Gemini/u.test(error?.message||''))return;
  sessionKey='';const input=$('#api-key');input.setAttribute('aria-invalid','true');input.focus();$('#key-status').textContent='Khóa vừa nhập chưa được Gemini chấp nhận.';
 }
-function addUsage(value){for(const field of ['prompt','output','total','requests'])usage[field]+=(Number(value?.[field])||0);$('#usage-total').textContent=new Intl.NumberFormat('vi-VN').format(usage.total);$('#usage-detail').textContent=`${usage.requests} lượt gọi · ${usage.prompt} token đầu vào · ${usage.output} token đầu ra`;}
-function updateCount(){const source=$('#source').value,length=source.length;$('#source-count').textContent=`${new Intl.NumberFormat('vi-VN').format(length)} ký tự`;$('#part-count').textContent=`${length?createTranslationPlan(source,preparedPages).length:0} phần dịch`;}
+function addUsage(value){bookRun?.recordUsage(value);for(const field of ['prompt','output','total','requests'])usage[field]+=(Number(value?.[field])||0);$('#usage-total').textContent=new Intl.NumberFormat('vi-VN').format(usage.total);$('#usage-detail').textContent=`${usage.requests} lượt gọi · ${usage.prompt} token đầu vào · ${usage.output} token đầu ra`;}
+function updateCount(){const source=$('#source').value,length=source.length;$('#source-count').textContent=`${new Intl.NumberFormat('vi-VN').format(length)} ký tự`;$('#part-count').textContent=`${length?createTranslationPlan(source,preparedPages).length:0} phần dịch`;$('#source-lookup').disabled=!hasHan(source);}
 function segments(text,limit=5000){const pieces=[];let remaining=text;while(remaining.length>limit){let end=remaining.lastIndexOf('\n',limit);if(end<limit/2){end=0;for(const match of remaining.slice(0,limit).matchAll(/[。！？!?；;]\s*/gu))end=match.index+match[0].length;}if(end<limit/2)end=limit;if(/[\uD800-\uDBFF]/u.test(remaining[end-1]))end--;pieces.push(remaining.slice(0,end));remaining=remaining.slice(end);}if(remaining)pieces.push(remaining);return pieces;}
 function clearPartStream(){const root=$('#translation-parts');root.replaceChildren();root.hidden=true;}
 function renderPartStream(parts){
@@ -419,7 +485,7 @@ function renderPartStream(parts){
   const card=document.createElement('details'),summary=document.createElement('summary'),title=document.createElement('span'),state=document.createElement('small'),body=document.createElement('div'),paired=document.createElement('div');
   card.className='translation-part queued';card.dataset.translationPart=String(index);title.textContent=partTitle(part,index);state.dataset.partState='';state.textContent='Chờ xử lý';body.className='translation-part-text';body.textContent='Nội dung sẽ xuất hiện ngay khi phần này dịch xong.';
   const toolbar=document.createElement('div');toolbar.className='part-toolbar';const label=document.createElement('span');label.className='reading-label';label.textContent='BẢN DỊCH TIẾNG VIỆT';toolbar.append(label);
-  paired.className='translation-pair';if(part.pages.length){const originals=document.createElement('div');originals.className='part-originals';originals.id=`part-originals-${index}`;for(const number of part.pages){const image=pageImages.get(number);if(image)originals.append(originalPageView(number,image,preparedPages.get(number)));}if(originals.children.length){paired.append(originals);paired.classList.add('has-original');const toggle=document.createElement('button');toggle.type='button';toggle.className='compare-toggle';toggle.textContent='Đối chiếu trang gốc';toggle.setAttribute('aria-expanded','false');toggle.setAttribute('aria-controls',originals.id);toggle.addEventListener('click',()=>{const comparing=paired.classList.toggle('comparing');toggle.setAttribute('aria-expanded',String(comparing));toggle.textContent=comparing?'Ẩn trang gốc':'Đối chiếu trang gốc';});toolbar.append(toggle);}}
+  paired.className='translation-pair';if(part.pages.length){const originals=document.createElement('div');originals.className='part-originals';originals.id=`part-originals-${index}`;for(const number of part.pages){const image=pageImages.get(number);if(image){const entry=preparedPages.get(number);originals.append(originalPageView(number,image,entry,{onRegion:(block,region)=>openHanziPanel({text:block.text,title:`Nguyên tác · Trang ${number}`,note:['paddle','tesseract','gemini'].includes(entry?.engine)?OCR_NOTE:'',returnFocus:region})}));}}if(originals.children.length){paired.append(originals);paired.classList.add('has-original');const toggle=document.createElement('button');toggle.type='button';toggle.className='compare-toggle';toggle.textContent='Đối chiếu trang gốc';toggle.setAttribute('aria-expanded','false');toggle.setAttribute('aria-controls',originals.id);toggle.addEventListener('click',()=>{const comparing=paired.classList.toggle('comparing');toggle.setAttribute('aria-expanded',String(comparing));toggle.textContent=comparing?'Ẩn trang gốc':'Đối chiếu trang gốc';});toolbar.append(toggle);}}
   paired.append(body);summary.append(title,state);card.append(summary,toolbar,paired);root.append(card);
  });
 }
@@ -448,7 +514,7 @@ async function showLibraryMatch(version){
   $('#library-match-title').textContent=`${match.title} · ${match.chapters} phần`;$('#library-match-open').href=`/?read=${encodeURIComponent(match.id)}`;$('#library-match').hidden=false;
  }catch{}
 }
-function busy(value){running=value||starting;$('#content-title').disabled=running;updateTitleControls();$('#translate').disabled=running;$('#source-file').disabled=running;$('#source').disabled=running;$('#mode').disabled=running;$('#domain').disabled=running;$('#glossary').disabled=running;$('#page-range').disabled=running;$('#pdf-layout-enabled').disabled=running;$('#api-key').disabled=running;$('#clear-key').disabled=running;$('#check-gemini-model').disabled=running;$('#gemini-model').disabled=running||!Array.from($('#gemini-model').options).some(option=>option.value);$('#stop').disabled=!running;$('#book-target').disabled=running;$('#book-replace').disabled=running;$('#book-next-range').disabled=running;$('#cover-change').disabled=running;$('#cover-none').disabled=running;$('#cover-translate').disabled=running;document.querySelectorAll('[data-history-open],[data-history-merge],[data-book-order]').forEach(button=>{button.disabled=running;});}
+function busy(value){running=value||starting;$('#content-title').disabled=running;updateTitleControls();$('#translate').disabled=running;$('#source-file').disabled=running;$('#source').disabled=running;$('#mode').disabled=running;$('#domain').disabled=running;$('#glossary').disabled=running;$('#page-range').disabled=running;$('#pdf-layout-enabled').disabled=running;$('#api-key').disabled=running;$('#clear-key').disabled=running;$('#check-gemini-model').disabled=running;$('#gemini-model').disabled=running||!Array.from($('#gemini-model').options).some(option=>option.value);$('#stop').disabled=!running;$('#book-target').disabled=running;$('#book-replace').disabled=running;$('#book-next-range').disabled=running;$('#cover-change').disabled=running;$('#cover-none').disabled=running;$('#cover-translate').disabled=running;$('#book-pages').disabled=running;document.querySelectorAll('[data-history-open],[data-history-merge],[data-book-order],[data-history-delete],[data-book-resume],[data-book-delete]').forEach(button=>{button.disabled=running;});renderBookMode();renderBookPanel();}
 
 function optionalKey(){
  if(sessionKey)return sessionKey;
@@ -477,8 +543,8 @@ async function downloadRichHtml(){
  const blob=new Blob(['\uFEFF'+html],{type:'text/html;charset=utf-8'}),url=URL.createObjectURL(blob),link=document.createElement('a');link.href=url;link.download=downloadFilename('html');link.click();setTimeout(()=>URL.revokeObjectURL(url),1000);
 }
 
-async function selected(file){workflow(1);await layoutConfiguration;const isPdf=file?.name.toLowerCase().endsWith('.pdf'),useLayout=isPdf&&$('#pdf-layout-enabled').checked;if(file?.size>(useLayout?OTHER_MAX_BYTES:isPdf?PDF_MAX_BYTES:OTHER_MAX_BYTES))throw new Error(useLayout?'PDF giữ bố cục tối đa 25 MB.':isPdf?'PDF tối đa 250 MB khi xử lý tại trình duyệt.':'Tệp tối đa 25 MB.');const version=++selectionVersion;selectedFile=file;resetHistoryIdentity();bookTarget={id:'',replaceChapterId:''};bookChoiceTouched=false;selectedHash=fileSha256(file);selectedSha256='';selectedTotalPages=0;resetCover();autoRange='';pdfAnalysis=null;preparedPages=new Map();preparedRangeKey=null;clearPageImages();ocrWarnings=[];translationState=null;translationParts=[];pdfLayoutDocument=null;pdfExportUrl='';pdfLayoutRange='';await dualViewer.clear();clearPartStream();$('#source').readOnly=false;$('#source').value='';$('#translation').value='';$('#warnings').textContent='';$('#download').disabled=true;$('#download-pdf').disabled=true;$('#pdf-range-options').hidden=true;$('#page-range').value='';updateCount();$('#library-match').hidden=true;if(!file){setFileStatus('Hoặc dán một đoạn tiếng Trung bên dưới.');return;}showLibraryMatch(version);
- if(useLayout){const {pdfPageCount}=await import('./pdf-client.js');setFileStatus('Đang kiểm tra số trang PDF…');const total=await pdfPageCount(file);if(version!==selectionVersion)return;$('#pdf-range-options').hidden=false;autoRange=$('#page-range').value=`1-${Math.min(3,total)}`;selectedTotalPages=total;setFileStatus(`${total} trang · dịch theo block có tọa độ; chọn phạm vi rồi bấm Bắt đầu dịch.`);prepareBookTarget(version,{suggest:true});detectSelectedCover(file,version);return;}
+async function selected(file){workflow(1);await layoutConfiguration;const isPdf=file?.name.toLowerCase().endsWith('.pdf'),useLayout=isPdf&&$('#pdf-layout-enabled').checked;if(file?.size>(useLayout?wholeBook.SOURCE_MAX_BYTES:isPdf?PDF_MAX_BYTES:OTHER_MAX_BYTES))throw new Error(useLayout?'PDF giữ bố cục tối đa 100 MB (tệp trên 25 MB được dịch bằng chế độ Dịch cả quyển).':isPdf?'PDF tối đa 250 MB khi xử lý tại trình duyệt.':'Tệp tối đa 25 MB.');const version=++selectionVersion;selectedFile=file;unbindBook();resetHistoryIdentity();bookTarget={id:'',replaceChapterId:''};bookChoiceTouched=false;selectedHash=fileSha256(file);selectedSha256='';selectedTotalPages=0;resetCover();autoRange='';pdfAnalysis=null;preparedPages=new Map();preparedRangeKey=null;clearPageImages();ocrWarnings=[];translationState=null;translationParts=[];pdfLayoutDocument=null;pdfExportUrl='';pdfLayoutRange='';await dualViewer.clear();clearPartStream();$('#source').readOnly=false;$('#source').value='';$('#translation').value='';$('#warnings').textContent='';$('#download').disabled=true;$('#download-pdf').disabled=true;$('#pdf-range-options').hidden=true;$('#page-range').value='';updateCount();$('#library-match').hidden=true;if(!file){setFileStatus('Hoặc dán một đoạn tiếng Trung bên dưới.');return;}showLibraryMatch(version);
+ if(useLayout){const {pdfPageCount}=await import('./pdf-client.js');setFileStatus('Đang kiểm tra số trang PDF…');const total=await pdfPageCount(file);if(version!==selectionVersion)return;$('#pdf-range-options').hidden=false;autoRange=$('#page-range').value=`1-${Math.min(3,total)}`;selectedTotalPages=total;const large=file.size>OTHER_MAX_BYTES;setFileStatus(large?`${total} trang · ${megabytes(file.size)} · tệp trên 25 MB được dịch bằng chế độ Dịch cả quyển.`:`${total} trang · dịch theo block có tọa độ; chọn phạm vi rồi bấm Bắt đầu dịch, hoặc chọn Dịch cả quyển.`);renderBookMode();if(large)setBookMode(true);prepareBookTarget(version,{suggest:true});coverTask=detectSelectedCover(file,version);findBookJob(version);return;}
  if(!isPdf){await prepare();return;}
  setFileStatus('Đang kiểm tra lớp chữ PDF trên trình duyệt…');try{const {analyzePdf}=await import('./pdf-client.js');const analysis=await analyzePdf(file,(page,total)=>{if(version===selectionVersion)setFileStatus(`Đang đọc trang ${page}/${total}…`);});if(version!==selectionVersion)return;pdfAnalysis=analysis;}catch(error){if(version!==selectionVersion)return;selectedFile=null;throw error;}
  $('#pdf-range-options').hidden=false;selectedTotalPages=pdfAnalysis.totalPages;
@@ -548,6 +614,7 @@ async function run(){
  if(running||starting)return;requireContentTitle();starting=true;busy(true);
  try{
   await layoutConfiguration;
+  if(bookMode&&bookAvailable()){await selectionTask;return await runWholeBook();}
   if($('#pdf-layout-enabled').checked&&(selectedFile?.name.toLowerCase().endsWith('.pdf')||translationState?.pdfLayout)){await selectionTask;return await runPdfLayout({fromRun:true});}
   await ensureStudyModel('text');
   if(selectedFile&&!pdfAnalysis&&selectedFile.name.toLowerCase().endsWith('.pdf'))status('Đang chờ phân tích PDF; hệ thống sẽ tự OCR và dịch ngay sau đó…');
@@ -565,20 +632,24 @@ function pdfOcrResumable(){
 }
 function syncLayoutParts(){const parts=pdfLayoutDocument.pages.flatMap(p=>p.blocks).map(b=>b.source);Object.assign(translationState,{source:parts.join('\n\n'),parts,plan:parts.map(text=>({text,pages:[],blockIds:{}}))});}
 // A new asset becomes the session before OCR starts, so a failed OCR batch leaves something to resume.
-async function adoptPdfLayout(result){
+// A whole-book chunk starts with the book's terms and the context the chunk before it left.
+// Its terms stay fixed (fixedGlossary): a later chunk never renames what the book already says, unless the student does.
+async function adoptPdfLayout(result,{glossary={},context=''}={}){
  await dualViewer.clear();pdfLayoutDocument=result.document;pdfExportUrl='';const manualGlossary=parseStudyGlossary($('#glossary').value);
- translationState={mode:$('#mode').value,domain:$('#domain').value,done:0,context:'',glossary:{...manualGlossary},manualGlossary,pdfLayout:{assetId:result.assetId,ocrPending:true}};syncLayoutParts();
+ translationState={mode:$('#mode').value,domain:$('#domain').value,done:0,context,glossary:{...glossary,...manualGlossary},manualGlossary,fixedGlossary:glossary,pdfLayout:{assetId:result.assetId,ocrPending:true}};syncLayoutParts();
  translationParts=[];clearPartStream();$('#download-pdf').disabled=true;$('#warnings').textContent=(pdfLayoutDocument.warnings||[]).join('\n');syncPdfText();
 }
-async function correctPdfOcr(model){
+// Returns false when shouldStop ended it early; the manifest keeps every batch already read, so it resumes from there.
+// heartbeat (whole-book runs) follows every batch: it keeps the job held while a long chunk is read.
+async function correctPdfOcr(model,{shouldStop=()=>false,heartbeat=async()=>{}}={}){
  // A manifest with OCR sheets is read a whole sheet (several blocks, one image) at a time.
  const pages=pdfLayoutDocument.pages.filter(p=>p.ocr),blocks=pages.flatMap(p=>p.blocks),pending=blocks.filter(b=>!b.ocrCorrected);
- let done=blocks.length-pending.length;for(const ids of ocrImageBatches(pending,undefined,pages.flatMap(p=>p.ocrSheets||[]))){status(`Đang đọc lại chữ trong ảnh đoạn ${Math.min(done+1,blocks.length)}–${Math.min(done+ids.length,blocks.length)}/${blocks.length}…`);const output=await api('pdf-layout/ocr-blocks',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({assetId:translationState.pdfLayout.assetId,blockIds:ids,apiKey:key(),model})});pdfLayoutDocument=output.document;model=output.model||model;addUsage(output.usage);if(output.warnings?.length)$('#warnings').textContent+=output.warnings.join('\n')+'\n';done+=ids.length;}
+ let done=blocks.length-pending.length;for(const ids of ocrImageBatches(pending,undefined,pages.flatMap(p=>p.ocrSheets||[]))){if(shouldStop())return false;status(`Đang đọc lại chữ trong ảnh đoạn ${Math.min(done+1,blocks.length)}–${Math.min(done+ids.length,blocks.length)}/${blocks.length}…`);const output=await api('pdf-layout/ocr-blocks',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({assetId:translationState.pdfLayout.assetId,blockIds:ids,apiKey:key(),model})});pdfLayoutDocument=output.document;model=output.model||model;addUsage(output.usage);if(output.warnings?.length)$('#warnings').textContent+=output.warnings.join('\n')+'\n';done+=ids.length;await heartbeat();}
  // History requires parts to match the manifest, which now holds the corrected sources.
- syncLayoutParts();delete translationState.pdfLayout.ocrPending;syncPdfText();await dualViewer.setDocument(pdfLayoutDocument,[]);
+ syncLayoutParts();delete translationState.pdfLayout.ocrPending;syncPdfText();await dualViewer.setDocument(pdfLayoutDocument,[]);return true;
 }
 function syncPdfText(){
- const blocks=pdfLayoutDocument.pages.flatMap(p=>p.blocks);$('#source').value=blocks.map(b=>b.text).join('\n\n');$('#source').readOnly=true;
+ const blocks=pdfLayoutDocument.pages.flatMap(p=>p.blocks);$('#source').value=blocks.map(b=>b.text).join('\n\n');$('#source').readOnly=true;$('#source-lookup').disabled=!hasHan($('#source').value);
  $('#translation').value=blocks.map((b,i)=>{let text=translationParts[i]||'';for(const inline of b.inlines||[])text=text.replace(inline.token,inline.text);return text;}).filter(Boolean).join('\n\n');$('#download').disabled=!$('#translation').value;$('#source-count').textContent=`${$('#source').value.length} ký tự`;$('#part-count').textContent=`${blocks.length} block`;
 }
 async function runPdfLayout({fromRun=false}={}){
@@ -599,27 +670,41 @@ async function runPdfLayout({fromRun=false}={}){
    if(!selectedSha256&&/^[a-f\d]{64}$/u.test(result.document?.sourceSha256||''))selectedSha256=result.document.sourceSha256;
    resetHistoryIdentity();pdfLayoutRange=range;if(bookChoiceActive())updateBookHint();clearPageImages();await adoptPdfLayout(result);await saveHistory();
   }
-  if(translationState.pdfLayout.ocrPending||pdfOcrResumable())await correctPdfOcr(selectedModel);
-  // A save can land between the last OCR batch and the history update; untranslated parts follow the manifest.
-  else if(!translationState.done)syncLayoutParts();
-  const blocks=pdfLayoutDocument.pages.flatMap(p=>p.blocks);await saveHistory();
-  if(translationState.done===blocks.length){$('#download-pdf').disabled=false;status('Đã dịch đủ các block. Bấm Xuất PDF tiếng Việt để tải bản giữ bố cục.');return;}
-  for(const batch of blockBatches(blocks.slice(translationState.done))){
-   if(stopRequested)break;status(`Đang dịch block ${translationState.done+1}–${translationState.done+batch.length}/${blocks.length}…`);
-   const result=await api('translate-blocks',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({apiKey:key(),model:selectedModel,blocks:batch.map(({id,source})=>({id,source})),domain:translationState.domain,mode:translationState.mode,context:translationState.context,glossary:translationState.glossary})});
-   if(result.model){selectedModel=result.model;$('#gemini-model-status').textContent=`Đã dùng ${result.model}.`;if([...$('#gemini-model').options].some(o=>o.value===result.model))$('#gemini-model').value=result.model;}
-   const translated=new Map(result.blocks.map(b=>[b.id,b.translation]));for(const b of batch){const text=translated.get(b.id);if(!text)throw new Error(`Thiếu bản dịch block ${b.id}.`);translationParts[translationState.done++]=text;}
-   if(result.warnings?.length)$('#warnings').textContent+=result.warnings.join('\n')+'\n';
-   translationState.context=result.context||translationState.context;translationState.glossary={...translationState.glossary,...result.glossary,...translationState.manualGlossary};addUsage(result.usage);syncPdfText();await dualViewer.update(pdfTranslations());await saveHistory();workflow(3);
-  }
-  const complete=translationState.done===blocks.length;$('#download-pdf').disabled=!complete;status(complete?'Đã dịch đủ các block. Đang xuất PDF tiếng Việt…':`Đã dừng sau ${translationState.done}/${blocks.length} block; có thể tiếp tục từ lịch sử.`);
+  const outcome=await translateLayoutSession(selectedModel),blocks=pdfLayoutDocument.pages.flatMap(p=>p.blocks);
+  if(outcome.idle){$('#download-pdf').disabled=false;status('Đã dịch đủ các block. Bấm Xuất PDF tiếng Việt để tải bản giữ bố cục.');return;}
+  const complete=outcome.complete;$('#download-pdf').disabled=!complete;status(complete?'Đã dịch đủ các block. Đang xuất PDF tiếng Việt…':`Đã dừng sau ${translationState.done}/${blocks.length} block; có thể tiếp tục từ lịch sử.`);
   if(complete)await exportLayoutPdf(false);
  }catch(error){rejectKey(error);fail(error);}finally{busy(false);stopRequested=false;}
 }
-async function exportLayoutPdf(download=true){
+// OCR (when pending) and the remaining block batches of the open layout session; errors reach the caller. pageStop
+// (whole-book runs): a stop waits until the page being translated is finished, so no page is left half translated.
+// heartbeat (whole-book runs) follows every saved batch, keeping the job held through a long chunk.
+async function translateLayoutSession(model,{pageStop=false,shouldStop=()=>stopRequested,heartbeat=async()=>{}}={}){
+ if(translationState.pdfLayout.ocrPending||pdfOcrResumable()){if(!await correctPdfOcr(model,{shouldStop:pageStop?shouldStop:()=>false,heartbeat}))return {complete:false,model,idle:false};}
+ // A save can land between the last OCR batch and the history update; untranslated parts follow the manifest.
+ else if(!translationState.done)syncLayoutParts();
+ const blocks=pdfLayoutDocument.pages.flatMap(p=>p.blocks),pageOf=new Map(pdfLayoutDocument.pages.flatMap(page=>page.blocks.map(b=>[b.id,page.number])));await saveHistory();
+ const idle=translationState.done===blocks.length;
+ while(translationState.done<blocks.length){
+  let [batch]=blockBatches(blocks.slice(translationState.done));
+  if(shouldStop()){const page=translationState.done?pageOf.get(blocks[translationState.done-1].id):0;if(!pageStop||!page||pageOf.get(batch[0].id)!==page)break;batch=batch.filter(b=>pageOf.get(b.id)===page);}
+  status(`Đang dịch block ${translationState.done+1}–${translationState.done+batch.length}/${blocks.length}…`);
+  const result=await api('translate-blocks',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({apiKey:key(),model,blocks:batch.map(({id,source})=>({id,source})),domain:translationState.domain,mode:translationState.mode,context:translationState.context,glossary:translationState.glossary})});
+  // Counted before the checks below: tokens are spent even when an answer is refused.
+  addUsage(result.usage);
+  if(result.model){model=result.model;$('#gemini-model-status').textContent=`Đã dùng ${result.model}.`;if([...$('#gemini-model').options].some(o=>o.value===result.model))$('#gemini-model').value=result.model;}
+  const translated=new Map(result.blocks.map(b=>[b.id,b.translation]));for(const b of batch){const text=translated.get(b.id);if(!text)throw new Error(`Thiếu bản dịch block ${b.id}.`);translationParts[translationState.done++]=text;}
+  if(result.warnings?.length)$('#warnings').textContent+=result.warnings.join('\n')+'\n';
+  translationState.context=result.context||translationState.context;translationState.glossary={...translationState.glossary,...result.glossary,...translationState.fixedGlossary,...translationState.manualGlossary};syncPdfText();await dualViewer.update(pdfTranslations());await saveHistory();workflow(3);
+  await heartbeat();
+ }
+ return {complete:translationState.done===blocks.length,model,idle};
+}
+// show:false (whole-book runs) skips loading every exported chunk into the viewer.
+async function exportLayoutPdf(download=true,{show=true}={}){
  if(!translationState?.pdfLayout||!activeHistoryId)throw new Error('Hãy lưu đủ các block trước khi xuất PDF.');
- if(!pdfExportUrl){status('Đang đo chữ, điều chỉnh cỡ font và xuất PDF tiếng Việt…');const result=await api('pdf-layout/render',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({assetId:translationState.pdfLayout.assetId,historyId:activeHistoryId})});pdfExportUrl=result.url;translationState.pdfLayout.exported=true;translationState.pdfLayout.renderVersion=result.renderVersion||2;await dualViewer.setExportedPdf(result.url);}
- status('PDF tiếng Việt đã được lưu vào Thư viện riêng. Hai bản đang hiển thị song song.');
+ if(!pdfExportUrl){status('Đang đo chữ, điều chỉnh cỡ font và xuất PDF tiếng Việt…');const result=await api('pdf-layout/render',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({assetId:translationState.pdfLayout.assetId,historyId:activeHistoryId})});pdfExportUrl=result.url;translationState.pdfLayout.exported=true;translationState.pdfLayout.renderVersion=result.renderVersion||2;if(show)await dualViewer.setExportedPdf(result.url);}
+ status(show?'PDF tiếng Việt đã được lưu vào Thư viện riêng. Hai bản đang hiển thị song song.':'PDF tiếng Việt của phần này đã được lưu vào Thư viện riêng.');
  if(download){const response=await fetch(pdfExportUrl,{credentials:'same-origin'});if(!response.ok)throw new Error('Không tải được PDF.');const url=URL.createObjectURL(await response.blob()),link=document.createElement('a');link.href=url;link.download=downloadFilename('pdf');link.click();setTimeout(()=>URL.revokeObjectURL(url),1000);}
 }
 
@@ -653,15 +738,318 @@ async function translate(){
  }catch(error){if(activeIndex>=0)updatePart(activeIndex,undefined,'failed');rejectKey(error);fail(error);}finally{busy(false);stopRequested=false;}
 }
 
+// ---- "Dịch cả quyển" ----
+const bookAvailable=()=>Boolean(layoutConfig.configured&&$('#pdf-layout-enabled').checked&&(/\.pdf$/iu.test(selectedFile?.name||'')||bookJob&&!selectedFile));
+// Over 25 MB only this mode takes a PDF: chunks are cut on the device before anything is extracted. A run continued from
+// the history has no picked file at all and reads the original kept in the account.
+const bookForced=()=>Boolean(selectedFile?selectedFile.size>OTHER_MAX_BYTES:bookJob);
+const megabytes=bytes=>bytes<1048576?`${Math.max(1,Math.round(bytes/1024))} KB`:`${new Intl.NumberFormat('vi-VN',{maximumFractionDigits:1}).format(bytes/1048576)} MB`;
+function translateLabel(text){const node=[...$('#translate').childNodes].find(item=>item.nodeType===3);if(node)node.nodeValue=`${text} `;}
+function bookFileStatus(){if(selectedFile&&selectedTotalPages)setFileStatus(bookMode?`${selectedTotalPages} trang · ${megabytes(selectedFile.size)} · Hoa Trí tự chia thành từng lượt tối đa 20 trang; bìa và trang không có chữ Trung không tốn token.`:`${selectedTotalPages} trang · dịch theo block có tọa độ; chọn phạm vi rồi bấm Bắt đầu dịch, hoặc chọn Dịch cả quyển.`);}
+// quiet: a countdown's later seconds are shown, not read aloud each second by a screen reader.
+function bookStatus(text,{quiet=false}={}){bookStatusText=text;const line=$('#whole-book-status');if(!line)return;line.setAttribute('aria-live',quiet?'off':'polite');line.textContent=text;}
+function renderBookMode(){
+ const field=$('#book-mode');if(!field)return;field.hidden=!bookAvailable();
+ const range=field.querySelector('input[value="range"]'),whole=field.querySelector('input[value="book"]');
+ range.disabled=running||bookForced();whole.disabled=running;(bookMode?whole:range).checked=true;
+ $('#book-mode-note').textContent=selectedFile&&bookForced()?'Tệp trên 25 MB chỉ dịch được bằng chế độ Dịch cả quyển: Hoa Trí chia tệp thành từng lượt ngay trên thiết bị.':'';
+}
+function setBookMode(on){
+ bookMode=Boolean(on);$('#whole-book').hidden=!bookMode;$('#range-fields').hidden=bookMode;$('#book-target-group').hidden=bookMode;
+ $('#stop').textContent=bookMode?'Dừng sau trang hiện tại':'Dừng sau lượt hiện tại';if(!bookMode)translateLabel('Bắt đầu dịch');
+ if(bookMode)startBookSurvey();renderBookMode();updateTitleControls();renderCover();
+}
+function unbindBook(){
+ const bound=Boolean(bookJob),pages=$('#book-pages');bookJob=null;bookSource=null;bookSurvey=null;bookChunkId='';bookContext='';bookHashTask=null;bookPagesEdited=false;bookBusy=false;bookStatus('');pages.value='';pages.setCustomValidity('');pages.removeAttribute('aria-invalid');
+ if(bound)$('#content-title-hint').textContent='Tên này xuất hiện trong lịch sử, Thư viện riêng và tệp tải xuống.';
+ if(bookMode)setBookMode(false);else{renderBookMode();updateTitleControls();}
+}
+function bindBookJob(job){
+ bookJob=job;const title=$('#content-title');title.value=job.title||'';title.setCustomValidity('');title.removeAttribute('aria-invalid');
+ // The page field shows the pages this job translates (empty for a whole book); only the student's own edit changes them.
+ const pages=$('#book-pages');pages.value=wholeBook.chosenPagesText(job.pageStates);pages.setCustomValidity('');pages.removeAttribute('aria-invalid');bookPagesEdited=false;bookBusy=false;
+ $('#content-title-hint').textContent='Tên sách của lượt dịch cả quyển; đổi tên sách trong Lịch sử dịch (Sắp xếp phần).';
+ for(const [select,value] of [[$('#domain'),job.domain],[$('#mode'),job.mode]])if([...select.options].some(option=>option.value===value))select.value=value;
+ const count=wholeBook.countStates(job.pageStates);
+ bookStatus(count.pending||count.failed?`Quyển này đã có tiến độ: ${wholeBook.progressText(job.pageStates)}. Bấm ${count.pending?'Tiếp tục dịch cả quyển':'Thử lại các trang lỗi'}; trang đã dịch không tốn token lại.`:'Quyển này đã dịch xong. Mở Thư viện riêng để đọc hoặc tải cả quyển.');
+ setBookMode(true);bookFileStatus();
+}
+function bookChosenPages(total){const value=$('#book-pages').value.trim();return value?parseStudyPageRange(value,total,Infinity):null;}
+// The page states the panel shows: the job's with an edited range field applied, or, before there is a job, the picked
+// file's.
+function bookStates(){
+ const total=bookJob?.totalPages||selectedTotalPages;if(!total)return '';let chosen=null;try{chosen=bookChosenPages(total);}catch{}
+ if(bookJob)return running||!bookPagesEdited?bookJob.pageStates:wholeBook.withStates(bookJob.pageStates,wholeBook.rangeUpdates(bookJob.pageStates,chosen));
+ return wholeBook.initialPageStates(total,{cover:coverExcluded()?cover.page:0,pages:chosen});
+}
+function bookButtonLabel(states){
+ if(!bookJob)return 'Dịch cả quyển';if(bookBusy&&!running)return 'Chờ rồi dịch tiếp';const count=wholeBook.countStates(states);
+ if(count.pending)return count.done||bookJob.status!=='ready'?'Tiếp tục dịch cả quyển':'Dịch cả quyển';
+ return count.failed?'Thử lại các trang lỗi':'Đã dịch xong';
+}
+function renderBookPanel(){
+ if(!bookMode)return;
+ const states=bookStates(),total=bookJob?.totalPages||selectedTotalPages,label=bookButtonLabel(states),facts=[];
+ translateLabel(label);$('#translate').disabled=running||label==='Đã dịch xong';
+ if(bookJob)facts.push(bookJob.filename||'PDF gốc');if(total)facts.push(`${total} trang`);if(selectedFile)facts.push(megabytes(selectedFile.size));
+ facts.push(bookJob?(bookJob.pageStates.includes('c')?`bìa: trang ${bookJob.pageStates.indexOf('c')+1}`:'không dùng bìa'):cover.detecting&&!cover.page?'đang tìm bìa…':coverExcluded()?`bìa: trang ${cover.page}`:'không dùng bìa');
+ if(bookJob&&!selectedFile)facts.push('bản gốc lấy từ tài khoản');
+ $('#whole-book-summary').textContent=total?facts.join(' · '):'Đang đọc số trang…';
+ $('#whole-book-count').textContent=states?wholeBook.progressText(states):'';$('#whole-book-note').textContent=states?wholeBook.progressNote(states):'';
+ $('#whole-book-tokens').textContent=bookJob?`Quyển này đã dùng ${wholeBook.formatTokens((Number(bookJob.usage?.total)||0)+(bookRun?.usage.total||0))} token Gemini`:'';
+ wholeBook.renderPageGrid($('#page-grid'),states,bookWorking);renderBookEstimate(states);
+ const read=$('#book-read');read.hidden=!bookJob?.storyId;if(bookJob?.storyId)read.href=`/?read=${encodeURIComponent(bookJob.storyId)}`;
+ $('#whole-book-status').textContent=bookStatusText;
+}
+function renderBookEstimate(states){
+ // Nothing left to translate, nothing to estimate: exporting again or downloading the book costs no token.
+ const root=$('#whole-book-estimate');root.replaceChildren();root.hidden=!wholeBook.countStates(states).pending;if(root.hidden)return;
+ const f=wholeBook.formatTokens,[textLow,textHigh]=wholeBook.PAGE_TOKENS.text,[scanLow,scanHigh]=wholeBook.PAGE_TOKENS.scan,list=document.createElement('ul');
+ const line=(text,tag='li',className='')=>{const item=document.createElement(tag);item.textContent=text;if(className)item.className=className;return item;};
+ const head=line('','p','estimate-head'),strong=document.createElement('strong'),note=document.createElement('small');strong.textContent='Ước tính token Gemini';note.textContent='chỉ là ước tính';head.append(strong,' ',note);root.append(head);
+ if(bookSurvey?.kinds.length||!bookJob){
+  const estimate=wholeBook.estimateTokens(states,bookSurvey?.kinds||[]);
+  if(estimate.text)list.append(line(`${estimate.text} trang có lớp chữ × ${f(textLow)}–${f(textHigh)} token`));
+  if(estimate.scan)list.append(line(`${estimate.scan} trang scan (Gemini đọc ảnh) × ${f(scanLow)}–${f(scanHigh)} token`));
+  if(estimate.unknown)list.append(line(`${estimate.unknown} trang ${bookSurvey&&!bookSurvey.done&&!bookSurvey.failed?'đang khảo sát':'chưa rõ loại'} × ${f(textLow)}–${f(scanHigh)} token`));
+  list.append(line('Bìa, trang trống và trang bỏ qua: 0 token'));root.append(list);
+  if(estimate.high)root.append(line(`Còn lại khoảng ${wholeBook.formatTokenRange(estimate.low,estimate.high)} token.`,'p','estimate-total'));
+ }else{list.append(line(`Trang có lớp chữ: khoảng ${f(textLow)}–${f(textHigh)} token`),line(`Trang scan (Gemini đọc ảnh): khoảng ${f(scanLow)}–${f(scanHigh)} token`),line('Bìa, trang trống và trang bỏ qua: 0 token'));root.append(list);}
+ // Once pages are done, the book's own average says more than the generic range.
+ const projection=bookJob?wholeBook.usageProjection({...bookJob,pageStates:states}):null;
+ if(projection?.pending)root.append(line(`Theo mức quyển này đã dùng (khoảng ${f(projection.perPage)} token mỗi trang): còn khoảng ${f(projection.remaining)} token cho ${projection.pending} trang.`,'p','estimate-total'));
+ if(bookSurvey&&!bookSurvey.done&&!bookSurvey.failed)root.append(line(`Đang đọc lớp chữ của tệp: ${bookSurvey.kinds.length}/${bookSurvey.total||'?'} trang…`,'p'));
+ root.append(line('Số đo thật: một trang có lớp chữ khoảng 867 token; trang scan cần thêm 2.100–5.200 token cho bước đọc ảnh. Số thật tùy lượng chữ, công thức và model; trang trống chỉ biết sau khi tách trang.','p','hint'));
+}
+// Text layers only (no drawing): a 300-page book takes seconds, after the cover detector is done with the file.
+function startBookSurvey(){
+ const file=selectedFile;if(!file||bookSurvey?.file===file)return;
+ const survey=bookSurvey={file,kinds:[],total:selectedTotalPages,done:false,failed:false},current=()=>bookSurvey===survey;
+ Promise.resolve(coverTask).catch(()=>{}).then(()=>current()?wholeBook.surveyPages(file,{cancelled:()=>!current(),onProgress:kinds=>{if(current()){survey.kinds=kinds;renderBookPanel();}}}):null)
+  .then(kinds=>{if(kinds&&current()){survey.kinds=kinds;survey.done=true;renderBookPanel();}}).catch(()=>{if(current()){survey.failed=true;renderBookPanel();}});
+}
+async function loadBookJobs(){const data=await api('book-jobs').catch(()=>null);if(data)bookJobs=Array.isArray(data.jobs)?data.jobs:[];if(bookJob)bookJob=bookJobs.find(job=>job.id===bookJob.id)||bookJob;if(!bookRun)flushBookReports();return bookJobs;}
+// Tokens a run in this browser spent but could not report (its last report failed, the tab closed) are sent the next
+// time the jobs are listed: tokens only, accepted whichever device runs the book, each report counted once.
+function flushBookReports(){
+ for(const job of bookJobs){
+  const pending=bookReports.load(job.id).slice(0,20);if(!pending.length)continue;
+  api(`book-jobs/${encodeURIComponent(job.id)}`,{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({reports:pending})}).then(data=>{const sent=new Set(pending.map(report=>report.id));bookReports.save(job.id,bookReports.load(job.id).filter(report=>!sent.has(report.id)));upsertJob(data?.job);renderBookPanel();renderStudyBooks();}).catch(()=>{});
+ }
+}
+function upsertJob(job){if(!job?.id)return job;const index=bookJobs.findIndex(entry=>entry.id===job.id);if(index>=0)bookJobs[index]=job;else bookJobs.unshift(job);if(bookJob?.id===job.id)bookJob=job;return job;}
+async function patchBookJob(id,body){const data=await api(`book-jobs/${encodeURIComponent(id)}`,{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});return upsertJob(data?.job||data);}
+// The picked file's SHA-256, also over 25 MB where the shared hash stops: it names the stored original.
+function bookHash(){
+ if(!bookHashTask){const file=selectedFile;bookHashTask=selectedHash.then(hash=>hash||(file?file.arrayBuffer().then(wholeBook.digestHex):''));}
+ return bookHashTask;
+}
+// A picked PDF that already has a whole-book run (the same file, on any device) continues it instead of starting over.
+async function findBookJob(version){
+ try{
+  await loadBookJobs();if(version!==selectionVersion||!bookJobs.length)return;
+  const sha256=await bookHash();if(version!==selectionVersion||!sha256)return;
+  // An unfinished run is continued at once (so no page is paid for twice); a finished one shows only in "Dịch cả quyển".
+  const job=bookJobs.find(entry=>entry.sourceSha256===sha256&&entry.status!=='done')||(bookMode?bookJobs.find(entry=>entry.sourceSha256===sha256):null);
+  if(job&&!running)bindBookJob(job);renderHistory();
+ }catch{}
+}
+// "Tiếp tục" in the history: the run goes on from the original kept in the account; no file to pick again.
+async function openBookJob(id){
+ if(running)return;const job=bookJobs.find(entry=>entry.id===id);if(!job)return;
+ await layoutConfiguration;if(!layoutConfig.configured)throw new Error('Dịch vụ PDF giữ bố cục chưa sẵn sàng nên chưa dịch tiếp được quyển này. Hãy thử lại sau.');$('#pdf-layout-enabled').checked=true;
+ const version=++selectionVersion;busy(true);
+ try{
+  const same=Boolean(selectedFile)&&await bookHash()===job.sourceSha256;if(version!==selectionVersion)return;
+  if(!same){
+   unbindBook();await dualViewer.clear();selectedFile=null;selectedHash=Promise.resolve('');resetCover();autoRange='';pdfAnalysis=null;preparedPages=new Map();preparedRangeKey=null;clearPageImages();ocrWarnings=[];translationState=null;translationParts=[];pdfLayoutDocument=null;pdfExportUrl='';pdfLayoutRange='';clearPartStream();
+   $('#source').readOnly=false;$('#source').value='';$('#translation').value='';$('#warnings').textContent='';$('#download').disabled=true;$('#download-pdf').disabled=true;$('#source-file').value='';$('#pdf-range-options').hidden=true;$('#page-range').value='';$('#library-match').hidden=true;updateCount();
+   setFileStatus(`${job.filename||'PDF gốc'} · dùng bản gốc đã lưu trong tài khoản, không cần chọn lại tệp.`);
+  }
+  resetHistoryIdentity();selectedSha256=job.sourceSha256;selectedTotalPages=job.totalPages;bookTarget={id:job.storyId||'',replaceChapterId:''};bindBookJob(job);workflow(2);
+  $('.workspace').scrollIntoView({behavior:'smooth',block:'start'});
+ }finally{busy(false);}
+ if(version!==selectionVersion)return;
+ if(sessionKey||$('#api-key').value.trim())await run();else{$('#api-key').focus();status('Dán khóa Gemini rồi bấm Tiếp tục dịch cả quyển.');}
+}
+// The original as pdf-lib reads it: the picked file, or the copy kept in the account when a run continues after a reload.
+async function prepareBookSource(){
+ const wanted=bookJob?.sourceSha256||'';if(bookSource&&(!wanted||bookSource.sha256===wanted))return bookSource;
+ const {PDFDocument}=await wholeBook.loadPdfLib();let bytes,file=selectedFile,sha256='';
+ if(file){
+  bookStatus('Đang đọc tệp PDF trên thiết bị…');bytes=new Uint8Array(await file.arrayBuffer());sha256=await selectedHash||await wholeBook.digestHex(bytes);bookHashTask=Promise.resolve(sha256);
+  if(wanted&&sha256!==wanted)throw new Error('Tệp đang chọn không phải bản gốc của quyển đang dịch dở. Hãy chọn đúng tệp, hoặc bấm Tiếp tục ở quyển đó trong Lịch sử dịch.');
+ }else{
+  if(!wanted)throw new Error('Hãy chọn PDF gốc.');
+  bookStatus('Đang lấy bản gốc từ tài khoản…');bytes=await wholeBook.downloadSource(wanted,{onProgress:share=>bookStatus(`Đang lấy bản gốc từ tài khoản… ${Math.round(share*100)}%`)});
+  sha256=wanted;file=new File([bytes],bookJob.filename||'nguyen-tac.pdf',{type:'application/pdf'});
+ }
+ bookStatus('Đang mở PDF để chia lượt dịch…');const doc=await wholeBook.openSourcePdf(PDFDocument,bytes),totalPages=doc.getPageCount();
+ if(bookJob&&totalPages!==bookJob.totalPages)throw new Error(`Bản gốc có ${totalPages} trang, khác ${bookJob.totalPages} trang của lượt dịch này.`);
+ selectedSha256=sha256;bookStatus('');
+ return bookSource={sha256,file,filename:file.name,totalPages,cut:pages=>wholeBook.cutChunk(PDFDocument,doc,pages)};
+}
+// The original goes to the account once (HEAD first): every chunk is cut from it, here or on another device.
+async function uploadOriginal(source){
+ const url=`/api/my/study/sources/${source.sha256}`,head=await fetch(url,{method:'HEAD',credentials:'same-origin'}).catch(()=>null);
+ if(head?.status===401)throw new Error('Phiên đăng nhập đã hết hạn. Hãy đăng nhập lại rồi mở lại Xưởng dịch.');if(head?.ok)return;
+ const label='Đang tải bản gốc lên tài khoản (một lần cho cả quyển)…';bookStatus(label);
+ await wholeBook.uploadSource(url,source.file,{pages:source.totalPages,filename:source.filename,onProgress:share=>bookStatus(`${label} ${Math.round(share*100)}%`)});bookStatus('');
+}
+async function createBookJob(source){
+ const title=requireContentTitle(),coverPage=coverExcluded()?cover.page:0,matching=matchingBook();let job;
+ try{job=(await api('book-jobs',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sourceSha256:source.sha256,totalPages:source.totalPages,filename:source.filename,title,domain:$('#domain').value,mode:$('#mode').value,chunkSize:wholeBook.CHUNK_PAGES,...(coverPage?{coverPage}:{}),...(matching?{storyId:matching.id}:{}),glossary:parseStudyGlossary($('#glossary').value)})})).job;}
+ // The file already has an unfinished run (another tab or device started it): that run goes on.
+ catch(error){if(error.data?.code!=='job_exists'||!error.data.job)throw error;return upsertJob(error.data.job);}
+ // Pages the chosen book already has from this file (ranges translated by hand) are not paid for again.
+ const owned=matching?matching.parts.filter(part=>Array.isArray(part.pages)&&sameSource(part,{sha256:source.sha256,filename:source.filename,totalPages:source.totalPages})).flatMap(part=>part.pages):[];
+ const updates={...wholeBook.rangeUpdates(job.pageStates,bookChosenPages(source.totalPages)),...wholeBook.statesFor(owned.filter(page=>wholeBook.stateAt(job.pageStates,page)==='pending'),'done')};
+ return Object.keys(updates).length?patchBookJob(job.id,{pages:updates}):upsertJob(job);
+}
+// A run continued without the picked file still gives a new book its cover image, drawn from the stored original.
+async function ensureBookCover(source){
+ const page=bookJob.pageStates.indexOf('c')+1;if(selectedFile||!page||cover.page===page&&cover.jpeg||studyBooks.find(book=>book.id===bookJob.storyId)?.cover?.image)return;
+ const jpeg=await pageJpeg(source.file,page).catch(()=>null);Object.assign(cover,{page,source:'detected',replace:false,synced:'',note:''});setCoverImage(jpeg);
+}
+// A chunk session saved earlier (in another tab, before a reload) becomes the open session again, as the history opens it.
+async function resumeChunkSession(id){
+ const item=await api(`history/${encodeURIComponent(id)}`),state=item.state||{};if(!state.pdfLayout)throw Object.assign(new Error('Phần này không có bố cục PDF.'),{status:409});
+ const document=await api(`pdf-layout/assets/${state.pdfLayout.assetId}/manifest`);
+ await dualViewer.clear();pdfLayoutDocument=document;pdfExportUrl='';pdfLayoutRange='';clearPageImages();
+ activeHistoryId=item.id;activeHistoryMeta={title:item.title,filename:item.filename};historyWarningShown=false;bookChunkId=item.id;bookTarget={id:item.library_story_id||bookJob?.storyId||'',replaceChapterId:''};
+ const parts=Array.isArray(state.parts)?state.parts:[];translationParts=Array.isArray(state.translationParts)?state.translationParts.slice(0,parts.length):[];while(translationParts.length<parts.length)translationParts.push('');
+ const fixedGlossary={...(bookJob?.glossary||{})};translationState={source:state.source||'',domain:item.domain||'general',mode:item.mode||'economy',parts,plan:parts.map(text=>({text,pages:[],blockIds:{}})),done:Math.min(Number(state.done)||0,parts.length),context:state.context||'',glossary:{...(state.glossary||{}),...fixedGlossary,...(state.manualGlossary||{})},manualGlossary:state.manualGlossary||{},fixedGlossary,previousSource:'',previousTranslation:'',pdfLayout:state.pdfLayout};
+ // OCR that never finished goes on from the manifest, which keeps every batch already read and paid for.
+ if(!translationState.done&&document.pages.some(page=>page.ocr&&page.blocks.some(b=>!b.ocrCorrected)))translationState.pdfLayout.ocrPending=true;
+ if(state.pdfLayout.exported&&state.pdfLayout.renderVersion>=3)pdfExportUrl=`/api/my/study/pdf-layout/assets/${state.pdfLayout.assetId}/translated`;
+ clearPartStream();syncPdfText();await dualViewer.setDocument(pdfLayoutDocument,pdfTranslations());
+}
+// One chunk, done exactly as a range picked by hand; createBookRun (whole-book.js) drives these steps and the job.
+const transient=error=>error?.status===0||error?.status===429||error?.status>=500;
+const bookSteps={
+ async open(job,chunk){
+  // The chunk this tab stopped in goes on where it was; one saved elsewhere is opened again (its tokens are spent).
+  if(bookChunkId&&bookChunkId===activeHistoryId&&translationState?.pdfLayout&&pdfLayoutDocument?.pages.some(page=>page.number===chunk.start))return {document:pdfLayoutDocument};
+  const item=wholeBook.findChunkSession(historyItems,job,chunk.start);if(!item)return null;
+  try{await resumeChunkSession(item.id);}catch(error){if(transient(error))throw error;return null;}
+  return {document:pdfLayoutDocument};
+ },
+ // sessionId: the same for every retry of this save, so a save whose answer was lost is not made twice.
+ async start(result,job,{sessionId=''}={}){
+  resetHistoryIdentity();historyIdToCreate=sessionId;activeHistoryMeta={title:job.title,filename:job.filename};bookTarget={id:job.storyId||'',replaceChapterId:''};pdfLayoutRange='';clearPageImages();
+  await adoptPdfLayout(result,{glossary:job.glossary,context:bookContext});
+  // Notes of earlier chunks stay in view; "dịch tiếp ở lượt sau" is what the run does by itself, so it is not shown.
+  const notes=[...bookNotes,...(result.document.warnings||[]).filter(note=>!/^Lượt này xử lý \d+\/\d+ trang/u.test(note))];$('#warnings').textContent=notes.length?`${notes.join('\n')}\n`:'';
+  bookChunkId='';await saveHistoryStrict();bookChunkId=activeHistoryId;
+ },
+ async translate({shouldStop,renew}){return translateLayoutSession(await ensureStudyModel('pdf'),{pageStop:true,shouldStop,heartbeat:renew});},
+ async finish(){
+  await saveHistoryStrict();let warning='';
+  // Exporting uses only the PDF service, never Gemini: a part that fails here can be exported later from the history.
+  try{await exportLayoutPdf(false,{show:false});}catch(error){if(transient(error))throw error;const pages=pdfLayoutDocument.pages.map(page=>page.number);warning=`${pageLabel(Math.min(...pages),Math.max(...pages)).replace(/^t/u,'T')}: chưa xuất được PDF tiếng Việt (${error.message}). Mở phần này trong Lịch sử dịch rồi bấm Xuất PDF tiếng Việt; không tốn token.`;}
+  bookContext=translationState.context||'';
+  return {storyId:lastSavedHistory?.libraryStoryId||null,glossary:{...translationState.glossary},warning};
+ }
+};
+function bookFinishedMessage(job){
+ const failed=[...job.pageStates].flatMap((char,index)=>char==='f'?[index+1]:[]);
+ return `Đã dịch xong cả quyển: ${wholeBook.progressText(job.pageStates).replace(/^Đã dịch /u,'')}${failed.length?`; trang ${wholeBook.pageList(failed)} chưa xử lý được nên giữ nguyên bản gốc`:''}. Mở Thư viện riêng để đọc hoặc tải cả quyển.`;
+}
+// Whether this device may run the bound job now. Another device's run holds it while it keeps reporting: the student is
+// told so, or, having chosen to wait ("Chờ rồi dịch tiếp"), the job is watched (its progress shows here) until that run
+// pauses, finishes or stops reporting. Nothing is downloaded or paid for meanwhile.
+async function bookRunnerFree(wait){
+ let announced=false;
+ for(;;){
+  const job=await api(`book-jobs/${encodeURIComponent(bookJob.id)}`).then(data=>upsertJob(data.job)).catch(error=>{if(error.status===404)throw error;return null;});
+  renderBookPanel();renderStudyBooks();
+  if(!job||!wholeBook.heldElsewhere(job,bookRunner))return true;
+  if(!wait){bookBusy=true;const message=wholeBook.pauseMessage('busy',{data:{retryAfter:job.leaseSeconds}});bookStatus(message);status(message,'error');return false;}
+  const stopped=await wholeBook.countdown(Math.min(10,Math.max(2,job.leaseSeconds)),{onTick:left=>{bookStatus(wholeBook.waitMessage('busy',left),{quiet:announced});announced=true;},stopped:()=>stopRequested});
+  if(stopped){bookBusy=true;const message='Đã thôi chờ. Quyển này vẫn đang được dịch ở thiết bị khác; bấm Chờ rồi dịch tiếp khi muốn chờ tiếp.';bookStatus(message);status(message);return false;}
+ }
+}
+async function runWholeBook(){
+ key();if(!layoutConfig.configured)throw new Error('Chưa cấu hình dịch vụ PDF giữ bố cục.');
+ // Pressed while another device runs the book: the student chose to wait for it.
+ const waiting=bookBusy;busy(true);stopRequested=false;bookBusy=false;
+ try{
+  await ensureStudyModel('pdf');
+  if(bookJob&&!await bookRunnerFree(waiting))return;
+  if(bookJob&&await wholeBook.jobLockHeld(bookJob.id))throw new Error('Quyển này đang được dịch ở một tab khác của trình duyệt. Hãy dùng tab đó, hoặc đóng nó rồi thử lại.');
+  // Waited for another device that has finished the book meanwhile: nothing is left to download or translate here.
+  if(waiting&&bookJob&&!/[.f]/u.test(bookJob.pageStates)){const message=bookFinishedMessage(bookJob);bookStatus(message);status(message);return;}
+  const source=await prepareBookSource();
+  if(selectedFile)await uploadOriginal(source);
+  // The cover is known before the job starts, or it would be translated (and paid for) like any page.
+  if(!bookJob&&selectedFile){bookStatus('Đang tìm trang bìa…');await coverTask.catch(()=>{});}
+  const resumed=Boolean(bookJob)&&bookJob.sourceSha256===source.sha256;if(!resumed)bookJob=await createBookJob(source);
+  // A new run of an existing job tries every page not done yet, failed ones included; the range field adds or skips
+  // pages only when the student edited it. These changes go with the run's claim of the job.
+  const updates=resumed?wholeBook.resumeUpdates(bookJob.pageStates,bookPagesEdited?bookChosenPages(bookJob.totalPages):null,bookPagesEdited):{};
+  setBookMode(true);await ensureBookCover(source);bookNotes=[];
+  let chunkText='',waitingFor='';
+  const run=bookRun=wholeBook.createBookRun({api,source,steps:bookSteps,shouldStop:()=>stopRequested,runner:bookRunner,reports:bookReports,ui:{
+   job(job){const changed=job!==bookJob;bookJob=upsertJob(job);renderBookPanel();if(changed)renderStudyBooks();},
+   chunk(chunk){bookWorking=chunk?new Set(chunk.pages):null;chunkText=chunk?`Đang dịch ${pageLabel(chunk.start,chunk.pages.at(-1))}…`:'';if(chunk)bookStatus(chunkText);renderBookPanel();},
+   waiting(reason,left){if(!reason){waitingFor='';if(chunkText)bookStatus(chunkText);return;}bookStatus(wholeBook.waitMessage(reason,left),{quiet:waitingFor===reason});waitingFor=reason;},
+   warn(message){bookNotes.push(message);$('#warnings').textContent+=`${message}\n`;}
+  }});
+  let outcome=null;
+  await wholeBook.withJobLock(bookJob.id,async()=>{await wake.on();try{outcome=await run.run(bookJob,{pages:updates});}finally{await wake.off();}});
+  bookJob=upsertJob(outcome.job||bookJob);
+  if(outcome.status==='done'){const message=bookFinishedMessage(bookJob);bookStatus(message);status(message);}
+  else{
+   if(outcome.reason==='gemini_key'){sessionKey='';const input=$('#api-key');input.setAttribute('aria-invalid','true');input.focus();$('#key-status').textContent='Khóa vừa nhập chưa được Gemini chấp nhận.';}
+   if(outcome.reason==='busy')bookBusy=true;
+   bookStatus(outcome.message);status(outcome.message,outcome.reason==='stopped'?'':'error');
+  }
+ }catch(error){rejectKey(error);fail(error);bookStatus(String(error?.message||error));}
+ finally{bookRun=null;bookWorking=null;historyIdToCreate='';busy(false);stopRequested=false;renderBookPanel();renderStudyBooks();}
+}
+function openDeleteDialog(id){
+ const item=historyItems.find(entry=>entry.id===id);if(!item||running)return;const pages=item.page_start?` (${pageLabel(item.page_start,item.page_end||item.page_start)})`:'';
+ openBookDialog('Xóa bản dịch?',body=>{const note=document.createElement('p');note.textContent=`Xóa “${item.title||'Bản dịch chưa đặt tên'}”${pages} khỏi lịch sử và Thư viện riêng? Bản dịch, PDF tiếng Việt và tệp gốc chỉ dùng cho phần này sẽ bị xóa vĩnh viễn.`;body.append(note);},()=>deleteHistory(id),'Xóa vĩnh viễn','Đang xóa…');
+}
+async function deleteHistory(id){
+ const item=historyItems.find(entry=>entry.id===id),groups=wholeBook.sessionsByJob(historyItems,bookJobs),job=item&&bookJobs.find(entry=>groups.get(entry.id).some(part=>part.id===id));let result;
+ try{result=await api(`history/${encodeURIComponent(id)}`,{method:'DELETE'});}
+ catch(error){if(error.status!==404)throw error;await loadHistory();status('Bản dịch này đã được xóa trước đó.');return;}
+ historyItems=historyItems.filter(entry=>entry.id!==id);if(id===bookChunkId)bookChunkId='';
+ if(id===activeHistoryId){resetHistoryIdentity();await dualViewer.clear();translationState=null;translationParts=[];pdfLayoutDocument=null;pdfExportUrl='';pdfLayoutRange='';clearPartStream();$('#source').readOnly=false;$('#source').value='';$('#translation').value='';$('#warnings').textContent='';$('#download').disabled=true;$('#download-pdf').disabled=true;updateCount();workflow(1);}
+ if(result.removedBookId){studyBooks=studyBooks.filter(book=>book.id!==result.removedBookId);if(bookTarget.id===result.removedBookId)bookTarget={id:'',replaceChapterId:''};}
+ // A whole-book part leaves its run too: the server offers its pages again unless the run's book still holds them, and
+ // forgets an emptied book; the run is shown as it is now (another device may be running it, so nothing is sent).
+ if(job)await loadBookJobs();
+ renderBookTarget();renderHistory();renderBookPanel();status('Đã xóa bản dịch.');
+}
+function openJobDeleteDialog(id){
+ const job=bookJobs.find(entry=>entry.id===id);if(!job||running)return;
+ openBookDialog('Xóa tiến độ dịch cả quyển?',body=>{const note=document.createElement('p');note.textContent=`Xóa bảng tiến độ của “${job.title}”? Các phần đã dịch vẫn nằm trong Lịch sử dịch và Thư viện riêng. Lần sau dịch cả quyển này, Hoa Trí bắt đầu bảng mới và bỏ qua các trang sách đã có.`;body.append(note);},async()=>{
+  await api(`book-jobs/${encodeURIComponent(id)}`,{method:'DELETE'}).catch(error=>{if(error.status!==404)throw error;});
+  bookReports.save(id,[]);bookJobs=bookJobs.filter(entry=>entry.id!==id);if(bookJob?.id===id){bookJob=null;bookStatus('');updateTitleControls();}renderHistory();renderBookPanel();status('Đã xóa tiến độ dịch cả quyển.');
+ },'Xóa tiến độ','Đang xóa…');
+}
+
 $('#source').addEventListener('input',()=>{resetHistoryIdentity();if(!bookChoiceActive())bookTarget={id:'',replaceChapterId:''};translationState=null;translationParts=[];clearPartStream();$('#translation').value='';$('#download').disabled=true;updateCount();});
 $('#content-title').addEventListener('input',event=>{event.currentTarget.setCustomValidity('');event.currentTarget.removeAttribute('aria-invalid');updateTitleControls();$('#content-title-hint').textContent=activeHistoryId?'Bấm Lưu tên để cập nhật lịch sử và Thư viện riêng.':'Tên này xuất hiện trong lịch sử, Thư viện riêng và tệp tải xuống.';});
 $('#save-title').addEventListener('click',()=>renameHistory().catch(fail));
 $('#domain').addEventListener('change',event=>{if(event.target.value==='math'&&!$('#glossary').value.trim())$('#glossary').value=MATH_GLOSSARY;if(translationState?.pdfLayout){translationState.domain=event.target.value;translationState.manualGlossary=parseStudyGlossary($('#glossary').value);Object.assign(translationState.glossary,translationState.manualGlossary);}else translationState=null;});
-$('#pdf-layout-enabled').addEventListener('change',()=>{if(selectedFile)selectionTask=selected(selectedFile).catch(fail);});
+$('#pdf-layout-enabled').addEventListener('change',()=>{if(selectedFile)selectionTask=selected(selectedFile).catch(fail);else if(bookJob)unbindBook();});
 $('#library-match-dismiss').addEventListener('click',()=>{$('#library-match').hidden=true;});
 $('#source-file').addEventListener('change',event=>{selectionTask=selected(event.target.files[0]).catch(error=>{fail(error);return false;});});
-$('#study-history-list').addEventListener('click',event=>{const merge=event.target.closest('[data-history-merge]');if(merge){openMergeDialog(merge.dataset.historyMerge);return;}const button=event.target.closest('[data-history-open]');if(button)openHistory(button.dataset.historyOpen).catch(fail);});
-$('#study-books-list').addEventListener('click',event=>{const button=event.target.closest('[data-book-order]');if(button)openOrderDialog(button.dataset.bookOrder);});
+$('#study-history-list').addEventListener('click',event=>{const remove=event.target.closest('[data-history-delete]');if(remove){openDeleteDialog(remove.dataset.historyDelete);return;}const merge=event.target.closest('[data-history-merge]');if(merge){openMergeDialog(merge.dataset.historyMerge);return;}const button=event.target.closest('[data-history-open]');if(button)openHistory(button.dataset.historyOpen).catch(fail);});
+$('#study-books-list').addEventListener('click',event=>{
+ const target=event.target.closest('[data-book-order],[data-book-resume],[data-book-delete],[data-history-open],[data-history-delete]');if(!target||target.disabled)return;const data=target.dataset;
+ if(data.bookOrder)openOrderDialog(data.bookOrder);else if(data.bookResume)openBookJob(data.bookResume).catch(fail);else if(data.bookDelete)openJobDeleteDialog(data.bookDelete);else if(data.historyDelete)openDeleteDialog(data.historyDelete);else openHistory(data.historyOpen).catch(fail);
+});
+$('#book-mode').addEventListener('change',event=>{if(running||event.target.name!=='book-mode')return;setBookMode(event.target.value==='book');bookFileStatus();if(bookMode&&selectedFile&&!bookJob)findBookJob(selectionVersion);});
+$('#book-pages').addEventListener('input',event=>{const input=event.currentTarget,total=bookJob?.totalPages||selectedTotalPages;bookPagesEdited=true;try{if(total)bookChosenPages(total);input.setCustomValidity('');input.removeAttribute('aria-invalid');}catch(error){input.setCustomValidity(error.message);input.setAttribute('aria-invalid','true');}renderBookPanel();});
+// Closing the tab mid-run loses only the page in progress, but the browser asks first.
+addEventListener('beforeunload',event=>{if(bookRun){event.preventDefault();event.returnValue='';}});
+$('#source-lookup').addEventListener('click',()=>lookupTextarea($('#source')));
+attachHanziLookup($('#translation-parts'),{selector:'.region-description[lang|="zh"],.translation-document'});
+attachHanziLookup($('#pdf-dual-viewer'),{selector:'[data-hanzi-lookup]'});
 $('#book-target').addEventListener('change',()=>{bookChoiceTouched=true;delete $('#book-replace-option').dataset.part;updateBookHint();applyBookCover().then(()=>{renderCover();refreshOfferedRange();updateBookHint();}).catch(()=>{});});
 $('#page-range').addEventListener('input',()=>{cover.note='';updateBookHint();renderCover();});
 $('#cover-change').addEventListener('click',openCoverDialog);
@@ -669,11 +1057,11 @@ $('#cover-none').addEventListener('click',()=>{if(running)return;Object.assign(c
 $('#cover-translate').addEventListener('change',()=>{cover.note='';renderCover();updateBookHint();});
 $('#book-replace').addEventListener('change',updateBookHint);
 $('#book-next-range').addEventListener('click',event=>{$('#page-range').value=event.currentTarget.dataset.range||$('#page-range').value;cover.note='';updateBookHint();renderCover();$('#page-range').focus();});
-$('#book-dialog-form').addEventListener('submit',async event=>{event.preventDefault();if(!dialogSubmit)return;const button=$('#book-dialog-submit');button.disabled=true;$('#book-dialog-status').textContent='Đang lưu…';try{await dialogSubmit();closeBookDialog();}catch(error){$('#book-dialog-status').textContent=error.message;button.disabled=false;}});
+$('#book-dialog-form').addEventListener('submit',async event=>{event.preventDefault();if(!dialogSubmit)return;const button=$('#book-dialog-submit');button.disabled=true;$('#book-dialog-status').textContent=dialogWorking;try{await dialogSubmit();closeBookDialog();}catch(error){$('#book-dialog-status').textContent=error.message;button.disabled=false;}});
 $('#book-dialog-cancel').addEventListener('click',closeBookDialog);
 $('#translate').addEventListener('click',()=>run().catch(fail));
 $('#check-gemini-model').addEventListener('click',()=>{if(running)return;ensureStudyModel($('#pdf-layout-enabled').checked&&(selectedFile?.name.toLowerCase().endsWith('.pdf')||translationState?.pdfLayout)?'pdf':'text').then(model=>status(`Đã kiểm tra ${model}. Bấm Bắt đầu dịch để tiếp tục.`)).catch(fail);});
-$('#stop').addEventListener('click',()=>{stopRequested=true;status('Sẽ dừng sau yêu cầu đang chạy.');});
+$('#stop').addEventListener('click',()=>{stopRequested=true;const message=bookRun?'Sẽ dừng khi xong trang đang dịch; tiến độ được lưu.':'Sẽ dừng sau yêu cầu đang chạy.';status(message);if(bookRun)bookStatus(message);});
 $('#api-key').addEventListener('input',event=>{event.currentTarget.setCustomValidity('');event.currentTarget.removeAttribute('aria-invalid');});
 $('#clear-key').addEventListener('click',()=>{sessionKey='';$('#api-key').value='';$('#key-status').textContent='Chưa nạp khóa cho phiên này.';status('Đã xóa khóa API khỏi phiên.');});
 $('#download').addEventListener('click',()=>{const blob=new Blob(['\uFEFF'+$('#translation').value],{type:'text/plain;charset=utf-8'}),url=URL.createObjectURL(blob),link=document.createElement('a');link.href=url;link.download=downloadFilename('txt');link.click();setTimeout(()=>URL.revokeObjectURL(url),1000);});
@@ -688,5 +1076,5 @@ function renderHeaderAccount(user){
  if(user.picture){const image=document.createElement('img');image.src=user.picture;image.alt='';image.width=32;image.height=32;image.referrerPolicy='no-referrer';avatar.append(image);}else avatar.textContent=initials;
  link.append(avatar,label);document.querySelector('.site-header-actions')?.replaceChildren(link);
 }
-fetch('/api/me',{credentials:'same-origin'}).then(response=>response.json()).then(data=>{if(data.authenticated){renderHeaderAccount(data.user);$('#account-status').hidden=true;$('#study-history').hidden=false;$('#study-history-count').textContent='· đang tải…';$('#account-status').textContent=`Đang học với tài khoản ${data.user.name||data.user.email}.`;loadHistory().catch(error=>{historyItems=[];renderHistory();$('#warnings').textContent+=`Không tải được lịch sử: ${error.message}\n`;});return;}$('#account-status').innerHTML='Hãy <a href="/#account">đăng nhập hoặc tạo tài khoản</a> trước khi dịch.';$('#translate').disabled=true;}).catch(()=>{$('#account-status').textContent='Không kiểm tra được trạng thái đăng nhập.';$('#translate').disabled=true;});
+fetch('/api/me',{credentials:'same-origin'}).then(response=>response.json()).then(data=>{if(data.authenticated){renderHeaderAccount(data.user);$('#account-status').hidden=true;$('#study-history').hidden=false;$('#study-history-count').textContent='· đang tải…';$('#account-status').textContent=`Đang học với tài khoản ${data.user.name||data.user.email}.`;loadHistory().then(()=>{if(bookJobs.some(job=>job.status!=='done'&&/[.f]/u.test(job.pageStates)))$('#study-history').open=true;}).catch(error=>{historyItems=[];renderHistory();$('#warnings').textContent+=`Không tải được lịch sử: ${error.message}\n`;});return;}$('#account-status').innerHTML='Hãy <a href="/#account">đăng nhập hoặc tạo tài khoản</a> trước khi dịch.';$('#translate').disabled=true;}).catch(()=>{$('#account-status').textContent='Không kiểm tra được trạng thái đăng nhập.';$('#translate').disabled=true;});
 updateCount();

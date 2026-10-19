@@ -4,3 +4,7 @@
   X-Frame-Options: DENY
   Permissions-Policy: camera=(), microphone=(), geolocation=()
   Cross-Origin-Opener-Policy: same-origin
+# Dictionary data (npm run prepare:dict): each build gets a new content-hashed folder, so its files never change.
+# /vendor/dict/manifest.json stays outside this rule and is revalidated on every load.
+/vendor/dict/v/*
+  Cache-Control: public, max-age=31536000, immutable

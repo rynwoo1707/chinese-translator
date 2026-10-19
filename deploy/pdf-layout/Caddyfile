@@ -1,0 +1,45 @@
+# TLS reverse proxy in front of the PDF layout service (docker-compose.yml in this folder). Caddy obtains and renews
+# the certificate for {$PDF_DOMAIN} by itself, so the DNS record must point straight at this server (Cloudflare:
+# "DNS only", grey cloud): a proxied record would cut every request at 100 s.
+{
+	email {$ACME_EMAIL}
+	servers {
+		# The Worker speaks HTTP/1.1 or HTTP/2; UDP 443 (HTTP/3) stays closed.
+		protocols h1 h2
+		timeouts {
+			read_header 30s
+			# A whole request body (at most 40 MiB of JSON) must arrive within 2 minutes.
+			read_body 2m
+			idle 5m
+		}
+	}
+}
+
+{$PDF_DOMAIN} {
+	# The service itself refuses PDFs over 25 MiB and JSON over 40 MiB with a clear message; this only stops bodies
+	# far beyond that before they reach it.
+	request_body {
+		max_size 48MB
+	}
+
+	@service path /health /font /extract /render
+	handle @service {
+		reverse_proxy pdf-layout:8091 {
+			transport http {
+				dial_timeout 5s
+				# One extraction or export can take up to 280 s (the Worker waits 280 s, Python stops at 240 s).
+				response_header_timeout 300s
+				# Node closes idle connections after 5 s; reusing one that is closing turns a POST into a 502.
+				keepalive off
+			}
+		}
+	}
+	handle {
+		respond 404
+	}
+
+	# Access log (docker compose logs caddy). Caddy writes Authorization and Cookie as "REDACTED": no token in logs.
+	log {
+		format json
+	}
+}

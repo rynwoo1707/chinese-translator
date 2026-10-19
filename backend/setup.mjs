@@ -9,7 +9,7 @@ import {join} from 'node:path';
 import {createInterface} from 'node:readline';
 
 const root=fileURLToPath(new URL('../',import.meta.url));process.chdir(root);
-const STEPS=7,windows=process.platform==='win32',warnings=[],problems=[];
+const STEPS=8,windows=process.platform==='win32',warnings=[],problems=[];
 const step=(n,text)=>console.log(`\n[${n}/${STEPS}] ${text}`);
 function run(command,args,{hint='',...options}={}){
  const result=spawnSync(command,args,{stdio:'inherit',windowsHide:true,...options});
@@ -123,6 +123,11 @@ step(7,'Cơ sở dữ liệu D1 cục bộ (.wrangler)');
 // stdin is not a terminal here, so wrangler applies the pending migrations without asking.
 if(longPath)console.log('Bỏ qua vì đường dẫn thư mục dự án quá dài (xem LỖI bên dưới).');
 else attempt('Chưa tạo được cơ sở dữ liệu local. Nếu wrangler báo "internal error; reference = …": chuyển dự án vào thư mục có đường dẫn ngắn hơn rồi chạy lại.',()=>run(process.execPath,['node_modules/wrangler/bin/wrangler.js','d1','migrations','apply','DB','--local'],{stdio:['ignore','inherit','inherit']}));
+
+// Last, because it is optional and the slowest download, and no other step needs it. Warning only: without the data the
+// lookup panel says so and translation works as before. prepare-dictionary.mjs skips itself when already up to date.
+step(8,'Từ điển Pinyin & Hán Việt cho tra cứu chữ Hán (tải khoảng 29 MB một lần, không dùng Gemini)');
+try{node('backend/prepare-dictionary.mjs');}catch{warnings.push('Chưa tạo được từ điển tra cứu chữ Hán (xem lỗi ở bước 8). Nút "Tra chữ Hán" sẽ báo chưa có dữ liệu; phần dịch vẫn dùng được. Khi có mạng, chạy "npm run prepare:dict".');}
 
 for(const warning of warnings)console.warn(`\nCẢNH BÁO: ${warning}`);
 for(const problem of problems)console.error(`\nLỖI: ${problem}`);

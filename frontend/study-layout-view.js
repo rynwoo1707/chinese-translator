@@ -56,15 +56,17 @@ export function translationContentHtml(text,figures=[]){
 
 // Shared with standalone HTML export so diagrams and reading order survive download.
 export const readingStyles=`.translation-document{max-width:780px;margin:auto;min-width:0;color:#293128;font:16px/1.9 'Noto Serif','Times New Roman','DejaVu Serif',serif;overflow-wrap:anywhere}.translation-document h3{margin:1.8em 0 .75em;font-size:1.2em;line-height:1.5;color:#35472f}.translation-document h3:first-child,.translation-document p:first-child{margin-top:0}.translation-document p{margin:0 0 1em}.translated-formula{max-width:100%;overflow-x:auto;white-space:pre-wrap;font:inherit;padding:12px 16px;background:#f4f5ee;border-radius:8px}.translated-list-item{padding-left:1em}.translation-figures{display:flex;flex-wrap:wrap;justify-content:center;align-items:start;gap:20px;margin:24px 0 30px;padding:20px 14px;border:1px solid #e2e5d9;border-radius:10px;background:#fff}.translated-figure{margin:0;min-width:0;flex:0 1 270px;text-align:center;break-inside:avoid}.translated-figure img{display:block;max-width:100%;width:auto;max-height:330px;height:auto;margin:auto;object-fit:contain}.translated-figure figcaption{margin-top:10px;font:600 12px/1.6 'Segoe UI',sans-serif;color:#536b43}.translated-figure figcaption span{display:block;font-size:10px;font-weight:400;color:#7c8475}.figure-group-label{flex-basis:100%;font:600 12px 'Segoe UI',sans-serif;color:#68765e}.translation-document .figure-group-label{margin:0}.translation-document:empty{display:none}${mathStyles}`;
-export function originalPageView(number,image,entry){
+// onRegion(block,region) runs when a region with Chinese text is tapped (the study page looks it up in the dictionary);
+// a formula-only region of a maths page just shows its text, since there is nothing to look up.
+export function originalPageView(number,image,entry,{onRegion}={}){
  const figure=document.createElement('figure'),frame=document.createElement('div'),img=document.createElement('img'),caption=document.createElement('figcaption');
  figure.className='aligned-original';frame.className='page-canvas';img.src=image.url;img.alt=`Trang gốc ${number}, giữ nguyên hình và công thức`;img.loading='lazy';frame.append(img);
  const engine=entry?.engine==='paddle'?'PaddleOCR':entry?.engine==='tesseract'?'Tesseract':entry?.engine==='gemini'?'Gemini OCR':'Lớp chữ PDF';
  caption.textContent=`Trang ${number} · ${engine}${entry?.confidence!==undefined?` · tin cậy OCR ${entry.confidence}%`:''}`;
- const description=document.createElement('p');description.className='region-description';description.textContent=entry?.layout?.blocks?.length?'Chạm hoặc rê chuột vào vùng chữ để xem nguyên tác.':'Giữ trang gốc để đối chiếu; chưa có tọa độ vùng chữ.';
+ const description=document.createElement('p');description.className='region-description';description.textContent=entry?.layout?.blocks?.length?'Chạm vào vùng chữ để xem nguyên tác và tra chữ Hán.':'Giữ trang gốc để đối chiếu; chưa có tọa độ vùng chữ.';
  for(const block of entry?.layout?.blocks||[]){
   const region=document.createElement('button'),box=block.box;region.type='button';region.className='ocr-region';region.title=block.text;region.setAttribute('aria-label',block.text);region.style.cssText=`left:${box.x*100}%;top:${box.y*100}%;width:${box.width*100}%;height:${box.height*100}%;`;
-  const show=()=>{description.textContent=block.text;};region.addEventListener('pointerenter',show);region.addEventListener('focus',show);region.addEventListener('click',show);frame.append(region);
+  const han=/\p{Script=Han}/u.test(block.text||''),show=()=>{description.lang='zh';description.textContent=block.text;};region.addEventListener('pointerenter',show);region.addEventListener('focus',show);region.addEventListener('click',()=>{show();if(han)onRegion?.(block,region);});frame.append(region);
  }
  figure.append(frame,caption,description);return figure;
 }

@@ -1,6 +1,7 @@
 import {normalizeVietnameseText} from './vietnamese-text.js';
 import {listStudyModels,selectStudyModel,isStudyModel} from './gemini-models.js';
 import {normalizeVectorMath} from '../frontend/math-text.js';
+import {UserError} from './http.js';
 
 export function chunks(text, limit=10000){
  if(!Number.isInteger(limit)||limit<2)throw new Error('Chunk limit must be an integer >= 2');
@@ -53,6 +54,56 @@ const emptyUsage=()=>Object.fromEntries(USAGE_KEYS.map(key=>[key,0]));
 // thoughtsTokenCount is billed as output but is not part of candidatesTokenCount; track it so its cost is visible.
 function usageFrom(metadata){return {prompt:Number(metadata?.promptTokenCount)||0,output:Number(metadata?.candidatesTokenCount)||0,thinking:Number(metadata?.thoughtsTokenCount)||0,total:Number(metadata?.totalTokenCount)||0,requests:1,cacheHits:0};}
 function addUsage(target,value){for(const key of USAGE_KEYS)target[key]=(target[key]||0)+(value?.[key]||0);return target;}
+// Gemini bills an answer that is cut off, blocked or malformed like any other, so an error carries everything the failed
+// call had spent (replacing what it carried) and the student's token counter never reads low.
+export function spentOn(error,usage){if(error&&typeof error==='object')error.usage=addUsage(emptyUsage(),usage);return error;}
+// A quota wait up to this long is spent inside the request; a longer one goes back to the browser with retryAfter, and a
+// whole-book run pauses and resumes by itself instead of holding the Worker.
+const MAX_QUOTA_WAIT=10000;
+const retrySeconds=value=>Number.isFinite(value)&&value>=0?Math.max(1,Math.ceil(value)):null;
+// RetryInfo.retryDelay is a protobuf Duration: "37s" or "0.5s" in JSON, {seconds,nanos} in some clients.
+function retryDelay(details,header){
+ const delay=details.find(detail=>/RetryInfo$/u.test(String(detail?.['@type']||''))||detail?.retryDelay!==undefined)?.retryDelay;
+ const seconds=typeof delay==='string'?retrySeconds(/^\d+(?:\.\d+)?s$/u.test(delay.trim())?Number.parseFloat(delay):Number.NaN):delay&&typeof delay==='object'?retrySeconds(Number(delay.seconds||0)+Number(delay.nanos||0)/1e9):null;
+ return seconds??(/^\d+$/u.test(String(header||'').trim())?retrySeconds(Number(header)):null);
+}
+// Daily quotas restart at midnight Pacific time: 14:00 or 15:00 in Vietnam depending on daylight saving.
+function dailyReset(now=Date.now()){
+ try{
+  const clock=new Intl.DateTimeFormat('en-US',{timeZone:'America/Los_Angeles',hourCycle:'h23',hour:'2-digit',minute:'2-digit',second:'2-digit'}).formatToParts(new Date(now)),part=type=>Number(clock.find(item=>item.type===type)?.value);
+  const seconds=86400-(part('hour')%24*3600+part('minute')*60+part('second'));if(!Number.isFinite(seconds))return null;
+  return {seconds:Math.max(1,seconds),at:new Intl.DateTimeFormat('en-GB',{timeZone:'Asia/Ho_Chi_Minh',hourCycle:'h23',hour:'2-digit',minute:'2-digit'}).format(new Date(now+seconds*1000))};
+ }catch{return null;}
+}
+// A 429 says which quota ran out (QuotaFailure.violations[].quotaId: …PerMinute…, …PerDay…) and often when to retry.
+async function quotaFailure(response){
+ const body=await response.clone().json().catch(()=>null),details=Array.isArray(body?.error?.details)?body.error.details:[];
+ const ids=details.flatMap(detail=>Array.isArray(detail?.violations)?detail.violations:[]).map(violation=>`${violation?.quotaId||''} ${violation?.quotaMetric||''}`);
+ const code=ids.some(id=>/per_?day/iu.test(id))?'quota_day':ids.some(id=>/per_?minute/iu.test(id))?'quota_minute':'quota';
+ const reset=code==='quota_day'?dailyReset():null;
+ return {code,retryAfter:retryDelay(details,response.headers.get('Retry-After'))??reset?.seconds??null,resetAt:reset?.at||null};
+}
+function quotaError({code,retryAfter,resetAt}){
+ const wait=retryAfter?(retryAfter<120?`khoảng ${retryAfter} giây`:`khoảng ${Math.ceil(retryAfter/60)} phút`):'';
+ const message=code==='quota_day'?`Gemini đã hết hạn mức yêu cầu trong ngày của dự án. Hãy chờ ${resetAt?`đến ${resetAt} (giờ Việt Nam), khi hạn mức được đặt lại,`:'hạn mức được đặt lại'} hoặc bật Billing trong Google AI Studio, rồi tiếp tục dịch. Nội dung đã được lưu.`
+  :code==='quota_minute'?`Gemini đang giới hạn số lượt gọi mỗi phút của khóa này. Hãy đợi ${wait||'khoảng một phút'} rồi tiếp tục; nội dung đã được lưu.`
+  :`Gemini tạm hết hạn mức của khóa này. Hãy thử lại sau ${wait||'ít phút'}; nội dung đã được lưu.`;
+ return new UserError(message,429,code,{retryAfter});
+}
+// Gemini overloaded (5xx, 408) or out of reach after the attempts made here: nothing is wrong with the request, so the
+// browser gets 503 with a wait and may try again (a whole-book run backs off and retries by itself before pausing).
+const UNAVAILABLE_WAIT=30;
+const unavailable=(message,retryAfter=UNAVAILABLE_WAIT)=>new UserError(message,503,'gemini_unavailable',{retryAfter});
+// 401/403 and an invalid, expired, blocked or region-locked key mean the student must fix the key: code gemini_key.
+// Google's own text is never shown: some of it quotes the key. Any other 400 is about the request, not the key.
+async function rejection(response){
+ const body=await response.clone().json().catch(()=>null),error=body?.error||{},status=response.status,prefix=`Gemini từ chối yêu cầu (${status})`;
+ const reasons=(Array.isArray(error.details)?error.details:[]).map(detail=>String(detail?.reason||'')).join(' ');
+ if(status===403||/BLOCKED|SUSPENDED|SERVICE_DISABLED|LEAKED|DENIED/u.test(reasons))return new UserError(`${prefix}: khóa Gemini API đang bị chặn, bị tạm ngưng hoặc chưa được phép dùng Gemini API. Hãy kiểm tra khóa và dự án trong Google AI Studio.`,403,'gemini_key');
+ if(error.status==='FAILED_PRECONDITION')return new UserError(`${prefix}: dự án của khóa này chưa dùng được Gemini API ở khu vực hiện tại hoặc cần bật Billing. Hãy kiểm tra trong Google AI Studio.`,403,'gemini_key');
+ if(status===401||/API_KEY/u.test(reasons)||/api[ _-]?key/iu.test(String(error.message||'')))return new UserError(`${prefix}: khóa Gemini API không hợp lệ hoặc đã hết hạn. Hãy kiểm tra lại khóa trong Google AI Studio.`,400,'gemini_key');
+ return new Error(`${prefix}: dữ liệu gửi đi không hợp lệ hoặc quá lớn. Hãy chia nhỏ phần dịch rồi thử lại.`);
+}
 // GEMINI_THINKING: 'minimal' (no reasoning), 'low' (small bounded budget) or unset (model default, which is
 // unbounded dynamic thinking on 2.5 Flash and high on Gemini 3 — the largest hidden token cost).
 const THINKING_BUDGET={minimal:0,low:1024};
@@ -85,35 +136,39 @@ export async function generate(env,parts,instruction,json=true,{schema,maxOutput
  let model=env.GEMINI_MODEL||'gemini-2.5-flash';const rejectedModels=new Set();
  const responseSchema=instruction===OCR_INSTRUCTION?{type:'OBJECT',properties:{text:{type:'STRING'},warnings:{type:'ARRAY',items:{type:'STRING'}}},required:['text','warnings']}:instruction===MARKER_REPAIR_INSTRUCTION?MARKER_REPAIR_SCHEMA:undefined;
  const responseJsonSchema=schema||(instruction===TRANSLATION_INSTRUCTION?TRANSLATION_SCHEMA:undefined);
+ // Every answered attempt is billed, a malformed answer retried here included: __usage and a failure's usage count them all.
+ const spent=emptyUsage(),fail=error=>spentOn(error,spent);
  for(let attempt=0;attempt<3;attempt++){
   const thinkingConfig=thinkingConfigFor(model,env.GEMINI_THINKING);
   let response;
   try{response=await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`,{method:'POST',headers:{'Content-Type':'application/json','x-goog-api-key':env.GEMINI_API_KEY},body:JSON.stringify({systemInstruction:{parts:[{text:instruction}]},contents:[{role:'user',parts}],generationConfig:{...temperatureFor(model),maxOutputTokens,...(thinkingConfig?{thinkingConfig}:{}),...(json?{responseMimeType:'application/json',...(responseSchema?{responseSchema}:{}),...(responseJsonSchema?{responseJsonSchema}:{})}:{})}}),signal:AbortSignal.timeout(240000)});}
-  catch(error){if(attempt<2){await new Promise(resolve=>setTimeout(resolve,1000*2**attempt));continue;}throw new Error(`Không kết nối ổn định tới Gemini sau 3 lần thử (${error?.cause?.code||error?.name||'network error'}). Tiến độ đã được giữ; hãy tiếp tục lại sau.`);}
+  catch(error){if(attempt<2){await new Promise(resolve=>setTimeout(resolve,1000*2**attempt));continue;}throw fail(unavailable(`Không kết nối ổn định tới Gemini sau 3 lần thử (${error?.cause?.code||error?.name||'network error'}). Tiến độ đã được giữ; hãy tiếp tục lại sau.`));}
   if(response.status===429){
-   const error=await response.clone().json().catch(()=>null);
-   const violations=(error?.error?.details||[]).flatMap(detail=>detail.violations||[]);
-   if(violations.some(v=>/perday/i.test(v.quotaId||'')))throw new Error('Gemini đã hết hạn mức yêu cầu trong ngày của dự án. Hãy bật Billing/nâng hạn mức trong Google AI Studio hoặc chờ hạn mức được đặt lại, rồi tiếp tục dịch. Nội dung đã được lưu.');
+   // A daily quota never clears within a request; a per-minute one is waited out here only when that is short.
+   const quota=await quotaFailure(response),wait=quota.code==='quota_day'?Infinity:quota.retryAfter===null?1000*2**attempt:quota.retryAfter*1000;
+   if(wait<=MAX_QUOTA_WAIT&&attempt<2){await new Promise(resolve=>setTimeout(resolve,wait));continue;}
+   throw fail(quotaError(quota));
   }
-  if((response.status===408||response.status===429||response.status>=500)&&attempt<2){
-   const retryAfter=Number(response.headers.get('Retry-After'));
-   await new Promise(r=>setTimeout(r,Number.isFinite(retryAfter)&&retryAfter>0?Math.min(retryAfter*1000,10000):1000*2**attempt));
+  if(response.status===408||response.status>=500){
+   const retryAfter=Number(response.headers.get('Retry-After')),given=Number.isFinite(retryAfter)&&retryAfter>0;
+   if(attempt>=2)throw fail(unavailable(`Gemini đang quá tải hoặc tạm thời không phản hồi (mã ${response.status}). Tiến độ đã được giữ; hãy thử lại sau ít phút.`,given?Math.ceil(retryAfter):UNAVAILABLE_WAIT));
+   await new Promise(r=>setTimeout(r,given?Math.min(retryAfter*1000,10000):1000*2**attempt));
    continue;
   }
   if(!response.ok){
-   if([400,401,403].includes(response.status))throw new Error(`Gemini từ chối yêu cầu (${response.status}). Khóa API có thể không hợp lệ, đã bị giới hạn hoặc chưa được phép dùng Generative Language API.`);
+   if([400,401,403].includes(response.status))throw fail(await rejection(response));
    if(response.status===404){
     rejectedModels.add(model);
     if(env.GEMINI_MODEL_RECOVERY&&isStudyModel(model)&&attempt<2){const models=(await listStudyModels(env.GEMINI_API_KEY)).filter(m=>!rejectedModels.has(m.id)),replacement=selectStudyModel(models,model,env.GEMINI_PREFERRED_MODEL||'gemini-3.6-flash');if(replacement){model=replacement;continue;}}
-    throw new Error(`Model Gemini “${model}” không khả dụng với khóa này. Bấm Kiểm tra model của khóa và chọn một model khả dụng để tiếp tục.`);
+    throw fail(new Error(`Model Gemini “${model}” không khả dụng với khóa này. Bấm Kiểm tra model của khóa và chọn một model khả dụng để tiếp tục.`));
    }
-   throw new Error(`Gemini trả lỗi ${response.status}. Kiểm tra hạn mức và thử lại sau.`);
+   throw fail(new Error(`Gemini trả lỗi ${response.status}. Kiểm tra hạn mức và thử lại sau.`));
   }
-  const result=await response.json();const candidate=result.candidates?.[0];
-  if(candidate?.finishReason!=='STOP'){const error=new Error(FINISH_MESSAGES[candidate?.finishReason]||FINISH_MESSAGES.default);error.finishReason=candidate?.finishReason||'NONE';throw error;}
-  const text=candidate.content?.parts?.filter(p=>!p.thought).map(p=>p.text||'').join('');if(!text)throw new Error('Gemini không trả nội dung.');
+  const result=await response.json();const candidate=result.candidates?.[0];addUsage(spent,usageFrom(result.usageMetadata));
+  if(candidate?.finishReason!=='STOP'){const error=new Error(FINISH_MESSAGES[candidate?.finishReason]||FINISH_MESSAGES.default);error.finishReason=candidate?.finishReason||'NONE';throw fail(error);}
+  const text=candidate.content?.parts?.filter(p=>!p.thought).map(p=>p.text||'').join('');if(!text)throw fail(new Error('Gemini không trả nội dung.'));
   if(!json)return text;
-  try{const parsed=JSON.parse(text.trim().replace(/^```(?:json)?\s*/i,'').replace(/\s*```$/,''));Object.defineProperty(parsed,'__usage',{value:usageFrom(result.usageMetadata),enumerable:false});Object.defineProperty(parsed,'__model',{value:model,enumerable:false});return parsed;}catch{if(attempt<2)continue;throw new Error('Gemini trả dữ liệu sai định dạng sau 3 lần thử. Tiến độ đã lưu; hãy bấm Tiếp tục dịch.');}
+  try{const parsed=JSON.parse(text.trim().replace(/^```(?:json)?\s*/i,'').replace(/\s*```$/,''));Object.defineProperty(parsed,'__usage',{value:{...spent},enumerable:false});Object.defineProperty(parsed,'__model',{value:model,enumerable:false});return parsed;}catch{if(attempt<2)continue;throw fail(new Error('Gemini trả dữ liệu sai định dạng sau 3 lần thử. Tiến độ đã lưu; hãy bấm Tiếp tục dịch.'));}
  }
 }
 // The prompt carries at most `limit` terms. Teacher/editor terms are authoritative and must never be the ones
@@ -128,7 +183,8 @@ export async function translate(env,source,story){
  const editorGlossary=JSON.parse(story.glossary||'{}'),builtIn={...TEXTBOOK_GLOSSARY,...(String(story.genre||'').includes('Toán học')?MATH_GLOSSARY:{})},fixedGlossary={...builtIn,...editorGlossary};
  let context=String(story.context||'').slice(-900),glossary={...fixedGlossary},translation='',usage=emptyUsage(),model=env.GEMINI_MODEL||'gemini-2.5-flash';
  const queue=chunks(source);
- while(queue.length){
+ // A failure anywhere still reports the tokens of the sections already translated and of the failed call itself.
+ try{while(queue.length){
   const part=queue.shift();
   const nearby=part+String(story.previousSource||'').slice(-350),relevant=relevantGlossary(glossary,nearby,{priority:editorGlossary,builtIn});
   const protectedMath=protectMathExpressions(part),payload={source:protectedMath.source,context,genre:story.genre,glossary:relevant,previousSource:String(story.previousSource||'').slice(-350),previousTranslation:(translation||story.previousTranslation||'').slice(-500)};
@@ -137,6 +193,8 @@ export async function translate(env,source,story){
   let result;
   try{result=protectedMath.formulas.length||story.noCache?await generate(env,[{text:JSON.stringify(payload)}],TRANSLATION_INSTRUCTION):await cachedTranslationGenerate(env,payload);}
   catch(error){
+   // The cut-off answer was billed in full, so it is counted before the two halves are requested.
+   addUsage(usage,error?.usage);
    // A response cut off at the output limit is retried as two halves instead of failing the whole section.
    if(error.finishReason==='MAX_TOKENS'&&part.length>=SPLIT_MIN){queue.unshift(...chunks(part,Math.ceil(part.length/2)+1));continue;}
    throw error;
@@ -146,13 +204,13 @@ export async function translate(env,source,story){
   const contextUpdate=result.contextUpdate??result.context??'',glossaryUpdates=result.glossaryUpdates??result.glossary??{};
   if(typeof result.translation!=='string'||!result.translation.trim()||typeof contextUpdate!=='string'||contextUpdate.length>500||!glossaryUpdates||typeof glossaryUpdates!=='object'||Array.isArray(glossaryUpdates)||Object.entries(glossaryUpdates).length>40||Object.entries(glossaryUpdates).some(([k,v])=>!k||k.length>100||typeof v!=='string'||!v.trim()||v.length>100))throw new Error('Bản dịch hoặc dữ liệu ngữ cảnh sai định dạng.');
   translation+=restoreMathExpressions(normalizeVietnameseText(result.translation),protectedMath.formulas)+'\n\n';if(contextUpdate.trim()){const combined=(context?context+'\n':'')+normalizeVietnameseText(contextUpdate.trim());context=combined.length<=1200?combined:combined.slice(0,350)+'\n'+combined.slice(-840);}glossary={...glossary,...Object.fromEntries(Object.entries(glossaryUpdates).map(([key,value])=>[key,normalizeVietnameseText(value)])),...fixedGlossary};
- }
+ }}catch(error){throw spentOn(error,usage);}
  return {translation:translation.trim(),context,glossary,usage,model};
 }
 
 export async function repairTranslationMarkers(env,source,draft,missing){
  const result=await generate(env,[{text:JSON.stringify({source,draft,requiredMarkers:missing})}],MARKER_REPAIR_INSTRUCTION);
- if(typeof result.translation!=='string'||!result.translation.trim())throw new Error('Gemini không trả đoạn hiệu đính hợp lệ.');
+ if(typeof result.translation!=='string'||!result.translation.trim())throw spentOn(new Error('Gemini không trả đoạn hiệu đính hợp lệ.'),result.__usage);
  return {translation:normalizeVietnameseText(result.translation.trim()),usage:result.__usage||emptyUsage()};
 }
 
@@ -212,13 +270,13 @@ export async function translateAndVerify(env,source,story,{repairEnv,retryEnv,al
      usage=usagePlus(usage,repair.usage);
      if(missingTranslationMarkers(item.source,repair.translation).length<item.missing.length&&preservesDraftWording(item.draft,repair.translation))targeted.translationPieces[item.index*2]=repair.translation;
      else warnings.push(`Đoạn văn ${item.index+1}: hiệu đính thiếu ký hiệu hoặc thay đổi quá nhiều câu chữ; bản dịch đầu tiên được giữ.`);
-    }catch{warnings.push(`Đoạn văn ${item.index+1}: không hiệu đính được; bản dịch đầu tiên vẫn được giữ.`);}
+    }catch(error){usage=usagePlus(usage,error?.usage);warnings.push(`Đoạn văn ${item.index+1}: không hiệu đính được; bản dịch đầu tiên vẫn được giữ.`);}
    }
    accepted={...result,translation:targeted.translationPieces.join('')};
   }else if(source.length<=1500){
    const fullRetryEnv=retryEnv||paragraphRepairEnv;
    repairModel=fullRetryEnv.GEMINI_MODEL||env.GEMINI_MODEL;retried=true;
-   const retry=await translate(fullRetryEnv,source,{...story,noCache:true});
+   let retry;try{retry=await translate(fullRetryEnv,source,{...story,noCache:true});}catch(error){throw spentOn(error,usagePlus(usage,error?.usage));}
    usage=usagePlus(usage,retry.usage);
    if(missingTranslationMarkers(source,retry.translation).length<missing.length){accepted=retry;repairScope='full';}
   }else warnings.push('Đoạn dài chưa thể xác định vị trí hiệu đính; không dịch lại toàn đoạn để tránh tốn token.');

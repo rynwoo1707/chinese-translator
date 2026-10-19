@@ -57,7 +57,9 @@ export async function fontCss(){
  const path=process.env.PDF_FONT_PATH||(process.platform==='win32'?'C:/Windows/Fonts/times.ttf':'/usr/share/fonts/truetype/dejavu/DejaVuSerif.ttf');
  const font=await readFile(path);return `@font-face{font-family:HoaTriPDF;src:url(data:font/ttf;base64,${font.toString('base64')}) format('truetype');font-weight:400;font-display:block}`;
 }
-export async function renderDocument(document,translations,{title='Hoa Trí - Bản dịch tiếng Việt'}={}){
+// allowOverflow only serves previews (tools/samples render --preview-overflow): every page is drawn and the report
+// still flags the boxes that do not fit. The service never passes it, so an export with overflow keeps failing.
+export async function renderDocument(document,translations,{title='Hoa Trí - Bản dịch tiếng Việt',allowOverflow=false}={}){
  validateLayoutDocument(document);const translated=validateBlockTranslations(document.pages.flatMap(p=>p.blocks),translations),css=await fontCss();
  const browser=await puppeteer.launch({executablePath:chromiumPath(),headless:true,args:process.env.PDF_CHROMIUM_NO_SANDBOX==='1'?['--no-sandbox']:[]});
  try{
@@ -68,7 +70,7 @@ export async function renderDocument(document,translations,{title='Hoa Trí - B�
    // Aligns older formula crops and measures free room around each box; fitting then grows boxes before shrinking.
    await page.evaluate(`(${prepareLayout.toString()})(document)`);
    const fit=await page.evaluate(`(${fitTextBoxes.toString()})(document)`);
-   if(fit.some(b=>b.overflow))throw new Error(`Trang ${entry.number}: chữ Việt không vừa box (${fit.filter(b=>b.overflow).map(b=>b.id).join(', ')}). Hãy rút gọn bản dịch hoặc điều chỉnh block trước khi xuất.`);
+   if(!allowOverflow&&fit.some(b=>b.overflow))throw new Error(`Trang ${entry.number}: chữ Việt không vừa box (${fit.filter(b=>b.overflow).map(b=>b.id).join(', ')}). Hãy rút gọn bản dịch hoặc điều chỉnh block trước khi xuất.`);
    reports.push({page:entry.number,blocks:fit});rendered.push(Buffer.from(await page.pdf({preferCSSPageSize:true,printBackground:true,margin:{top:0,bottom:0,left:0,right:0}})).toString('base64'));
   }
   const result=await pythonOperation({operation:'merge',pages:rendered,title:String(title).trim().slice(0,200)||'Hoa Trí - Bản dịch tiếng Việt'});return {...result,report:reports};

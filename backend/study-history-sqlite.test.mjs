@@ -30,7 +30,7 @@ class D1Database{
 class MemoryFiles{
  constructor(){this.values=new Map();}
  async put(key,value,options){this.values.set(key,{value,options});}
- async delete(key){this.values.delete(key);}
+ async delete(keys){for(const key of [keys].flat())this.values.delete(key);}
  async get(key){
   const item=this.values.get(key);if(!item)return null;
   const text=()=>typeof item.value==='string'?item.value:new TextDecoder().decode(item.value);
@@ -198,6 +198,32 @@ test('A redone range replaces its old part, and a draft keeps the book it was st
  const foreignBook=(await save(env,(await pdfRange(env,[1],{owner:other})).body(),{owner:other})).libraryStoryId,sessions=sqlite.prepare('SELECT COUNT(*) AS count FROM study_sessions').get().count;
  assert.equal((await save(env,(await pdfRange(env,[6])).body({bookId:foreignBook}))).http,404);assert.equal(sqlite.prepare('SELECT COUNT(*) AS count FROM study_sessions').get().count,sessions);
  assert.deepEqual(sqlite.prepare('PRAGMA foreign_key_check').all(),[]);
+});
+
+test('A first save sent again with its own id updates that session instead of making a second one',async t=>{
+ const {sqlite,env}=environment(t);addReader(sqlite,other);
+ const id='88888888-8888-4888-8888-888888888888',range=await pdfRange(env,[21,22]),draft=range.body({state:{done:0,translationParts:[]}});
+ const first=await save(env,{...draft,id});assert.equal(first.http,201);assert.equal(first.id,id);assert.equal(first.status,'draft');
+ // Its answer was lost and the whole-book chunk saves again: still one session, now holding what the retry sent.
+ const again=await save(env,{...draft,id,title:'Toán 1 · lưu lại'});assert.equal(again.http,200);assert.equal(again.id,id);
+ assert.equal(sqlite.prepare('SELECT COUNT(*) AS count FROM study_sessions').get().count,1);assert.equal(sessionRow(sqlite,id).title,'Toán 1 · lưu lại');
+ const done=await save(env,{...range.body(),id});assert.deepEqual([done.http,done.id,done.status],[200,id,'complete']);assert.ok(done.libraryChapterId);
+ // An id another student's session has is refused, a malformed one too; without an id the server makes one as before.
+ const theirs='99999999-9999-4999-8999-999999999999';assert.equal((await save(env,{...(await pdfRange(env,[1],{owner:other})).body(),id:theirs},{owner:other})).http,201);
+ assert.equal((await save(env,{...draft,id:theirs})).http,409);assert.equal(sessionRow(sqlite,theirs).user_id,other.id);
+ for(const bad of ['../x','x'.repeat(36),42])assert.equal((await save(env,{...draft,id:bad})).http,400,String(bad));
+ const plain=await save(env,draft);assert.equal(plain.http,201);assert.notEqual(plain.id,id);
+ assert.equal(sqlite.prepare('SELECT COUNT(*) AS count FROM study_sessions WHERE user_id=?').get(reader.id).count,2);
+});
+
+test('A save that lands after its account was deleted keeps none of the files it wrote',async t=>{
+ const {sqlite,env}=environment(t),range=await pdfRange(env,[1,2]),put=env.FILES.put.bind(env.FILES);
+ // The account is deleted while this save is on its way: its rows are gone by the time the save writes its files.
+ env.FILES.put=async(key,value,options)=>{await put(key,value,options);if(key.endsWith('/state.json'))sqlite.prepare('DELETE FROM reader_users WHERE id=?').run(reader.id);};
+ const saved=await save(env,range.body());
+ assert.equal(saved.http,410);assert.equal(saved.code,'account_deleted');
+ assert.deepEqual([...env.FILES.values.keys()].filter(key=>key.startsWith(`study/${reader.id}/`)&&!key.includes('/pdf-layout/')),[]);
+ assert.equal(sqlite.prepare('SELECT COUNT(*) AS count FROM study_sessions').get().count,0);assert.equal(sqlite.prepare('SELECT COUNT(*) AS count FROM stories').get().count,0);
 });
 
 test('Migration 0013 links every existing one-chapter study story to its session chapter',async t=>{

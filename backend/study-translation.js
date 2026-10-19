@@ -9,10 +9,11 @@ import {studyBookRoute} from './study-books.js';
 import {pdfLayoutRoute} from './pdf-layout.js';
 import {translatePdfBlocks} from './pdf-block-translation.js';
 import {isStudyModel,listStudyModels,selectStudyModel} from './gemini-models.js';
+import {rateLimit} from './rate-limit.js';
+import {isSubject,subjectOf,ownTerms,textModeTerms,ownTermWarnings,GLOSSARY_WARNING} from './subject-glossaries.js';
 
 const reply=(data,status=200)=>Response.json(data,{status,headers:{'Cache-Control':'no-store','X-Content-Type-Options':'nosniff'}});
 const MODELS={economy:'gemini-2.5-flash-lite',balanced:'gemini-3.1-flash-lite',quality:'gemini-2.5-flash'};
-const DOMAINS={general:'Chuyên khảo · Nghiên cứu',math:'Toán học · STEM',history:'Lịch sử Trung Hoa'};
 const modelFor=(env,mode)=>env[{economy:'GEMINI_ECONOMY_MODEL',balanced:'GEMINI_BALANCED_MODEL',quality:'GEMINI_QUALITY_MODEL'}[mode]]||env.GEMINI_MODEL||MODELS[mode];
 export const studyModelConfig=env=>({economy:modelFor(env,'economy'),balanced:modelFor(env,'balanced'),quality:modelFor(env,'quality'),pdf:env.GEMINI_PDF_BLOCK_MODEL||modelFor(env,'economy'),runtimeVersion:'pdf-layout-v2-key-model-selection'});
 function requestModel(body,fallback){if(!body.model)return fallback;if(!isStudyModel(body.model))throw new Error('Hãy chọn một model Gemini Flash trong danh sách khả dụng.');return body.model;}
@@ -29,10 +30,20 @@ export function localTranslationReview(source,translation){
  return {warnings,metrics:{sourceCharacters:sourceText.length,translationCharacters:translatedText.length,sourceParagraphs,translatedParagraphs,remainingHan}};
 }
 
+// Per-minute limits per account. Uploads and PDF service calls are heavy; every other change, and the font call that
+// reaches the PDF service, shares one looser limit, which also stops a runaway loop spending the student's own key.
+// OCR of a scan's blocks runs call after call, so it stays on the looser one.
+const HEAVY=new Set(['/api/my/study/extract','/api/my/study/pdf-layout/extract','/api/my/study/pdf-layout/refresh','/api/my/study/pdf-layout/render']);
+function studyLimit(path,method){
+ if(HEAVY.has(path))return {binding:'HEAVY_LIMITER',key:path.includes('pdf-layout')?'pdf':'upload'};
+ return method!=='GET'||path==='/api/my/study/pdf-layout/font'?{binding:'API_LIMITER',key:'api'}:null;
+}
 export async function studyRoute(request,env,url,path){
  if(!path.startsWith('/api/my/study/'))return null;
  const reader=await currentReader(request,env);if(!reader)return reply({error:'Hãy đăng nhập để dùng không gian dịch học tập.'},401);
  const origin=request.headers.get('Origin');if(origin&&origin!==url.origin)return reply({error:'Nguồn yêu cầu không hợp lệ.'},403);
+ const rule=studyLimit(path,request.method);
+ if(rule){const limit=await rateLimit(env,[{binding:rule.binding,key:`${rule.key}:${reader.id}`}]);if(limit)return limit;}
  if(path==='/api/my/study/config'&&request.method==='GET')return reply(studyModelConfig(env));
  if(path==='/api/my/study/models'&&request.method==='POST'){
   const body=await request.json(),apiKey=String(body.apiKey||'').trim(),mode=Object.hasOwn(MODELS,body.mode)?body.mode:'economy';if(!validKey(apiKey))throw new Error('Khóa Gemini API không hợp lệ.');
@@ -78,13 +89,16 @@ export async function studyRoute(request,env,url,path){
   return reply({text:result.text,warnings:Array.isArray(result.warnings)?result.warnings:[],usage:result.__usage||null,model:result.__model||selectedModel});
  }
  if(path==='/api/my/study/translate'){
-  const body=await request.json(),source=String(body.source||''),apiKey=String(body.apiKey||'').trim(),mode=Object.hasOwn(MODELS,body.mode)?body.mode:'economy',domain=Object.hasOwn(DOMAINS,body.domain)?body.domain:'general';
+  const body=await request.json(),source=String(body.source||''),apiKey=String(body.apiKey||'').trim(),mode=Object.hasOwn(MODELS,body.mode)?body.mode:'economy',domain=isSubject(body.domain)?body.domain:'general';
   if(!validKey(apiKey))throw new Error('Khóa Gemini API không hợp lệ.');
   if(!source.trim()||source.length>8000)throw new Error('Mỗi lượt dịch cần từ 1 đến 8.000 ký tự.');
   const context=String(body.context||'').slice(-900),previousSource=String(body.previousSource||'').slice(-350),previousTranslation=String(body.previousTranslation||'').slice(-500);
   const rawGlossary=body.glossary&&typeof body.glossary==='object'&&!Array.isArray(body.glossary)?body.glossary:{};
-  const glossary=Object.fromEntries(Object.entries(rawGlossary).filter(([key,value])=>!['__proto__','constructor','prototype'].includes(key)&&key.length<=100&&typeof value==='string'&&value.length<=100).slice(0,500));
-  const story={genre:DOMAINS[domain],context,glossary:JSON.stringify(glossary),previousSource,previousTranslation};
+  // Built-in terms come back in every reply's glossary; they are added here again, so they never take the 500 places
+  // kept for the student's own and learned terms.
+  const glossary=Object.fromEntries(Object.entries(ownTerms(rawGlossary,domain)).filter(([key,value])=>!['__proto__','constructor','prototype'].includes(key)&&key.length<=100&&typeof value==='string'&&value.length<=100).slice(0,500)),subjectTerms=textModeTerms(domain);
+  // ai.js adds the math terms itself (by genre); another subject's terms travel in the glossary it is given.
+  const story={genre:subjectOf(domain).label,context,glossary:JSON.stringify({...subjectTerms,...glossary}),previousSource,previousTranslation};
   const selectedModel=requestModel(body,modelFor(env,mode)),qualityModel=body.model?selectedModel:modelFor(env,'quality');
   // Quality mode keeps a bounded reasoning budget; unbounded default thinking can cost more than the translation itself.
   const outcome=await translateAndVerify(scopedEnv(env,apiKey,selectedModel,mode==='quality'?'low':'minimal'),source,story,{
@@ -94,7 +108,9 @@ export async function studyRoute(request,env,url,path){
   });
   const model=outcome.model||(outcome.repairScope==='full'?qualityModel:selectedModel);
   const review=localTranslationReview(source,outcome.translation);
-  return reply({translation:outcome.translation,context:outcome.context,glossary:outcome.glossary,usage:outcome.usage,model,repairModel:outcome.repairModel,retried:outcome.retried,warnings:[...outcome.warnings,...review.warnings],review:review.metrics});
+  // Subject terms may vary with context, as the math ones do: only the student's own terms are checked afterwards.
+  const warnings=Object.keys(subjectTerms).length?[...outcome.warnings.filter(warning=>!warning.startsWith(GLOSSARY_WARNING)),...ownTermWarnings(source,outcome.translation,glossary)]:outcome.warnings;
+  return reply({translation:outcome.translation,context:outcome.context,glossary:outcome.glossary,usage:outcome.usage,model,repairModel:outcome.repairModel,retried:outcome.retried,warnings:[...warnings,...review.warnings],review:review.metrics});
  }
  return reply({error:'Không tìm thấy chức năng học tập.'},404);
 }

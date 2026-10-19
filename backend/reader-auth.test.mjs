@@ -4,7 +4,7 @@ import worker from './worker.js';
 import {authRoute,cookieValue,hashToken} from './reader-auth.js';
 
 test('Google login start uses OIDC scopes and protected state cookies',async()=>{
- const request=new Request('https://cat-hien.example/api/auth/google/start?return_to=%2F%23account');
+ const request=new Request('https://cat-hien.example/api/auth/google/start?accept_terms=1&return_to=%2F%23account');
  const response=await authRoute(request,{GOOGLE_CLIENT_ID:'client',GOOGLE_CLIENT_SECRET:'secret'},new URL(request.url),'/api/auth/google/start');
  assert.equal(response.status,302);const location=new URL(response.headers.get('Location'));
  assert.equal(location.origin,'https://accounts.google.com');assert.equal(location.searchParams.get('scope'),'openid email profile');
@@ -20,7 +20,7 @@ test('Cookie parsing and session hashing are deterministic without exposing the 
 test('Local registration hashes the password and creates an HttpOnly session',async()=>{
  const runs=[],statements=[];
  const env={DB:{prepare(sql){const statement={sql,args:[],bind(...args){this.args=args;return this;},async first(){return null;},async run(){runs.push(this);return {};}};statements.push(statement);return statement;},async batch(items){for(const item of items)runs.push(item);return items.map(()=>({meta:{changes:1}}));}}};
- const request=new Request('https://cat-hien.example/api/auth/register',{method:'POST',headers:{'Content-Type':'application/json',Origin:'https://cat-hien.example'},body:JSON.stringify({name:'Độc giả',email:'Reader@Example.com',password:'mat-khau-rieng'})});
+ const request=new Request('https://cat-hien.example/api/auth/register',{method:'POST',headers:{'Content-Type':'application/json',Origin:'https://cat-hien.example'},body:JSON.stringify({name:'Độc giả',email:'Reader@Example.com',password:'mat-khau-rieng',acceptTerms:true})});
  const response=await authRoute(request,env,new URL(request.url),'/api/auth/register');assert.equal(response.status,201);assert.match(response.headers.get('Set-Cookie'),/cat_hien_session=/);assert.match(response.headers.get('Set-Cookie'),/HttpOnly/);
  const credential=runs.find(item=>item.sql.startsWith('INSERT INTO reader_credentials'));assert.ok(credential);assert.equal(credential.args[1],'reader@example.com');assert.notEqual(credential.args[2],'mat-khau-rieng');assert.ok(credential.args[2].length>20);assert.ok(runs.some(item=>item.sql.startsWith('INSERT INTO reader_sessions')));
 });
@@ -29,7 +29,7 @@ test('Password hashes stay within the deployed PBKDF2 limit and older 210,000-it
  const credentials=new Map(),sessions=[];
  const env={DB:{prepare(sql){return {sql,args:[],bind(...args){this.args=args;return this;},async first(){return sql.startsWith('SELECT')?credentials.get(this.args[0])||null:null;},async run(){if(sql.startsWith('INSERT INTO reader_sessions'))sessions.push(this.args);return {};}};},async batch(items){for(const item of items)if(item.sql.startsWith('INSERT INTO reader_credentials'))credentials.set(item.args[1],{user_id:item.args[0],password_hash:item.args[2],password_salt:item.args[3]});return items.map(()=>({meta:{changes:1}}));}}};
  const call=(path,body)=>{const request=new Request('https://cat-hien.example'+path,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});return authRoute(request,env,new URL(request.url),path);};
- assert.equal((await call('/api/auth/register',{name:'Lan',email:'lan@example.test',password:'mat-khau-moi'})).status,201);
+ assert.equal((await call('/api/auth/register',{name:'Lan',email:'lan@example.test',password:'mat-khau-moi',acceptTerms:true})).status,201);
  assert.match(credentials.get('lan@example.test').password_hash,/^pbkdf2-sha256\$100000\$[A-Za-z0-9+/]{43}=$/);
  assert.equal((await call('/api/auth/login',{email:'lan@example.test',password:'mat-khau-moi'})).status,200);
  assert.equal((await call('/api/auth/login',{email:'lan@example.test',password:'mat-khau-sai'})).status,401);

@@ -1,0 +1,72 @@
+# PDF layout service behind Caddy (automatic HTTPS) on one server. Run from this folder, with a .env made from
+# env.example:  docker compose up -d --build   (README.md has the whole runbook).
+name: hoa-tri-pdf
+
+services:
+  pdf-layout:
+    build:
+      context: ../..
+      dockerfile: services/pdf-layout/Dockerfile
+    image: hoa-tri-pdf-layout:local
+    restart: unless-stopped
+    # tini reaps the Chromium and Python children of every job.
+    init: true
+    environment:
+      PDF_LAYOUT_SERVICE_TOKEN: ${PDF_LAYOUT_SERVICE_TOKEN:?Đặt PDF_LAYOUT_SERVICE_TOKEN trong .env (openssl rand -hex 32)}
+    # Reachable only by Caddy on the compose network: no published port.
+    expose:
+      - "8091"
+    # Chromium needs more shared memory than Docker's 64 MB default.
+    shm_size: 1gb
+    tmpfs:
+      - /tmp:size=1g
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    # Two jobs at once, each with a headless Chromium. Lower PDF_LAYOUT_CPUS/MEMORY in .env on a smaller server.
+    deploy:
+      resources:
+        limits:
+          cpus: "${PDF_LAYOUT_CPUS:-2}"
+          memory: ${PDF_LAYOUT_MEMORY:-3g}
+          pids: 1024
+    # Health: the HEALTHCHECK of services/pdf-layout/Dockerfile (GET /health with the token, every 15 s).
+    logging:
+      driver: local
+      options:
+        max-size: 10m
+        max-file: "3"
+
+  caddy:
+    image: caddy:2.11.7-alpine
+    restart: unless-stopped
+    depends_on:
+      pdf-layout:
+        condition: service_healthy
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      PDF_DOMAIN: ${PDF_DOMAIN:?Đặt PDF_DOMAIN trong .env (ví dụ pdf.example.com)}
+      ACME_EMAIL: ${ACME_EMAIL:?Đặt ACME_EMAIL trong .env (email nhận thông báo chứng chỉ)}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      # Certificates and the ACME account: keep this volume, or every restart asks for new certificates.
+      - caddy_data:/data
+      - caddy_config:/config
+    cap_drop:
+      - ALL
+    cap_add:
+      - NET_BIND_SERVICE
+    security_opt:
+      - no-new-privileges:true
+    logging:
+      driver: local
+      options:
+        max-size: 10m
+        max-file: "3"
+
+volumes:
+  caddy_data:
+  caddy_config:

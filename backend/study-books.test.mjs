@@ -20,24 +20,26 @@ class D1Statement{
  execute(){const result=this.statement.run(...this.args);return {success:true,meta:{changes:result.changes}};}
  async run(){return this.execute();}
 }
+const byteSize=value=>typeof value==='string'?new TextEncoder().encode(value).length:value instanceof Blob?value.size:value?.byteLength??0;
 class MemoryFiles{
  constructor(){this.values=new Map();this.writes=[];this.deletes=[];this.failOn=null;this.failDelete=null;}
- async put(key,value,options){if(this.failOn?.(key))throw new Error('R2 unavailable');this.values.set(key,{value,options});this.writes.push(key);}
+ // A streamed upload is read to the end, as R2 does; uploaded is when the object was stored.
+ async put(key,value,options){if(this.failOn?.(key))throw new Error('R2 unavailable');if(value instanceof ReadableStream)value=new Uint8Array(await new Response(value).arrayBuffer());this.values.set(key,{value,options,uploaded:new Date()});this.writes.push(key);}
  // R2 deletes one key or a list of keys (the admin cleanup sends lists).
  async delete(keys){for(const key of [keys].flat()){if(this.failDelete?.(key))throw new Error('R2 unavailable');this.deletes.push(key);this.values.delete(key);}}
- async list({prefix=''}={}){return {objects:[...this.values.keys()].filter(key=>key.startsWith(prefix)).map(key=>({key})),truncated:false};}
+ async list({prefix=''}={}){return {objects:[...this.values.entries()].filter(([key])=>key.startsWith(prefix)).map(([key,item])=>({key,size:byteSize(item.value),uploaded:item.uploaded})),truncated:false};}
  async head(key){const item=this.values.get(key);return item?{customMetadata:item.options?.customMetadata||{},httpMetadata:item.options?.httpMetadata||{}}:null;}
  async get(key){
   const item=this.values.get(key);if(!item)return null;const bytes=async()=>typeof item.value==='string'?new TextEncoder().encode(item.value):item.value instanceof Blob?new Uint8Array(await item.value.arrayBuffer()):new Uint8Array(item.value);
   return {get body(){return new ReadableStream({async start(controller){controller.enqueue(await bytes());controller.close();}});},customMetadata:item.options?.customMetadata||{},httpMetadata:item.options?.httpMetadata||{},arrayBuffer:async()=>(await bytes()).slice().buffer,json:async()=>JSON.parse(new TextDecoder().decode(await bytes())),text:async()=>new TextDecoder().decode(await bytes())};
  }
 }
-function environment(t){
+function environment(t,vars={}){
  const sqlite=new DatabaseSync(':memory:');t.after(()=>sqlite.close());sqlite.exec('PRAGMA foreign_keys=ON');
  for(const name of readdirSync(fileURLToPath(new URL('../database/migrations/',import.meta.url))).filter(name=>name.endsWith('.sql')).sort())sqlite.exec(readFileSync(new URL('../database/migrations/'+name,import.meta.url),'utf8'));
  for(const user of [reader,other])sqlite.prepare('INSERT INTO reader_users(id,google_sub,email,name) VALUES(?,?,?,?)').run(user.id,`sub-${user.id}`,`${user.id}@example.test`,user.name);
  const DB={prepare:sql=>new D1Statement(sqlite,sql),async batch(statements){sqlite.exec('BEGIN');try{const results=statements.map(statement=>statement.execute());sqlite.exec('COMMIT');return results;}catch(error){sqlite.exec('ROLLBACK');throw error;}}};
- return {sqlite,env:{DB,FILES:new MemoryFiles(),PDF_LAYOUT_SERVICE_URL:'https://pdf.example.test',PDF_LAYOUT_SERVICE_TOKEN:'service-secret'}};
+ return {sqlite,env:{DB,FILES:new MemoryFiles(),PDF_LAYOUT_SERVICE_URL:'https://pdf.example.test',PDF_LAYOUT_SERVICE_TOKEN:'service-secret',...vars}};
 }
 const hex=async bytes=>[...new Uint8Array(await crypto.subtle.digest('SHA-256',bytes))].map(x=>x.toString(16).padStart(2,'0')).join('');
 const json=(path,body,method='POST')=>new Request(origin+path,{method,headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
@@ -211,4 +213,44 @@ test('Migration 0013 adds the page list, translation time and cover choice colum
  old.prepare("INSERT INTO study_sessions(id,user_id,title,state_key,updated_at) VALUES('s','u','Cũ','study/u/s/state.json','2026-09-01 08:00:00')").run();
  for(const name of files.filter(name=>name>='0013'))old.exec(readFileSync(migrations+name,'utf8'));
  assert.equal(old.prepare("SELECT translated_at FROM study_sessions WHERE id='s'").get().translated_at,'2026-09-01 08:00:00');
+});
+
+// An original as the browser uploads it for a whole-book run: raw bytes (size bytes in all), its hash in the path.
+const original=(label,size=0)=>{const head=new TextEncoder().encode(`%PDF-1.7\n${label}\n`),bytes=new Uint8Array(Math.max(head.length,size));bytes.set(head);return bytes;};
+async function upload(env,bytes,owner=reader){const sha=await hex(bytes),response=await route(env,`/api/my/study/sources/${sha}`,{method:'PUT',headers:{'Content-Type':'application/pdf','Content-Length':String(bytes.length),'X-PDF-Pages':'3','X-Source-Filename':'sach.pdf'},body:bytes},owner);return {sha,status:response.status,body:await response.json()};}
+const ROOM='Hãy xóa trong Lịch sử dịch những bản dịch hoặc lượt dịch cả quyển không cần nữa (tệp gốc không còn phần nào dùng sẽ được xóa theo) rồi thử lại.';
+const kept=(env,owner=reader)=>[...env.FILES.values.keys()].filter(key=>key.startsWith(`study/${owner.id}/sources/`)).sort();
+
+test('An account keeps a bounded number of originals; unused ones kept over a day make room, used and recent ones never',async t=>{
+ const {sqlite,env}=environment(t,{MAX_SOURCES_PER_USER:'2'}),a=await upload(env,original('A')),b=await upload(env,original('B'));
+ assert.deepEqual([a.status,b.status],[201,201]);
+ const c=await upload(env,original('C'));assert.equal(c.status,429);
+ assert.deepEqual(c.body,{error:`Tài khoản đã lưu 2 tệp PDF gốc, mức tối đa cho mỗi tài khoản. ${ROOM}`,code:'sources_full'});
+ assert.deepEqual(kept(env),[sourceKey(reader.id,a.sha),sourceKey(reader.id,b.sha)].sort());assert.equal(sqlite.prepare('SELECT count FROM rate_limits WHERE key=?').get(`pdf-source:${reader.id}`).count,2,'a refusal is not counted');
+ assert.equal((await upload(env,original('C'),other)).status,201,'each account has its own room');
+ // A and B were stored two days ago; A is still used by a translated part, B by nothing: B makes room for C.
+ for(const item of [a,b])env.FILES.values.get(sourceKey(reader.id,item.sha)).uploaded=new Date(Date.now()-2*86400000);
+ sqlite.prepare('INSERT INTO study_sessions(id,user_id,title,state_key,source_sha256) VALUES(?,?,?,?,?)').run('part-a',reader.id,'Phần A','study/x/state.json',a.sha);
+ assert.equal((await upload(env,original('C'))).status,201);assert.deepEqual(kept(env),[sourceKey(reader.id,a.sha),sourceKey(reader.id,c.sha)].sort());
+ // C was stored just now (its run may not have started yet) and A is in use: nothing can make room for D.
+ assert.equal((await upload(env,original('D'))).status,429);assert.equal(kept(env).length,2);
+ // An extraction still works at the limit; the student is told why the original was not kept.
+ t.mock.method(globalThis,'fetch',async()=>Response.json({document:{version:1,totalPages:3,pages:[{number:1,width:595,height:842,original:png,background:png,blocks:[{id:'p1-b0',source:'定义向量。',box:[20,20,200,80],fontSize:12}]}]},originalPdfBase64:btoa('%PDF-1.7\npage 1')}));
+ const form=new FormData();form.set('file',new File([original('E')],'E.pdf',{type:'application/pdf'}));form.set('pages','1');
+ const extracted=await pdfLayoutRoute(new Request(origin+'/api/my/study/pdf-layout/extract',{method:'POST',body:form}),env,'/api/my/study/pdf-layout/extract',reader);
+ assert.equal(extracted.status,201);assert.deepEqual((await extracted.json()).document.warnings,[`Chưa lưu được bản PDF gốc đầy đủ vì tài khoản đã lưu 2 tệp PDF gốc, mức tối đa cho mỗi tài khoản; khi tải cả quyển, Hoa Trí sẽ nhờ bạn chọn lại tệp gốc. ${ROOM}`]);
+ assert.equal(kept(env).length,2);
+});
+
+test('An account keeps a bounded total size of originals, checked from the declared length before the file is stored',async t=>{
+ const {env}=environment(t,{MAX_SOURCE_MB_PER_USER:'1'}),first=await upload(env,original('A',614400));assert.equal(first.status,201);
+ const second=await upload(env,original('B',512000));assert.equal(second.status,413);
+ assert.deepEqual(second.body,{error:`Các tệp PDF gốc của tài khoản đã chiếm 0,6 MB, thêm tệp này (0,5 MB) sẽ vượt mức 1,0 MB cho mỗi tài khoản. ${ROOM}`,code:'sources_full'});
+ assert.deepEqual(kept(env),[sourceKey(reader.id,first.sha)]);
+ const third=await upload(env,original('C',300000));assert.equal(third.status,201,'what still fits is stored');
+ // The first original is now unused and two days old. A file that would not fit even without it is refused, and
+ // nothing is removed; one that fits once it is gone takes its place, and only it goes.
+ env.FILES.values.get(sourceKey(reader.id,first.sha)).uploaded=new Date(Date.now()-2*86400000);
+ assert.equal((await upload(env,original('D',1200000))).status,413);assert.deepEqual(kept(env),[sourceKey(reader.id,first.sha),sourceKey(reader.id,third.sha)].sort());
+ const fourth=await upload(env,original('E',500000));assert.equal(fourth.status,201);assert.deepEqual(kept(env),[sourceKey(reader.id,third.sha),sourceKey(reader.id,fourth.sha)].sort());
 });

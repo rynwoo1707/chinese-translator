@@ -91,6 +91,23 @@ test('Block OCR rejects missing, duplicate and unknown result IDs instead of ass
  assert.equal(calls,3);
 });
 
+test('A refused OCR answer still reports the billed call, whatever check refused it',async t=>{
+ let answer;t.mock.method(globalThis,'fetch',async()=>generationResponse({blocks:answer,warnings:[]}));
+ const spent={prompt:23,output:17,thinking:0,total:40,requests:1,cacheHits:0},three=[...blocks(),{id:'p4-b2',source:'第三段文字。',image:png,box:[20,180,220,240],fontSize:12}];
+ for(const [invalid,input,message] of [
+  [[corrected()[0]],blocks(),/đọc thiếu/u],
+  [[corrected()[0],corrected()[0]],blocks(),/trùng đoạn/u],
+  [[corrected()[0],{id:'p999-b0',text:'Invented block'}],blocks(),/mã đoạn lạ/u],
+  [[corrected()[0],{id:'p4-b1',text:'向量 a=b 的模。'}],blocks(),/công thức/u],
+  [[{id:'p4-b0',text:''},{id:'p4-b1',text:' '},{id:'p4-b2',text:'第三段文字。'}],three,/không đọc được chữ ở 2\/3 đoạn/u],
+  // Two strips read into each other's blocks.
+  [[{id:'p4-b0',text:'向量的模长度。'},{id:'p4-b1',text:'Tesseract 猜错 SPACE vector'}],[{...blocks()[0]},{...blocks()[1],source:'向量的模长度。',inlines:[]}],/gán lẫn chữ/u]
+ ]){
+  answer=invalid;let error=null;try{await recognizePdfBlocks(aiEnv,input);}catch(caught){error=caught;}
+  assert.ok(error,String(message));assert.match(error.message,message);assert.deepEqual(error.usage,spent,String(message));
+ }
+});
+
 test('Block OCR keeps the machine OCR text of a strip Gemini reads as empty and accepts a re-cased ID',async t=>{
  let answer;t.mock.method(globalThis,'fetch',async()=>generationResponse({blocks:answer,warnings:['Ảnh mờ.']}));
  answer=[{id:'P4-B0 ',text:corrected()[0].text},{id:'p4-b1',text:'  '}];

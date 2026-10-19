@@ -1,4 +1,5 @@
 import mammoth from 'mammoth/mammoth.browser.js';
+import {chapterPosition,chapterSource} from './library-books.js';
 const json=(body,status=200)=>Response.json(body,{status});
 const required=(value,max)=>{if(typeof value!=='string'||!value.trim()||value.length>max)throw new Error('Nội dung trống hoặc vượt giới hạn.');return value.trim();};
 export async function readPublication(file){
@@ -27,15 +28,19 @@ export async function adminContent(request,env,path){
  }
  const chapters=path.match(/^\/api\/stories\/([^/]+)\/chapters$/);
  if(chapters){
-  const sid=chapters[1];if(!await env.DB.prepare('SELECT id FROM stories WHERE id=?').bind(sid).first())return json({error:'Không tìm thấy tài liệu.'},404);
+  const sid=chapters[1],story=await env.DB.prepare('SELECT id,owner_user_id FROM stories WHERE id=?').bind(sid).first();if(!story)return json({error:'Không tìm thấy tài liệu.'},404);
   if(method==='GET')return json((await env.DB.prepare('SELECT id,title,mime,created_at FROM chapters WHERE story_id=? ORDER BY CASE WHEN position IS NULL THEN 1 ELSE 0 END,position,created_at,id').bind(sid).all()).results);
   if(method==='POST'){
    const form=await request.formData();if(form.get('confirmed')!=='true')throw new Error('Cần xác nhận đã kiểm tra nội dung trước khi đăng.');
    const title=required(form.get('title'),200),file=form.get('file'),data=await readPublication(file),cid=crypto.randomUUID();
    const content=data.mime==='application/pdf'?'':required(form.get('content')??data.content,500000);
+   // Optional: the part's place in the book, and for a PDF part of a library book the original pages it translates.
+   // Checked before the file is stored; without them the row is the one written before migration 0015.
+   const position=chapterPosition(form.get('position')),source=await chapterSource(env,story,form,data.mime);
    const key=data.mime==='application/pdf'?`reader/${cid}.pdf`:null;
    if(key)await env.FILES.put(key,data.bytes,{httpMetadata:{contentType:data.mime}});
-   try{await env.DB.prepare('INSERT INTO chapters(id,story_id,title,content,file_key,mime) VALUES(?,?,?,?,?,?)').bind(cid,sid,title,content,key,data.mime).run();}
+   const fields={id:cid,story_id:sid,title,content,file_key:key,mime:data.mime,...(position?{position}:{}),...source};
+   try{await env.DB.prepare(`INSERT INTO chapters(${Object.keys(fields).join(',')}) VALUES(${Object.keys(fields).map(()=>'?').join(',')})`).bind(...Object.values(fields)).run();}
    catch(e){if(key)await env.FILES.delete(key);throw e;}
    return json({id:cid},201);
   }
@@ -73,7 +78,8 @@ export async function adminContent(request,env,path){
   if(!results[2].meta.changes)return json({error:'Tài liệu có bản dịch đang xử lý. Hãy đợi lượt hiện tại kết thúc rồi xóa.'},409);
   for(const job of jobs)await deleteJobFiles(job,env);
   for(const file of files){if(file.file_key)await env.FILES.delete(file.file_key);if(file.text_key)await env.FILES.delete(file.text_key);}
-  let cursor;do{const page=await env.FILES.list({prefix:`covers/${sid}/`,...(cursor?{cursor}:{})});if(page.objects.length)await env.FILES.delete(page.objects.map(o=>o.key));cursor=page.truncated?page.cursor:undefined;}while(cursor);
+  // Its covers, and the originals a library book keeps for "Tải cả quyển".
+  for(const prefix of [`covers/${sid}/`,`library/${sid}/`]){let cursor;do{const page=await env.FILES.list({prefix,...(cursor?{cursor}:{})});if(page.objects.length)await env.FILES.delete(page.objects.map(o=>o.key));cursor=page.truncated?page.cursor:undefined;}while(cursor);}
   return json({ok:true});
  }
  if(/^\/api\/requests\/[^/]+$/.test(path)&&method==='DELETE'){const rid=path.split('/').pop(),item=await env.DB.prepare('SELECT file_key FROM requests WHERE id=?').bind(rid).first();await env.DB.prepare('DELETE FROM requests WHERE id=?').bind(rid).run();if(item?.file_key)await env.FILES.delete(item.file_key);return json({ok:true});}

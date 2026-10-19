@@ -26,3 +26,5 @@ __pycache__/
 *.log
 .DS_Store
 Thumbs.db
+# Sample PDFs for the public library: the owner's files, never committed
+/samples/

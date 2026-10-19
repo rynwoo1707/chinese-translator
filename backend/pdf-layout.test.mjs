@@ -1,5 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import {DatabaseSync} from 'node:sqlite';
+import {readdirSync,readFileSync} from 'node:fs';
+import {fileURLToPath} from 'node:url';
 import {pdfLayoutRoute} from './pdf-layout.js';
 import {studyRoute} from './study-translation.js';
 import {studyHistoryRoute} from './study-history.js';
@@ -20,7 +23,8 @@ const jsonRequest=(path,body)=>new Request(origin+path,{method:'POST',headers:{'
 class MemoryFiles{
  constructor(){this.values=new Map();this.reads=[];this.writes=[];this.deletes=[];}
  async put(key,value,options){this.values.set(key,{value,options});this.writes.push({key,value,options});}
- async delete(key){this.deletes.push(key);this.values.delete(key);}
+ // R2 deletes one key or a list of keys.
+ async delete(keys){for(const key of [keys].flat()){this.deletes.push(key);this.values.delete(key);}}
  async get(key){
   this.reads.push(key);const item=this.values.get(key);if(!item)return null;
   const text=()=>typeof item.value==='string'?item.value:new TextDecoder().decode(item.value);
@@ -261,4 +265,68 @@ test('PDF extraction records the uploaded file hash so ranges of one textbook ca
  const prior=document();prior.sourceSha256=fromBrowser;prior.totalPages=40;await FILES.put(assetKey(reader,'manifest.json'),JSON.stringify(prior));await FILES.put(assetKey(reader,'original.pdf'),new TextEncoder().encode(pdf));
  const response=await pdfLayoutRoute(jsonRequest(base+'/refresh',{assetId,forceClone:true}),env,base+'/refresh',reader),result=await response.json();
  assert.equal(response.status,201);assert.equal(result.document.sourceSha256,fromBrowser);assert.equal(await stored(result.assetId),fromBrowser);
+});
+
+// The same routes over a real SQLite database (every migration), for the per-account lease and the daily caps.
+class D1Statement{
+ constructor(database,sql){this.statement=database.prepare(sql);this.args=[];}
+ bind(...args){this.args=args;return this;}
+ async first(){return this.statement.get(...this.args)||null;}
+ async all(){return {results:this.statement.all(...this.args),success:true};}
+ execute(){const result=this.statement.run(...this.args);return {success:true,meta:{changes:result.changes}};}
+ async run(){return this.execute();}
+}
+function sqliteEnvironment(t,vars={}){
+ const sqlite=new DatabaseSync(':memory:');t.after(()=>sqlite.close());sqlite.exec('PRAGMA foreign_keys=ON');
+ const migrations=fileURLToPath(new URL('../database/migrations/',import.meta.url));
+ for(const name of readdirSync(migrations).filter(name=>name.endsWith('.sql')).sort())sqlite.exec(readFileSync(migrations+name,'utf8'));
+ for(const user of [reader,other])sqlite.prepare('INSERT INTO reader_users(id,google_sub,email,name) VALUES(?,?,?,?)').run(user.id,`sub-${user.id}`,`${user.id}@example.test`,user.name||'Minh');
+ sqlite.prepare("INSERT INTO stories(id,title,genre,owner_user_id,visibility,source_url) VALUES('private-story','Vectơ','Toán học · STEM',?,'private','study-book:private-story')").run(reader.id);
+ sqlite.prepare("INSERT INTO chapters(id,story_id,title,content) VALUES('private-chapter','private-story','Trang 4','…')").run();
+ const DB={prepare:sql=>new D1Statement(sqlite,sql),async batch(statements){sqlite.exec('BEGIN');try{const results=statements.map(s=>s.execute());sqlite.exec('COMMIT');return results;}catch(error){sqlite.exec('ROLLBACK');throw error;}}};
+ return {sqlite,env:{DB,FILES:new MemoryFiles(),PDF_LAYOUT_SERVICE_URL:'https://pdf.example.test/v1/',PDF_LAYOUT_SERVICE_TOKEN:'service-secret',...vars}};
+}
+const extractForm=()=>{const form=new FormData();form.set('file',new File([pdf],'lesson.pdf',{type:'application/pdf'}));form.set('pages','4');return form;};
+const extract=(env,owner=reader)=>pdfLayoutRoute(new Request(origin+base+'/extract',{method:'POST',body:extractForm()}),env,base+'/extract',owner);
+const render=env=>pdfLayoutRoute(jsonRequest(base+'/render',{assetId,historyId}),env,base+'/render',reader);
+const count=(sqlite,key)=>sqlite.prepare('SELECT count FROM rate_limits WHERE key=?').get(key)?.count??0;
+
+test('A student has one PDF service call at a time: another tab waits, other students do not, and a failed call frees it',async t=>{
+ const {sqlite,env}=sqliteEnvironment(t);let release,entered,calls=0,fail=false;const held=new Promise(done=>{release=done;}),reached=new Promise(done=>{entered=done;});
+ t.mock.method(globalThis,'fetch',async()=>{calls++;if(calls===1){entered();await held;}if(fail)return Response.json({error:'Dịch vụ PDF đang bận.'},{status:503});return Response.json({document:document(),originalPdfBase64:btoa(pdf)});});
+ const first=extract(env);await reached;assert.equal(calls,1);
+ const second=await extract(env);assert.equal(second.status,429);assert.equal(second.headers.get('Retry-After'),'30');
+ assert.deepEqual(await second.json(),{error:'Tài khoản của bạn đang có một lượt xử lý PDF khác (tách trang hoặc xuất PDF) chưa xong. Hãy đợi lượt đó xong rồi thử lại.',code:'pdf_busy',retryAfter:30});
+ await env.FILES.put(assetKey(reader,'manifest.json'),JSON.stringify(document()));await env.FILES.put(assetKey(reader,'original.pdf'),new TextEncoder().encode(pdf));
+ const refresh=await pdfLayoutRoute(jsonRequest(base+'/refresh',{assetId,forceClone:true}),env,base+'/refresh',reader);assert.equal(refresh.status,429);assert.equal((await refresh.json()).code,'pdf_busy');
+ assert.equal((await extract(env,other)).status,201,'another student is not held up');assert.equal(calls,2);
+ release();assert.equal((await first).status,201);
+ assert.equal(count(sqlite,`pdf-extract:${reader.id}`),1,'waiting for the lease does not use up the day');
+ assert.equal(sqlite.prepare('SELECT COUNT(*) AS n FROM service_leases').get().n,0,'every lease is given back');
+ fail=true;await assert.rejects(()=>extract(env),/bận/u);fail=false;
+ assert.equal((await extract(env)).status,201,'a failed call gave its lease back');
+});
+
+test('Exporting a Vietnamese PDF has a daily cap per account, counted only for exports that reach the service',async t=>{
+ const {sqlite,env}=sqliteEnvironment(t,{DAILY_PDF_RENDERS_PER_USER:'2'}),row=await seed(env);let calls=0;
+ sqlite.prepare('INSERT INTO study_sessions(id,user_id,title,state_key,status,library_story_id,library_chapter_id) VALUES(?,?,?,?,?,?,?)').run(row.id,reader.id,row.title,row.state_key,'complete','private-story','private-chapter');
+ t.mock.method(globalThis,'fetch',async()=>{calls++;return Response.json({pdfBase64:btoa('%PDF-1.7\nVietnamese'),report:[]});});
+ const incomplete=await (await env.FILES.get(row.state_key)).json();await env.FILES.put(row.state_key,JSON.stringify({...incomplete,complete:false}));
+ assert.equal((await render(env)).status,409,'refused before the service');await env.FILES.put(row.state_key,JSON.stringify(incomplete));
+ assert.equal((await render(env)).status,200);assert.equal((await render(env)).status,200);
+ const capped=await render(env),body=await capped.json();assert.equal(capped.status,429);assert.equal(calls,2);
+ assert.equal(body.error,'Bạn đã dùng hết 2 lượt xuất PDF tiếng Việt hôm nay. Hạn mức được đặt lại lúc 0:00 (giờ Việt Nam).');assert.ok(body.retryAfter>0);
+ assert.equal(count(sqlite,`pdf-render:${reader.id}`),3);assert.equal(sqlite.prepare('SELECT COUNT(*) AS n FROM service_leases').get().n,0);
+});
+
+test('OCR results for an account deleted during the Gemini call are not kept, and the tokens spent are still reported',async t=>{
+ const {sqlite,env}=sqliteEnvironment(t),key=assetKey(reader,'manifest.json');
+ await env.FILES.put(key,JSON.stringify({version:1,pages:[{number:4,width:600,height:800,ocr:true,background:png,original:png,blocks:[{id:'p4-b0',source:'Tesseract 猜错',image:png,box:[20,20,220,80],fontSize:12}]}]}));
+ t.mock.method(globalThis,'fetch',async()=>{
+  sqlite.prepare('UPDATE reader_users SET deleting_at=CURRENT_TIMESTAMP WHERE id=?').run(reader.id);
+  return Response.json({candidates:[{finishReason:'STOP',content:{parts:[{text:JSON.stringify({blocks:[{id:'p4-b0',text:'空间向量。'}],warnings:[]})}]}}],usageMetadata:{promptTokenCount:23,candidatesTokenCount:17,totalTokenCount:40}});
+ });
+ const response=await pdfLayoutRoute(jsonRequest(base+'/ocr-blocks',{assetId,apiKey:'student-ocr-key-12345678901234567890',model:'gemini-3.6-flash',blockIds:['p4-b0']}),env,base+'/ocr-blocks',reader),body=await response.json();
+ assert.equal(response.status,410);assert.equal(body.code,'account_deleted');assert.equal(body.usage.total,40);
+ assert.equal(env.FILES.values.has(key),false,'the manifest written after the deletion is removed again');
 });

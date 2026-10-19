@@ -1,9 +1,73 @@
 {
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  // The name is part of the workers.dev URL and of the Google OAuth callback; renaming after the first deploy
+  // creates a new Worker without the secrets of the old one.
   "name": "muc-viet-cms",
   "main": "backend/worker.js",
   "compatibility_date": "2026-09-01",
   "compatibility_flags": [
     "nodejs_compat"
+  ],
+  "workers_dev": true,
+  "preview_urls": false,
+  "upload_source_maps": true,
+  // Workers Logs. Query strings are dropped from logged URLs: the Google login callback carries ?code= and ?state=.
+  "observability": {
+    "enabled": true,
+    "head_sampling_rate": 1,
+    "redact_query_string": true,
+    "logs": {
+      "enabled": true,
+      "invocation_logs": true
+    }
+  },
+  "placement": {
+    "mode": "smart"
+  },
+  // tag = the commit that `npm run deploy` passes with --tag; /api/health reports it as "version".
+  "version_metadata": {
+    "binding": "CF_VERSION_METADATA"
+  },
+  // Non-secret settings only, the same for production and wrangler dev; a line in .dev.vars overrides one locally.
+  // Tokens, API keys and the PDF service URL stay secrets (wrangler secret put, or npm run deploy -- --secrets-file).
+  // Never add a "secrets" block: once it exists, wrangler dev loads only the names it lists from .dev.vars.
+  "vars": {
+    "GEMINI_MODEL": "gemini-3.6-flash",
+    "GEMINI_PDF_BLOCK_MODEL": "",
+    "GEMINI_QUALITY_MODEL": "",
+    "GEMINI_ECONOMY_MODEL": "",
+    "GEMINI_BALANCED_MODEL": "",
+    "GEMINI_THINKING": "",
+    "REGISTRATION_MODE": "open",
+    "ALLOWED_EMAIL_DOMAINS": ""
+  },
+  // Per-minute limits, counted per Cloudflare location (a loose flood filter; daily caps are counted in D1).
+  // namespace_id must be unique within the Cloudflare account, or two bindings share their counters.
+  "ratelimits": [
+    {
+      "name": "AUTH_LIMITER",
+      "namespace_id": "71001",
+      "simple": {
+        "limit": 10,
+        "period": 60
+      }
+    },
+    {
+      "name": "HEAVY_LIMITER",
+      "namespace_id": "71002",
+      "simple": {
+        "limit": 12,
+        "period": 60
+      }
+    },
+    {
+      "name": "API_LIMITER",
+      "namespace_id": "71003",
+      "simple": {
+        "limit": 120,
+        "period": 60
+      }
+    }
   ],
   "assets": {
     "directory": "frontend",
@@ -13,14 +77,19 @@
     ],
     "not_found_handling": "single-page-application"
   },
+  // `wrangler d1 create muc-viet --binding DB --location apac --update-config` replaces database_id with the real
+  // UUID and keeps the other keys. wrangler dev keys its local database by preview_database_id: keep "local-db",
+  // or local dev opens a new, empty database.
   "d1_databases": [
     {
       "binding": "DB",
       "database_name": "muc-viet",
       "database_id": "local-db",
+      "preview_database_id": "local-db",
       "migrations_dir": "database/migrations"
     }
   ],
+  // Local R2 files are keyed by bucket_name: renaming it hides every file stored by wrangler dev.
   "r2_buckets": [
     {
       "binding": "FILES",
