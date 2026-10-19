@@ -1,9 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {readFileSync} from 'node:fs';
+import {readFileSync,existsSync} from 'node:fs';
+import {spawnSync} from 'node:child_process';
+import {fileURLToPath} from 'node:url';
 import {gunzipSync} from 'node:zlib';
 import {cleanTraineddata,noisyConfigLines,NOISY_CONFIG_KEYS} from '../services/pdf-layout/tessdata.mjs';
-import {pythonFailureMessage,withoutTesseractNoise} from '../services/pdf-layout/engine.mjs';
+import {pythonFailureMessage,withoutTesseractNoise,stderrTail} from '../services/pdf-layout/engine.mjs';
 import {serviceErrorMessage} from './pdf-layout.js';
 import {validateLayoutDocument} from '../frontend/pdf-box-layout.js';
 
@@ -56,11 +58,37 @@ test('abnormal exits become one short Vietnamese sentence without OCR noise',()=
  assert.equal(withoutTesseractNoise(NOISE),'');
 });
 
+test('any Windows crash code is reported as a crash with advice, never as "PyMuPDF could not run"',()=>{
+ assert.match(pythonFailureMessage({code:3221226356}),/dừng đột ngột .*0xC0000374: hỏng vùng nhớ heap/u);
+ const unknown=pythonFailureMessage({code:0xC0000135});
+ assert.match(unknown,/dừng đột ngột .*0xC0000135: lỗi hệ thống/u);assert.match(unknown,/Hãy thử lại/u);
+ assert.match(pythonFailureMessage({code:2}),/mã thoát 2/u,'an ordinary exit code is not mistaken for a crash');
+});
+
+test('a trimmed stderr tail starts at a line boundary, so no fragment of OCR noise reaches the student',()=>{
+ const stderr='x'.repeat(30)+'\n'+NOISE.repeat(30)+'Traceback (most recent call last):\nOSError: real cause\n';
+ const tail=stderrTail(stderr,200);
+ assert.ok(tail.length<=200);assert.ok(stderr.endsWith(tail));
+ assert.ok(tail===stderr.slice(-tail.length)&&stderr[stderr.length-tail.length-1]==='\n','tail begins right after a newline');
+ assert.equal(pythonFailureMessage({code:1,stderr:tail}),'Dịch vụ PDF gặp lỗi: OSError: real cause');
+ assert.equal(withoutTesseractNoise("Tesseract couldn't load any languages!\nCould not initialize tesseract.\nkept"),'kept');
+});
+
 test('the Worker keeps only the meaningful sentence from an older service, and bounds any message',()=>{
  const legacy=NOISE.repeat(45)+'Ảnh của các trang PDF quá lớn. Hãy chọn ít trang hơn cho mỗi lượt.';
  assert.equal(serviceErrorMessage(legacy,422),'Ảnh của các trang PDF quá lớn. Hãy chọn ít trang hơn cho mỗi lượt.');
  assert.equal(serviceErrorMessage(NOISE,422),'Không xử lý được PDF (dịch vụ trả mã 422).');
  assert.ok(serviceErrorMessage('x'.repeat(5000),422).length<=400);
+ assert.equal(serviceErrorMessage("Failed loading language 'eng'\nTesseract couldn't load any languages!\nCould not initialize tesseract.\nTrang 1 là scan nhưng không chạy được OCR Tesseract.",422),'Trang 1 là scan nhưng không chạy được OCR Tesseract.');
+});
+
+// Page limits, skipped pages, OCR start-up failures and MuPDF warnings run through the real PyMuPDF pipeline.
+const root=fileURLToPath(new URL('../',import.meta.url)),runtime=`${root}.runtime/pdf-python`,tessdata=process.env.TESSDATA_PREFIX||`${root}.runtime/tessdata`,python=process.env.PDF_PYTHON||'python';
+const ready=existsSync(runtime)&&existsSync(`${tessdata}/chi_sim.traineddata`)&&spawnSync(python,['--version'],{windowsHide:true}).status===0;
+test('extract.py: pages that never fit are skipped, full runs name what is left, scan failures name their real cause',{skip:ready?false:'needs Python with .runtime/pdf-python and chi_sim/eng tessdata (npm run prepare:pdf-ocr)',timeout:300000},()=>{
+ const run=spawnSync(python,[`${root}services/pdf-layout/test_extract_limits.py`],{encoding:'utf8',windowsHide:true,timeout:280000,env:{...process.env,PYTHONPATH:[runtime,process.env.PYTHONPATH].filter(Boolean).join(process.platform==='win32'?';':':'),PYTHONUTF8:'1',TESSDATA_PREFIX:tessdata}});
+ assert.equal(run.status,0,`${run.stdout||''}\n${run.stderr||''}`.slice(-6000));
+ assert.match(run.stderr,/\bOK\b/u);
 });
 
 const pixel='iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=';

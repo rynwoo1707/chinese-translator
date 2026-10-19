@@ -9,6 +9,10 @@ from statistics import median
 
 import pymupdf as fitz
 
+# PyMuPDF prints MuPDF messages (a damaged but still readable PDF, a broken embedded font) to stdout by default, where
+# they would corrupt the JSON answer; send them to stderr together with Tesseract's own lines.
+fitz.set_messages(fd=2)
+
 HAN = re.compile(r"[\u3400-\u9fff\uf900-\ufaff]")
 # Limits that keep one response small enough for the Worker to store and return.
 IMAGE_BUDGET = 18 * 1024 * 1024
@@ -1146,13 +1150,39 @@ def row_text(words, row, members, tokens, H):
     return "".join(text)
 
 
+class OcrUnavailable(RuntimeError):
+    """Tesseract itself could not run (missing or unreadable language data), as opposed to a problem with the page."""
+
+
+_checked_languages = set()
+
+
+def require_ocr_languages(language):
+    """With an explicit TESSDATA_PREFIX, Tesseract silently skips a missing language (chi_sim gone, eng kept) and
+    the page then looks like it has no Chinese text; name the missing file instead."""
+    prefix = os.getenv("TESSDATA_PREFIX")
+    if not prefix or not language or language in _checked_languages:
+        return
+    missing = [name for name in language.split("+") if name and not os.path.isfile(os.path.join(prefix, f"{name}.traineddata"))]
+    if missing:
+        raise OcrUnavailable(f"thiếu {', '.join(f'{name}.traineddata' for name in missing)} trong {prefix}")
+    _checked_languages.add(language)
+
+
 def tesseract(page, rect, language, dpi=240, invert=False):
     """Tesseract reading of a page clip: (rawdict, plain text), coordinates in points from the clip's corner."""
+    require_ocr_languages(language)
     crop = page.get_pixmap(dpi=dpi, clip=rect, alpha=False)
     if invert:
         # light glyphs on a dark band: Tesseract reads dark text on light paper
         crop.invert_irect(crop.irect)
-    ocr_doc = fitz.open(stream=crop.pdfocr_tobytes(language=language, tessdata=os.getenv("TESSDATA_PREFIX") or None), filetype="pdf")
+    try:
+        recognized = crop.pdfocr_tobytes(language=language, tessdata=os.getenv("TESSDATA_PREFIX") or None)
+    except MemoryError:
+        raise
+    except Exception as error:
+        raise OcrUnavailable((str(error) or type(error).__name__).strip().splitlines()[0][:160]) from error
+    ocr_doc = fitz.open(stream=recognized, filetype="pdf")
     try:
         return ocr_doc[0].get_text("rawdict", sort=True), ocr_doc[0].get_text().strip()
     finally:
@@ -2718,9 +2748,10 @@ def image_url(page, clip=None, scale=1.6, photo=False):
     pix = page.get_pixmap(matrix=fitz.Matrix(scale, scale), clip=clip, alpha=False)
     png = pix.tobytes("png")
     if photo:
-        # A masked scan background is mostly flat paper, where lossless PNG is often the smaller file.
+        # JPEG only when it clearly pays off: a masked scan background is mostly flat paper, where lossless PNG is
+        # about as small, and keeping PNG there keeps those export pages pixel-identical.
         jpeg = pix.tobytes("jpg", jpg_quality=PAGE_JPEG_QUALITY)
-        if len(jpeg) < len(png):
+        if len(jpeg) < len(png) * 0.8:
             return "data:image/jpeg;base64," + base64.b64encode(jpeg).decode("ascii")
     return "data:image/png;base64," + base64.b64encode(png).decode("ascii")
 
@@ -2784,7 +2815,7 @@ def extract(payload):
             raise ValueError(f"Trang {index + 1} quá lớn để render an toàn ({round(rect.width)}×{round(rect.height)} pt). Hãy bỏ trang này khỏi phạm vi hoặc giảm kích thước trang.")
     pages, page_sizes, page_warnings = [], [], []
     pixel_budget, encoded_budget, pdf_estimate, seen_streams = 0, 0, 0, set()
-    stopped_by, label = None, 1
+    stopped_by, label, too_large = None, 1, []
     for index in indices:
         area = doc[index].rect.width * doc[index].rect.height * 1.6 * 1.6
         page_pdf = page_pdf_bytes(doc, index, seen_streams) * 4 // 3
@@ -2805,10 +2836,15 @@ def extract(payload):
         body_han = sum(len(HAN.findall(s.get("text", ""))) for b in native["blocks"] if b["type"] == 0 for l in b["lines"] for s in l["spans"] if page.rect.height * .15 < s["bbox"][1] < page.rect.height * .85)
         scanned = (len(native_text.strip()) < 12 and bool(image_infos)) or (large_scan and body_han < 60)
         original = image_url(page, photo=scanned)
-        # The cleaned background is about the size of the original; skip OCR for a page that cannot fit anyway.
-        if encoded_budget + 2 * len(original) > IMAGE_BUDGET:
-            if not pages:
-                raise ValueError(f"Trang {index + 1} có ảnh quá lớn (khoảng {2 * len(original) / 1048576:.1f} MB) để xử lý trong một lượt. Hãy giảm độ phân giải bản scan rồi thử lại.")
+        # Scanned pages only (OCR is their expensive part, and their cleaned background is about the size of the
+        # original): skip OCR for a page that cannot fit anyway. Native pages are cheap and get the exact check below,
+        # since their text-free background is much smaller than the original. A page too large even on its own is
+        # skipped (it would never fit a later run either); otherwise the run stops and the rest is suggested next.
+        if scanned and 2 * len(original) > IMAGE_BUDGET:
+            subset.delete_page(-1)
+            too_large.append((index + 1, 2 * len(original)))
+            continue
+        if scanned and encoded_budget + 2 * len(original) > IMAGE_BUDGET:
             subset.delete_page(-1)
             stopped_by = index
             break
@@ -2820,11 +2856,14 @@ def extract(payload):
                 native = {"blocks": []}
                 notes.append(f"Trang {index + 1}: dùng OCR; hãy đối chiếu công thức với PDF gốc.")
                 notes += missed
-            except ValueError:
+            except (ValueError, MemoryError):
                 raise
+            except OcrUnavailable as error:
+                raise ValueError(f"Trang {index + 1} là scan nhưng không chạy được OCR Tesseract ({error}). Hãy chạy npm run prepare:pdf-ocr hoặc đặt TESSDATA_PREFIX tới thư mục có chi_sim và eng.") from error
             except Exception as error:
+                # Only Tesseract failures get the installation advice; anything else is a problem with this page.
                 detail = (str(error) or type(error).__name__).strip().splitlines()[0][:160]
-                raise ValueError(f"Trang {index + 1} là scan nhưng không chạy được OCR Tesseract ({detail}). Hãy chạy npm run prepare:pdf-ocr hoặc đặt TESSDATA_PREFIX tới thư mục có chi_sim và eng.") from error
+                raise ValueError(f"Trang {index + 1}: không xử lý được trang scan ({type(error).__name__}: {detail}). Hãy thử lại; nếu vẫn lỗi, hãy bỏ trang này khỏi phạm vi.") from error
         images = [{"box": rect_list(info["bbox"]), "width": info["width"], "height": info["height"]} for info in page.get_image_info()]
         drawings = [rect_list(rect) for rect in page.cluster_drawings()]
         blocks = scan_blocks
@@ -2881,13 +2920,18 @@ def extract(payload):
         cleaned_image = image_url(background, photo=scanned)
         background_doc.close()
         # The OCR crops of the page go into a few sheets; the blocks keep only their sheet and tab label.
+        label_before = label
         sheets, label = ocr_sheets(index + 1, blocks, label) if scanned else ([], label)
         page_bytes = len(original) + len(cleaned_image) + sum(len(b.get("image", "")) + sum(len(i["image"]) for i in b["inlines"]) for b in blocks) + sum(len(s["image"]) for s in sheets)
+        if page_bytes > IMAGE_BUDGET or page_pdf + page_bytes > TOTAL_BUDGET:
+            subset.delete_page(-1)
+            too_large.append((index + 1, page_bytes))
+            label = label_before
+            continue
         if encoded_budget + page_bytes > IMAGE_BUDGET or pdf_estimate + page_pdf + encoded_budget + page_bytes > TOTAL_BUDGET:
-            if not pages:
-                raise ValueError(f"Trang {index + 1} có ảnh quá lớn (khoảng {page_bytes / 1048576:.1f} MB) để xử lý trong một lượt. Hãy giảm độ phân giải bản scan rồi thử lại.")
             subset.delete_page(-1)
             stopped_by = index
+            label = label_before
             break
         pixel_budget += area
         encoded_budget += page_bytes
@@ -2895,6 +2939,9 @@ def extract(payload):
         page_sizes.append(page_bytes)
         page_warnings.append(notes)
         pages.append({"number": index + 1, "width": round(page.rect.width, 3), "height": round(page.rect.height, 3), "original": original, "background": cleaned_image, "blocks": blocks, "images": images, "drawings": drawings, "ocr": scanned, "protectedRegions": protected, "extractionVersion": EXTRACTION_VERSION, **({"ocrSheets": sheets} if sheets else {})})
+    if not pages:
+        largest = max(size for _, size in too_large)
+        raise ValueError(f"Trang {page_ranges([n for n, _ in too_large])} có ảnh quá lớn (khoảng {largest / 1048576:.1f} MB) để xử lý trong một lượt. Hãy giảm độ phân giải bản scan rồi thử lại.")
     selected_pdf = base64.b64encode(subset.tobytes(garbage=3, deflate=True)).decode("ascii")
     # The stream estimate cannot see every shared resource; trim exactly if the real PDF still does not fit.
     while len(selected_pdf) + encoded_budget > TOTAL_BUDGET and len(pages) > 1:
@@ -2910,10 +2957,16 @@ def extract(payload):
     total = len(doc)
     doc.close()
     warnings = [note for notes in page_warnings for note in notes]
+    skipped = [n for n, _ in too_large]
+    notices = []
+    if skipped:
+        notices.append(f"Đã bỏ qua trang {page_ranges(skipped)} vì ảnh của trang quá lớn để xử lý trong một lượt (khoảng {max(size for _, size in too_large) / 1048576:.1f} MB). Hãy giảm độ phân giải bản scan rồi dịch riêng.")
     if stopped_by is not None:
         done = [p["number"] for p in pages]
-        remaining = [i + 1 for i in indices if i + 1 > done[-1]]
-        warnings.insert(0, f"Lượt này xử lý {len(done)}/{len(indices)} trang đã chọn (trang {page_ranges(done)}) vì ảnh của các trang vượt giới hạn dung lượng của một lượt. Hãy dịch tiếp trang {page_ranges(remaining)} ở lượt sau.")
+        remaining = [i + 1 for i in indices if i >= stopped_by and i + 1 not in skipped]
+        if remaining:
+            notices.append(f"Lượt này xử lý {len(done)}/{len(indices)} trang đã chọn (trang {page_ranges(done)}) vì ảnh của các trang vượt giới hạn dung lượng của một lượt. Hãy dịch tiếp trang {page_ranges(remaining)} ở lượt sau.")
+    warnings = notices + warnings
     return {"document": {"version": 1, "extractionVersion": EXTRACTION_VERSION, "engine": "pymupdf", "totalPages": total, "pages": pages, "warnings": warnings}, "originalPdfBase64": selected_pdf}
 
 

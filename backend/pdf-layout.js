@@ -24,7 +24,7 @@ function serviceUrl(env){
  const url=new URL(env.PDF_LAYOUT_SERVICE_URL);if(url.protocol!=='https:'&&!(url.protocol==='http:'&&['127.0.0.1','localhost','pdf-layout'].includes(url.hostname)))throw new Error('Dịch vụ PDF cần HTTPS.');return url;
 }
 // Older service builds returned MuPDF/Tesseract's whole stderr as the error, with the real cause at the very end.
-const SERVICE_NOISE=/Warning: Parameter not found: \S+|Error opening data file [^\n]*?\.traineddata|Please make sure the TESSDATA_PREFIX environment variable is set to your "tessdata" directory\.|Failed loading language '[^'\n]*'|Image too small to scale!! \([^)\n]*\)|Line cannot be recognized!!/gu;
+const SERVICE_NOISE=/Warning: Parameter not found: \S+|Error opening data file [^\n]*?\.traineddata|Please make sure the TESSDATA_PREFIX environment variable is set to your "tessdata" directory\.|Failed loading language '[^'\n]*'|Image too small to scale!! \([^)\n]*\)|Line cannot be recognized!!|Tesseract couldn't load any languages!|Could not initiali[sz]e tesseract\.?/giu;
 export function serviceErrorMessage(value,status){
  const text=String(value||'').replace(SERVICE_NOISE,' ').replace(/\s+/gu,' ').trim();
  if(!text)return `Không xử lý được PDF (dịch vụ trả mã ${status}).`;

@@ -41,6 +41,8 @@ docker build -f services/pdf-layout/Dockerfile -t hoa-tri-pdf .
 docker run --rm -p 127.0.0.1:8091:8091 -e PDF_LAYOUT_SERVICE_TOKEN="your-long-secret" hoa-tri-pdf
 ```
 
+**Thứ tự cập nhật.** Worker và dịch vụ PDF dùng chung bộ kiểm tra tài liệu (`frontend/pdf-box-layout.js`). Khi cập nhật, triển khai Worker trước hoặc cùng lúc với dịch vụ PDF; không chạy dịch vụ mới với Worker cũ hay ngược lại. Ví dụ: dịch vụ mới lưu ảnh trang scan dạng JPEG, còn bộ kiểm tra cũ chỉ nhận PNG nên mọi trang scan báo "Ảnh trang PDF không hợp lệ.". Khi đã có tài liệu JPEG trong R2, bản rollback của cả hai phía vẫn phải giữ bộ kiểm tra nhận `png|jpeg`. Trên máy cá nhân, `npm start`/`start.cmd` chạy cả hai cùng phiên bản; `npm run dev:pdf-layout` tự khởi động lại khi code thay đổi. Nếu cổng 8091 vẫn bị một tiến trình cũ chiếm, hãy dừng tiến trình đó trước khi chạy lại.
+
 ## Hình, công thức và scan
 
 PyMuPDF đọc `get_text('dict')` để lấy block, span, font, màu, box. Trang được chuẩn hóa rotation; mọi box dùng point và gốc tọa độ trên trái. Ảnh nhúng và vector vẫn nằm trên nền. Chỉ chữ trong block tiếng Trung được xóa để chèn chữ Việt. Các span toán/Latin riêng trong block được chụp từ bản gốc và thay bằng token bất biến, ghép lại dưới dạng ảnh inline. Công thức độc lập và nhãn điểm không có chữ Hán được giữ trên nền.

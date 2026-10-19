@@ -7,11 +7,20 @@ import {validateLayoutDocument,validateBlockTranslations,pageHtml,prepareLayout,
 
 const root=fileURLToPath(new URL('../../',import.meta.url));
 const STDOUT_LIMIT=100*1024*1024,STDERR_TAIL=16*1024,TIMEOUT_MS=240000;
-// MuPDF's embedded Tesseract prints these on every OCR call; they never explain a failure.
-const TESSERACT_NOISE=[/^Warning: Parameter not found:/u,/^Error opening data file .*\.traineddata$/u,/^Please make sure the TESSDATA_PREFIX environment variable is set/u,/^Failed loading language '/u,/^Image too small to scale!!/u,/^Line cannot be recognized!!/u,/^Empty page!!/u,/^Estimating resolution as \d+/u];
-export const withoutTesseractNoise=text=>String(text||'').split(/\r?\n/u).map(line=>line.trimEnd()).filter(line=>line.trim()&&!TESSERACT_NOISE.some(pattern=>pattern.test(line.trim()))).join('\n');
+// MuPDF's embedded Tesseract prints these on every OCR call; they never explain a failure. Not anchored, so the
+// fragment left at the start of a trimmed stderr tail is recognised too.
+const TESSERACT_NOISE=[/Warning: Parameter not found:/u,/Error opening data file .*\.traineddata/u,/Please make sure the TESSDATA_PREFIX environment variable is set/u,/Failed loading language '/u,/Image too small to scale!!/u,/Line cannot be recognized!!/u,/Empty page!!/u,/Estimating resolution as \d+/u,/Tesseract couldn't load any languages!/u,/Could not initiali[sz]e tesseract/iu];
+export const withoutTesseractNoise=text=>String(text||'').split(/\r?\n/u).map(line=>line.trimEnd()).filter(line=>line.trim()&&!TESSERACT_NOISE.some(pattern=>pattern.test(line))).join('\n');
+// Keeps the last `limit` characters of stderr, starting at a line boundary so no half line is kept.
+export function stderrTail(text,limit=STDERR_TAIL){
+ if(text.length<=limit)return text;
+ const tail=text.slice(-limit),newline=tail.indexOf('\n');
+ return newline>=0?tail.slice(newline+1):tail;
+}
 export const PYTHON_SHORTCUT_MESSAGE='Máy chạy dịch vụ PDF chưa có Python thật: lệnh "python" đang mở lối tắt Microsoft Store. Cài Python 3 từ python.org (tích "Add python.exe to PATH"), mở cửa sổ terminal mới, chạy "npm run setup" rồi khởi động lại "npm run dev:pdf-layout".';
-const WINDOWS_CRASHES={0xC0000005:'lỗi truy cập bộ nhớ',0xC00000FD:'tràn ngăn xếp',0xC0000409:'thư viện dừng khẩn cấp',0xC0000017:'hết bộ nhớ',0xC000013A:'bị ngắt'};
+const WINDOWS_CRASHES={0xC0000005:'lỗi truy cập bộ nhớ',0xC00000FD:'tràn ngăn xếp',0xC0000409:'thư viện dừng khẩn cấp',0xC0000374:'hỏng vùng nhớ heap',0xC0000017:'hết bộ nhớ',0xC000013A:'bị ngắt'};
+// Any NTSTATUS error code (0xC0000000 and above) means the process crashed, even when the code is not in the list.
+const windowsCrash=code=>typeof code==='number'&&(code>>>0)>=0xC0000000?WINDOWS_CRASHES[code>>>0]||'lỗi hệ thống':null;
 
 // One short sentence for the student, whatever way the Python process ended.
 export function pythonFailureMessage({code=null,signal=null,stdout='',stderr='',killedForSize=false,timedOut=false}={}){
@@ -20,7 +29,7 @@ export function pythonFailureMessage({code=null,signal=null,stdout='',stderr='',
  try{const parsed=JSON.parse(String(stdout).trim());if(parsed&&typeof parsed.error==='string'&&parsed.error.trim())return parsed.error.trim().slice(0,500);}catch{}
  // 9009: Windows ran the Microsoft Store "python" shortcut (no real Python); its localized text is not UTF-8.
  if(code===9009)return PYTHON_SHORTCUT_MESSAGE;
- const crash=typeof code==='number'?WINDOWS_CRASHES[code>>>0]:null;
+ const crash=windowsCrash(code);
  if(crash||signal)return `Dịch vụ PDF dừng đột ngột khi xử lý các trang đã chọn (${crash?`mã 0x${(code>>>0).toString(16).toUpperCase()}: ${crash}`:`tín hiệu ${signal}${signal==='SIGKILL'?', có thể do hết bộ nhớ':''}`}). Hãy thử lại với ít trang hơn; nếu vẫn lỗi, hãy kiểm tra tệp PDF.`;
  const last=withoutTesseractNoise(stderr).split('\n').filter(Boolean).at(-1);
  return last?`Dịch vụ PDF gặp lỗi: ${last.slice(0,300)}`:`Không chạy được PyMuPDF (mã thoát ${code}).`;
@@ -29,13 +38,17 @@ export function pythonFailureMessage({code=null,signal=null,stdout='',stderr='',
 export function pythonOperation(payload){
  return new Promise((resolve,reject)=>{
   const python=process.env.PDF_PYTHON||'python';
-  const child=spawn(python,[fileURLToPath(new URL('./extract.py',import.meta.url))],{windowsHide:true,env:{...process.env,PYTHONPATH:[`${root}.runtime/pdf-python`,process.env.PYTHONPATH].filter(Boolean).join(process.platform==='win32'?';':':'),PYTHONUTF8:'1',...(process.env.TESSDATA_PREFIX?{}:existsSync(`${root}.runtime/tessdata`)?{TESSDATA_PREFIX:`${root}.runtime/tessdata`}:{})},stdio:['pipe','pipe','pipe']});
+  let child;
+  // PYMUPDF_MESSAGE=fd:2 keeps MuPDF messages (also those printed while PyMuPDF imports) off the JSON stdout.
+  // Some misconfigured PDF_PYTHON values make spawn() throw instead of emitting 'error'.
+  try{child=spawn(python,[fileURLToPath(new URL('./extract.py',import.meta.url))],{windowsHide:true,env:{...process.env,PYTHONPATH:[`${root}.runtime/pdf-python`,process.env.PYTHONPATH].filter(Boolean).join(process.platform==='win32'?';':':'),PYTHONUTF8:'1',PYMUPDF_MESSAGE:'fd:2',...(process.env.TESSDATA_PREFIX?{}:existsSync(`${root}.runtime/tessdata`)?{TESSDATA_PREFIX:`${root}.runtime/tessdata`}:{})},stdio:['pipe','pipe','pipe']});}
+  catch(error){reject(new Error(`Không khởi động được PyMuPDF (${python}): ${error.message}. Hãy kiểm tra PDF_PYTHON hoặc chạy npm run setup.`));return;}
   const chunks=[];let size=0,stderr='',killedForSize=false,timedOut=false,settled=false;
   const finish=(error,value)=>{if(settled)return;settled=true;clearTimeout(timer);error?reject(error):resolve(value);};
   const timer=setTimeout(()=>{timedOut=true;child.kill();finish(new Error(pythonFailureMessage({timedOut})));},TIMEOUT_MS);
   child.stdout.on('data',chunk=>{if(killedForSize)return;size+=chunk.length;if(size>STDOUT_LIMIT){killedForSize=true;chunks.length=0;child.kill();return;}chunks.push(chunk);});
   // Only a bounded tail is kept: a 20-page scan used to accumulate hundreds of KB of OCR warnings here.
-  child.stderr.on('data',chunk=>{stderr=(stderr+chunk.toString('utf8')).slice(-STDERR_TAIL);});
+  child.stderr.on('data',chunk=>{stderr=stderrTail(stderr+chunk.toString('utf8'));});
   child.on('error',error=>finish(new Error(error.code==='ENOENT'?`Không tìm thấy Python để chạy dịch vụ PDF (${python}). Hãy cài Python hoặc đặt PDF_PYTHON.`:`Không khởi động được PyMuPDF: ${error.message}`)));
   child.on('close',(code,signal)=>{
    if(settled)return;
