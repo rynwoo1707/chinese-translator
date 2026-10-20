@@ -496,7 +496,6 @@ function updatePart(index,text,state){
  if(text!==undefined){const article=document.createElement('article');article.className='translation-document';article.innerHTML=translationContentHtml(text,figuresForPart(translationState?.plan||[],index,pageImages));body.replaceChildren(article);}
  if(state!=='queued')card.open=true;
 }
-function technicalPages(text){return String(text).replace(/^\[Trang PDF \d+(?:[–-]\d+)?\]\s*$/gmu,'').replace(/\n{3,}/gu,'\n\n').trim();}
 function setFileStatus(text){$('#file-status').textContent=text;}
 // Suggests a teacher-published translation of the identical file. Admin uploads are capped at 25 MB, so larger
 // files cannot match; any failure is ignored so the student can always translate with their own key.

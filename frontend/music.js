@@ -4,8 +4,7 @@ const PREFERENCE_KEY='hoaTriMusic';
 let audio,playing=false,starting=false,enabled=false;
 try{enabled=localStorage.getItem(PREFERENCE_KEY)==='on';}catch{}
 function remember(){try{localStorage.setItem(PREFERENCE_KEY,enabled?'on':'off');}catch{}}
-let volume=.18;
-try{const saved=localStorage.getItem('catHienMusicVolume');if(saved!==null&&Number.isFinite(Number(saved)))volume=Math.max(0,Math.min(.5,Number(saved)));}catch{}
+const volume=.18;
 
 function player(){
  if(!audio){audio=new Audio(MUSIC_URL);audio.loop=true;audio.preload='auto';audio.volume=volume;audio.addEventListener('play',()=>{playing=true;sync();});audio.addEventListener('pause',()=>{playing=false;sync();});}
