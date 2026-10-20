@@ -101,3 +101,17 @@ test('Reader: sample notice, "Đọc song ngữ" only when the original page is 
  const text=run(`state.chapters=[{id:'t1',title:'Văn bản',mime:'text/plain',content:'Nội dung.'}];state.readerStory={id:'s2'};state.readerAssembly=null;readerView()`);
  assert.doesNotMatch(text,/reader-pdf-tools|sample-notice/u);assert.match(text,/class="prose"/u);
 });
+
+test('Admin review: a student-chosen story title is shown as text in every heading, never as markup',()=>{
+ const {run}=app({pathname:'/admin'});
+ const hostile='<img src=x onerror="window.__xss=1">';
+ run(`state.status={authenticated:true};state.jobs=[{id:'j1',story_id:'s1',story_title:${JSON.stringify(hostile)},filename:'<b>tệp</b>.pdf',status:'review',created_at:'2026-10-20',source:'',translation:'',warnings:'[]'}]`);
+ const book=run(`state.selected=null;state.reviewStory='s1';reviewView()`);
+ const part=run(`state.selected='j1';reviewView()`);
+ for(const html of [book,part]){
+  assert.doesNotMatch(html,/<img src=x/u,'the title must never become an element');
+  assert.match(html,/&lt;img src=x onerror=&quot;window.__xss=1&quot;&gt;/u);
+ }
+ assert.match(part,/&lt;b&gt;tệp&lt;\/b&gt;\.pdf/u,'the file name is escaped exactly once');
+ assert.doesNotMatch(part,/&amp;lt;/u,'no double escaping');
+});
