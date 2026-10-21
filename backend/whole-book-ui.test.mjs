@@ -179,7 +179,7 @@ test('Dịch cả quyển: upload once, chunks of at most 20 pages with their of
  try{
   await pickBook(page,pdf);
   const estimate=await page.$eval('#whole-book-estimate',node=>node.textContent);
-  assert.match(estimate,/Ước tính token Gemini/u);assert.match(estimate,/chỉ là ước tính/u);assert.match(estimate,/867 token/u);assert.match(estimate,/Bìa, trang trống và trang bỏ qua: 0 token/u);
+  assert.match(estimate,/Ước tính token Gemini/u);assert.match(estimate,/chỉ là ước tính/u);assert.match(estimate,/× [\d.]+–[\d.]+ token/u);assert.match(estimate,/Số token thật tùy lượng chữ/u);assert.doesNotMatch(estimate,/Số đo thật|867/u);assert.match(estimate,/Bìa, trang trống và trang bỏ qua: 0 token/u);
   assert.match(await page.$eval('#whole-book-summary',node=>node.textContent),/26 trang .* bìa: trang 1/u);
   assert.equal(await page.$eval('#translate',node=>node.textContent.trim()),'Dịch cả quyển →');assert.equal(await page.$eval('#stop',node=>node.textContent),'Dừng sau trang hiện tại');
   await page.fill('#content-title','Sách thử nghiệm');await page.fill('#api-key',KEY);await page.click('#translate');

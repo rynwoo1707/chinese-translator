@@ -143,15 +143,18 @@ test('On a phone, tapping an OCR region of a page image opens the lookup; a form
 
 test('On a phone, a tap on a block of the original PDF page lands on its region and shows pinyin and Hán Việt',{skip,todo:regionRules},async()=>{
  const {page,close,checkTraffic}=await open(PHONE);
- // Each region covers its block: PDF points × 4/3 px × zoom from the page frame's corner, at every zoom.
+ // Each region covers its block: PDF points × 4/3 px × zoom from the page frame's corner, at every zoom (the default
+ // fits the page to the column, so the zoom in use is read from the viewer).
  const geometry=()=>page.$eval('[data-pdf-original] .pdf-page-frame',frame=>{
-  const origin=frame.getBoundingClientRect(),scale=4/3*Number(document.querySelector('[data-pdf-zoom]').value);
+  const origin=frame.getBoundingClientRect(),scale=4/3*globalThis.dualViewer.zoom;
   return [...frame.querySelectorAll('.pdf-source-region')].map(node=>{const box=node.getBoundingClientRect();return [node.dataset.sourceBlock,...[box.left-origin.left,box.top-origin.top,box.right-origin.left,box.bottom-origin.top].map(value=>Math.round(value/scale*2)/2)];});
  });
  const expected=FIXTURE.blocks.filter(b=>b.id!=='p1-b2').map(b=>[b.id,...b.box]);
  assert.deepEqual(await geometry(),expected);
+ // By default the page fits the column (no sideways scrolling) and, on a phone, the translated page comes first.
+ assert.deepEqual(await page.evaluate(()=>{const box=document.querySelector('[data-pdf-original]');return {zoom:document.querySelector('[data-pdf-zoom]').value,fits:box.scrollWidth<=box.clientWidth,first:document.querySelector('.pdf-viewer-grid>section').dataset.pdfSide};}),{zoom:'fit',fits:true,first:'translated'});
  // The middle of the third block's text hits its region, not the page image under it.
- const [x0,y0,x1,y1]=FIXTURE.blocks[2].box,target=await page.$eval('[data-pdf-original] .pdf-page-frame',(frame,[x,y])=>{frame.scrollIntoView({block:'center'});const origin=frame.getBoundingClientRect(),scale=4/3*Number(document.querySelector('[data-pdf-zoom]').value),point={x:origin.left+x*scale,y:origin.top+y*scale};return {...point,hit:document.elementFromPoint(point.x,point.y)?.dataset.sourceBlock};},[(x0+x1)/2,(y0+y1)/2]);
+ const [x0,y0,x1,y1]=FIXTURE.blocks[2].box,target=await page.$eval('[data-pdf-original] .pdf-page-frame',(frame,[x,y])=>{frame.scrollIntoView({block:'center'});const origin=frame.getBoundingClientRect(),scale=4/3*globalThis.dualViewer.zoom,point={x:origin.left+x*scale,y:origin.top+y*scale};return {...point,hit:document.elementFromPoint(point.x,point.y)?.dataset.sourceBlock};},[(x0+x1)/2,(y0+y1)/2]);
  assert.equal(target.hit,'p1-b3');
  await page.touchscreen.tap(target.x,target.y);
  await page.waitForSelector('#hanzi-panel:not([hidden])');

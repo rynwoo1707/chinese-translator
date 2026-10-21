@@ -69,13 +69,24 @@
       }
     }
   ],
+  // The Worker answers the API and the HTML pages: canonical URLs, link previews and sitemap.xml take the request's own
+  // origin, so no domain is written anywhere (backend/site-pages.js). /admin is index.html (the app reads the path) with
+  // X-Robots-Tag: noindex. Any other path is a file from frontend/ or frontend/404.html with status 404.
   "assets": {
     "directory": "frontend",
     "binding": "ASSETS",
     "run_worker_first": [
-      "/api/*"
+      "/api/*",
+      "/",
+      "/study",
+      "/dieu-khoan",
+      "/quyen-rieng-tu",
+      "/admin",
+      "/admin/*",
+      "/robots.txt",
+      "/sitemap.xml"
     ],
-    "not_found_handling": "single-page-application"
+    "not_found_handling": "404-page"
   },
   // `wrangler d1 create muc-viet --binding DB --location apac --update-config` replaces database_id with the real
   // UUID and keeps the other keys. wrangler dev keys its local database by preview_database_id: keep "local-db",

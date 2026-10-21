@@ -58,6 +58,7 @@ function fakeSite({version=SHA,routes={}}={}){
   if(routes[pathname])return routes[pathname]({method,headers});
   if(pathname==='/api/health')return Response.json({ok:true,service:'hoa-tri',version,database:'ok',pdfLayout:'configured'});
   if(pathname==='/')return new Response('<!doctype html>',{headers:{'content-type':'text/html; charset=utf-8','content-security-policy-report-only':"default-src 'self'"}});
+  if(pathname==='/sitemap.xml')return new Response(`<urlset><url><loc>${new URL(url).origin}/</loc></url></urlset>`,{headers:{'content-type':'application/xml; charset=utf-8'}});
   if(pathname.endsWith('.js')||pathname.endsWith('.mjs'))return new Response(null,{headers:{'content-type':'text/javascript; charset=utf-8'}});
   if(pathname.endsWith('.tar'))return new Response(null,{headers:{'content-type':'application/x-tar'}});
   if(pathname==='/api/library')return Response.json([]);
@@ -163,9 +164,18 @@ test('Wrangler output: JSON among warnings, deploy URL and version, the CÓ conf
 });
 
 test('Post-deploy checks: health version, CSP, vendor types, library, admin token only on /api/status',async()=>{
- const base='https://muc-viet-cms.owner.workers.dev',site=fakeSite();
+ const base='https://hoatri.example.vn',site=fakeSite();
  const good=await postDeployChecks(base,{fetch:site.fetch,sha:SHA,adminToken:ADMIN,sleep:async()=>{}});
- assert.deepEqual(good.filter(r=>r.level!=='ok'),[]);assert.equal(good.length,8);
+ assert.deepEqual(good.filter(r=>r.level!=='ok'),[]);assert.equal(good.length,10);
+ assert.match(good.find(r=>r.text.startsWith('/sitemap.xml')).text,/https:\/\/hoatri\.example\.vn/u);assert.match(good.find(r=>r.text.includes('404')).text,/frontend\/404\.html/u);
+ assert.ok(site.requests.some(r=>r.method==='HEAD'&&!['/','/sitemap.xml'].includes(r.pathname)&&!r.pathname.startsWith('/vendor/')&&!r.pathname.startsWith('/api/')),'a made-up path is asked for');
+ // On a workers.dev name the site works, but every shared link shows that name: attach a domain before sharing.
+ const workersDev=await postDeployChecks('https://muc-viet-cms.owner.workers.dev',{fetch:fakeSite().fetch,sha:SHA,sleep:async()=>{}});
+ assert.deepEqual(workersDev.filter(r=>r.level==='warn').map(r=>r.text.split(':')[0]),['Trang đang chạy ở muc-viet-cms.owner.workers.dev']);
+ assert.match(workersDev.find(r=>r.level==='warn').text,/Gắn tên miền riêng trước khi chia sẻ link đầu tiên/u);
+ // The single-page fallback of older deploys (200 for any path) and a missing sitemap are reported.
+ const spa=await postDeployChecks(base,{fetch:fakeSite({routes:{'/khong-co-trang-nay-hoa-tri':()=>new Response(null,{headers:{'content-type':'text/html'}}),'/sitemap.xml':()=>new Response('<!doctype html>',{status:404,headers:{'content-type':'text/html'}})}}).fetch,sha:SHA,sleep:async()=>{}});
+ assert.deepEqual(spa.filter(r=>r.level==='warn').map(r=>r.text.split(' trả ')[0]),['/sitemap.xml','Đường dẫn không tồn tại']);
  assert.deepEqual(site.requests.filter(r=>r.headers.has('authorization')).map(r=>r.pathname),['/api/status']);
  assert.ok(site.requests.filter(r=>r.pathname.startsWith('/vendor/')).every(r=>r.method==='HEAD'));
  let waits=0;
@@ -181,7 +191,7 @@ test('Post-deploy checks: health version, CSP, vendor types, library, admin toke
 });
 
 test('Post-deploy checks: a too-short ADMIN_TOKEN is named even without a token, the SPA fallback never passes for a file',async()=>{
- const base='https://hoa-tri.owner.workers.dev',sleep=async()=>{};
+ const base='https://hoc.truong.edu.vn',sleep=async()=>{};
  const short=()=>Response.json({authenticated:false,adminTokenTooShort:true});
  for(const adminToken of ['',ADMIN]){
   const results=await postDeployChecks(base,{fetch:fakeSite({routes:{'/api/status':short}}).fetch,adminToken,sleep});

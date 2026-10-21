@@ -76,7 +76,7 @@ test('Admin: lock, unlock and delete per account, terms shown; a short server to
 test('Library: samples carry the badge, the card note and the intro; the footer is the shared one',()=>{
  const {run}=app();
  const html=run(`state.loaded=true;state.route='library';state.library=[{id:'s',title:'Hàm số',genre:'Toán học · STEM',chapters:2,sample:1,translated_pages:4},{id:'p',title:'Sử ký',genre:'Lịch sử Trung Hoa',chapters:1,sample:0}];publicLayout()`);
- assert.equal((html.match(/class="sample-badge"/gu)||[]).length,1);assert.match(html,/aria-label="Thông tin tài liệu Hàm số · Ví dụ mẫu"/u);assert.match(html,/aria-label="Thông tin tài liệu Sử ký"/u);
+ assert.equal((html.match(/class="sample-badge"/gu)||[]).length,1);assert.match(html,/aria-label="Mở tài liệu Hàm số · Ví dụ mẫu"/u);assert.match(html,/aria-label="Mở tài liệu Sử ký"/u);
  assert.match(html,/4 trang dịch mẫu · giữ bố cục gốc/u);assert.match(html,/class="sample-intro"/u);
  assert.ok(html.includes(`<footer class="site-footer" data-site-footer>${footerHtml()}</footer>`));
 });

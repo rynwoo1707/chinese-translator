@@ -6,11 +6,12 @@ import {runStudyTranslation} from './study-flow.js';
 import {createTranslationPlan,joinedPageText,textOutsideFigures} from './document-layout.js';
 import {originalPageView,partTitle,buildStudyHtml,translationContentHtml,figuresForPart,readingStyles} from './study-layout-view.js';
 import {extractPageFigures} from './document-figures.js';
-import {blockBatches,ocrImageBatches,validateBlockTranslations} from './pdf-box-layout.js';
-import {PdfDualViewer} from './pdf-dual-viewer.js';
-import {excludeCover,detectCoverInFile,pageJpeg} from './cover-detect.js';
 import {attachHanziLookup,openHanziPanel,lookupTextarea,hasHan} from './hanzi-lookup.js';
-import * as wholeBook from './whole-book.js';
+// Loaded only when needed, so the page opens without them: the PDF tools (whole-book.js, cover-detect.js) with a picked
+// PDF or a whole-book run, the layout code with a layout run, the dual viewer with the first layout PDF it shows.
+let wholeBook=null,coverTools=null;
+const pdfTools=()=>Promise.all([import('./whole-book.js'),import('./cover-detect.js')]).then(([book,coverModule])=>{wholeBook=book;coverTools=coverModule;});
+const boxLayout=()=>import('./pdf-box-layout.js');
 const $=selector=>document.querySelector(selector);
 const readingStyle=document.createElement('style');readingStyle.textContent=readingStyles;document.head.append(readingStyle);
 let sessionKey='',selectedFile=null,pdfAnalysis=null,running=false,starting=false,stopRequested=false;
@@ -20,7 +21,10 @@ let ocrWarnings=[];
 let selectionVersion=0;
 let selectionTask=Promise.resolve();
 // historyIdToCreate: the id a whole-book chunk's first save asks for, so that save sent again creates nothing new.
-let historyItems=[],activeHistoryId='',historyIdToCreate='',activeHistoryMeta={},historySave=Promise.resolve(),historyWarningShown=false;
+let historyItems=[],activeHistoryId='',historyIdToCreate='',activeHistoryMeta={},historySave=Promise.resolve(),historyError=null;
+// unsaved: the last save of the open session failed, so work shown here is not in the account yet. runActive: a run
+// started with Bắt đầu dịch is going (Dừng shows, closing the tab asks first).
+let unsaved=false,runActive=false;
 let pdfLayoutDocument=null,pdfLayoutRange='',pdfExportUrl='',layoutConfig={configured:false};
 // A finished range becomes one part of a private book. bookTarget survives resetHistoryIdentity(), so a new range or a
 // refreshed copy of the same file keeps going into the book the student chose.
@@ -34,31 +38,58 @@ let modelCatalogFingerprint='',modelCatalogPurpose='',checkedModelMode='';
 // bookPagesEdited: the student changed the page field for the bound job; bookBusy: another device runs it, so the
 // button offers to wait for that run (Chờ rồi dịch tiếp).
 let bookMode=false,bookJob=null,bookJobs=[],bookSource=null,bookSurvey=null,bookRun=null,bookWorking=null,bookChunkId='',bookContext='',bookStatusText='',bookNotes=[],bookHashTask=null,coverTask=Promise.resolve(),lastSavedHistory=null,bookPagesEdited=false,bookBusy=false;
-const wake=wholeBook.createWakeLock();
+let wake=null,runnerId='',reportStore=null;
 // One run id per browser: after a reload this browser goes on with its own run at once, while another device waits until
 // that run stops reporting. Tokens not yet reported are kept here too. Without localStorage both last as long as the page.
+// Both need whole-book.js, so they are made the first time a book job is shown or run.
 const browserStorage=(()=>{try{const storage=globalThis.localStorage;storage.getItem('hoa-tri-runner');return storage;}catch{return null;}})();
-const bookRunner=(()=>{try{let id=browserStorage?.getItem('hoa-tri-runner');if(!/^[A-Za-z\d-]{8,64}$/u.test(id||'')){id=wholeBook.newId();browserStorage?.setItem('hoa-tri-runner',id);}return id;}catch{return wholeBook.newId();}})();
-const bookReports=wholeBook.reportStore(browserStorage);
+function bookRunner(){if(!runnerId)try{let id=browserStorage?.getItem('hoa-tri-runner');if(!/^[A-Za-z\d-]{8,64}$/u.test(id||'')){id=wholeBook.newId();browserStorage?.setItem('hoa-tri-runner',id);}runnerId=id;}catch{runnerId=wholeBook.newId();}return runnerId;}
+const bookReports=()=>reportStore??=wholeBook.reportStore(browserStorage);
+// The parts each whole-book run saved; without a job (or before whole-book.js is loaded) there is nothing to group.
+const jobSessions=()=>wholeBook&&bookJobs.length?wholeBook.sessionsByJob(historyItems,bookJobs):new Map();
 async function ensureStudyModel(purpose='text'){
  const apiKey=key(),digest=await crypto.subtle.digest('SHA-256',new TextEncoder().encode(apiKey)),fingerprint=Array.from(new Uint8Array(digest),n=>n.toString(16).padStart(2,'0')).join(''),mode=$('#mode').value;
  if(modelCatalogFingerprint===fingerprint&&modelCatalogPurpose===purpose&&checkedModelMode===mode&&$('#gemini-model').value)return $('#gemini-model').value;
- $('#gemini-model-status').textContent='Đang kiểm tra model khả dụng với khóa trong tab…';
+ $('#gemini-model-status').textContent='Đang kiểm tra phiên bản Gemini dùng được với khóa…';
  const result=await api('models',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({apiKey,purpose,mode})}),select=$('#gemini-model');select.replaceChildren();
  for(const model of result.models||[]){const option=document.createElement('option');option.value=model.id;option.textContent=model.id;select.append(option);}select.disabled=running||!(result.models?.length);
  modelCatalogFingerprint=fingerprint;modelCatalogPurpose=purpose;checkedModelMode=mode;
- if(!result.selected){select.value='';$('#gemini-model-status').textContent='Không có model phù hợp với chế độ hiện tại. Hãy chọn model trong danh sách để tiếp tục.';throw new Error('Khóa này chưa có model phù hợp cho chế độ dịch. Hãy chọn model khả dụng trong danh sách.');}
+ if(!result.selected){select.value='';$('#gemini-model-status').textContent='Không có phiên bản Gemini phù hợp với cách dịch đang chọn. Hãy chọn một phiên bản trong danh sách để tiếp tục.';$('#advanced-settings').open=true;throw new Error('Khóa này chưa dùng được phiên bản Gemini phù hợp với cách dịch đang chọn. Hãy mở Nâng cao và chọn một phiên bản trong danh sách.');}
  select.value=result.selected;
- $('#gemini-model-status').textContent=result.selected===result.requested?`Đang dùng ${result.selected}.`:`Model cấu hình ${result.requested} không khả dụng; đang dùng ${result.selected}.`;return result.selected;
+ $('#gemini-model-status').textContent=result.selected===result.requested?`Đang dùng ${result.selected}.`:`Phiên bản ${result.requested} chưa dùng được với khóa này; đang dùng ${result.selected}.`;return result.selected;
 }
-const dualViewer=new PdfDualViewer($('#pdf-dual-viewer'));
 // Chinese source of a block, looked up in the offline dictionary (no Gemini, no /api).
 const OCR_NOTE='Đoạn này nhận dạng từ ảnh (OCR) và chưa được đọc lại; chữ có thể sai, hãy đối chiếu với trang gốc.';
-dualViewer.onSourceBlock=(block,page,region)=>openHanziPanel({text:block.text||block.source,title:`Nguyên tác · Trang ${page.number} · Đoạn ${page.blocks.indexOf(block)+1}`,note:page.ocr&&!block.ocrCorrected?OCR_NOTE:'',returnFocus:region});
-dualViewer.onEdit=async(id,translation)=>{
- if(running)return;busy(true);try{const blocks=pdfLayoutDocument.pages.flatMap(p=>p.blocks),index=blocks.findIndex(b=>b.id===id);validateBlockTranslations([blocks[index]],[{id,translation}]);translationParts[index]=translation.normalize('NFC');pdfExportUrl='';translationState.pdfLayout.exported=false;syncPdfText();await dualViewer.invalidatePdf();await dualViewer.update(pdfTranslations());if(!await saveHistory())throw new Error('Chưa lưu được đoạn đã sửa. Hãy thử lại.');$('#download-pdf').disabled=translationState.done!==blocks.length;status('Đã lưu đoạn sửa. Bấm Xuất PDF tiếng Việt để dàn trang lại.');}catch(error){fail(error);}finally{busy(false);}
+async function editLayoutBlock(id,translation){
+ if(running)return;busy(true);try{const {validateBlockTranslations}=await boxLayout(),blocks=pdfLayoutDocument.pages.flatMap(p=>p.blocks),index=blocks.findIndex(b=>b.id===id);validateBlockTranslations([blocks[index]],[{id,translation}]);translationParts[index]=translation.normalize('NFC');pdfExportUrl='';translationState.pdfLayout.exported=false;syncPdfText();await dualViewer.invalidatePdf();await dualViewer.update(pdfTranslations());if(!await saveHistory())throw new Error('Chưa lưu được đoạn đã sửa. Hãy thử lại.');$('#download-pdf').disabled=translationState.done!==blocks.length;status('Đã lưu đoạn sửa. Bấm Xuất PDF tiếng Việt để dàn trang lại.');}catch(error){fail(error);}finally{busy(false);}
+}
+// The preview font (~800 KB) is fetched the first time the viewer draws a translated page, never at start-up, so picking a
+// file never waits for it. The browser keeps it a day and then revalidates it (ETag); a failure is tried again later.
+let fontTask=null;
+function previewFont(){
+ fontTask??=api('pdf-layout/font').then(font=>{const style=document.createElement('style');style.textContent=font.css;document.head.append(style);}).catch(error=>{fontTask=null;throw error;});
+ return fontTask;
+}
+let viewerTask=null;
+function loadViewer(){
+ viewerTask??=import('./pdf-dual-viewer.js').then(({PdfDualViewer})=>{
+  const viewer=new PdfDualViewer($('#pdf-dual-viewer'),{loadFont:previewFont});
+  viewer.onSourceBlock=(block,page,region)=>openHanziPanel({text:block.text||block.source,title:`Nguyên tác · Trang ${page.number} · Đoạn ${page.blocks.indexOf(block)+1}`,note:page.ocr&&!block.ocrCorrected?OCR_NOTE:'',returnFocus:region});
+  viewer.onEdit=editLayoutBlock;return viewer;
+ }).catch(error=>{viewerTask=null;throw error;});
+ return viewerTask;
+}
+// Until the first layout PDF is shown there is no viewer, and nothing to clear.
+const dualViewer={
+ clear:()=>viewerTask?viewerTask.then(viewer=>viewer.clear(),()=>{}):Promise.resolve(),
+ setDocument:(...args)=>loadViewer().then(viewer=>viewer.setDocument(...args)),
+ update:translations=>loadViewer().then(viewer=>viewer.update(translations)),
+ invalidatePdf:()=>loadViewer().then(viewer=>viewer.invalidatePdf()),
+ setExportedPdf:url=>loadViewer().then(viewer=>viewer.setExportedPdf(url))
 };
-const layoutConfiguration=api('pdf-layout/config').then(async config=>{layoutConfig=config;$('#pdf-layout-enabled').checked=Boolean(config.configured);if(config.configured){const font=await api('pdf-layout/font');const style=document.createElement('style');style.textContent=font.css;document.head.append(style);}$('#pdf-layout-service-status').textContent=config.configured?'Dịch theo từng block; giữ hình gốc, công thức và vị trí.':'Dịch vụ PDF giữ bố cục chưa được cấu hình.';}).catch(()=>{layoutConfig={configured:false};$('#pdf-layout-enabled').checked=false;$('#pdf-layout-service-status').textContent='Dịch vụ PDF giữ bố cục chưa sẵn sàng.';});
+// The PDF service is asked about only once the session is known: a signed-out visitor would only get a 401.
+let sessionKnown;const sessionChecked=new Promise(resolve=>{sessionKnown=resolve;});
+const layoutConfiguration=sessionChecked.then(signedIn=>signedIn?api('pdf-layout/config'):{configured:false}).then(config=>{layoutConfig=config;$('#pdf-layout-enabled').checked=Boolean(config.configured);$('#pdf-layout-service-status').textContent=config.configured?'Dịch từng đoạn ngay tại chỗ; giữ hình gốc, công thức và vị trí chữ.':'Dịch vụ PDF giữ bố cục chưa được cấu hình.';}).catch(()=>{layoutConfig={configured:false};$('#pdf-layout-enabled').checked=false;$('#pdf-layout-service-status').textContent='Dịch vụ PDF giữ bố cục chưa sẵn sàng.';});
 const PDF_MAX_BYTES=250*1024*1024,OTHER_MAX_BYTES=25*1024*1024;
 const MATH_GLOSSARY=`空间向量与立体几何 = Hình học vectơ và hình học không gian
 空间向量 = vectơ trong không gian
@@ -76,16 +107,21 @@ const MATH_GLOSSARY=`空间向量与立体几何 = Hình học vectơ và hình 
 等差数列 = cấp số cộng
 等比数列 = cấp số nhân`;
 
-function status(message,type=''){$('#progress').textContent=message;$('#progress').className=type;}
+// On phones the floating action bar repeats the latest line (#run-bar-status; screen readers hear #progress only).
+function status(message,type=''){$('#progress').textContent=message;$('#progress').className=type;const mirror=$('#run-bar-status');mirror.textContent=message;mirror.classList.toggle('error',type==='error');}
+const SESSION_EXPIRED='Phiên đăng nhập đã hết hạn. Hãy đăng nhập lại rồi mở lại Xưởng dịch.';
+const signedOut=error=>error?.status===401||String(error?.message||'').startsWith(SESSION_EXPIRED);
+function signInLink(text='Đăng nhập lại'){const link=document.createElement('a');link.href='/#account';link.textContent=text;return link;}
 // Error text from services is bounded upstream; this cap keeps the progress box readable whatever arrives.
-function fail(error){const message=String(error?.message||error).trim();status(message.length>500?`${message.slice(0,499)}…`:message,'error');}
+// An expired session also gets the way back: a link to sign in.
+function fail(error){const message=String(error?.message||error).trim();status(message.length>500?`${message.slice(0,499)}…`:message,'error');if(signedOut(error))$('#progress').append(' ',signInLink());}
 function workflow(step){document.querySelectorAll('.workflow li').forEach((item,index)=>{item.classList.toggle('active',index===step-1);item.classList.toggle('done',index<step-1);});}
 async function api(path,options={}){
  const failed=(message,status,data=null)=>Object.assign(new Error(message),{status,data});
  const response=await fetch('/api/my/study/'+path,{credentials:'same-origin',...options}).catch(()=>{throw failed('Không kết nối được máy chủ. Hãy kiểm tra mạng rồi thử lại sau vài giây.',0);});
  if(response.status===204)return {};
  const data=await response.json().catch(()=>null);
- if(response.status===401)throw failed('Phiên đăng nhập đã hết hạn. Hãy đăng nhập lại rồi mở lại Xưởng dịch.',401);
+ if(response.status===401)throw failed(SESSION_EXPIRED,401);
  // A page instead of JSON usually means the server is restarting or being updated, not that the request was wrong.
  if(!data||typeof data!=='object')throw failed(`Máy chủ trả về phản hồi không đọc được (mã ${response.status}). Có thể máy chủ đang khởi động lại hoặc cập nhật; hãy thử lại sau vài giây.`,response.status);
  // A refused Gemini answer was still billed: the server sends what it spent, so the counters (and a book's total) count it.
@@ -93,7 +129,7 @@ async function api(path,options={}){
  if(!response.ok){if(data.usage)addUsage(data.usage);throw Object.assign(failed(data.error||'Không thể xử lý yêu cầu.',response.status,data),{retryAfter:Number(response.headers.get('Retry-After'))||null});}
  return data;
 }
-function resetHistoryIdentity(){activeHistoryId='';historyIdToCreate='';activeHistoryMeta={};historyWarningShown=false;renderHistory();}
+function resetHistoryIdentity(){activeHistoryId='';historyIdToCreate='';activeHistoryMeta={};setUnsaved(false);renderHistory();}
 function historyTitle(){
  // Every chunk of a whole-book run is saved under the book's name, so the book labels its parts by their pages.
  if(bookRun&&bookJob){const book=studyBooks.find(entry=>entry.id===bookJob.storyId);return book?.title||bookJob.title;}
@@ -135,17 +171,29 @@ function historyPayload(){
  const pages=translationState.pdfLayout?[]:(translationState.plan||[]).flatMap(part=>part.pages||[]),pageRange=pages.length&&pdfAnalysis?{start:Math.min(...pages),end:Math.max(...pages),total:pdfAnalysis.totalPages}:null;
  return {title:historyTitle(),filename:selectedFile?.name||activeHistoryMeta.filename||'',domain:translationState.domain||$('#domain').value,mode:translationState.mode||$('#mode').value,bookId:bookTarget.id||'',...(bookTarget.replaceChapterId?{replaceChapterId:bookTarget.replaceChapterId}:{}),...(selectedSha256?{sha256:selectedSha256}:{}),...(pageRange?{pageRange}:{}),state:{source:translationState.source,parts:translationState.parts,translationParts,done:translationState.done,context:translationState.context,glossary:translationState.glossary,manualGlossary:translationState.manualGlossary,previousSource:translationState.previousSource,previousTranslation:translationState.previousTranslation,...(translationState.pdfLayout?{pdfLayout:translationState.pdfLayout}:{})}};
 }
+// A layout PDF counts its text blocks as parts: its pages say more than "27 phần".
 function historyStatus(item){
- if(item.status==='complete')return `Hoàn tất · ${item.total_parts} phần`;
- if(item.status==='translating')return `${item.translated_parts}/${item.total_parts} phần`;
- return 'Đã lưu nguyên tác';
+ const pages=item.page_start?pageLabel(item.page_start,item.page_end||item.page_start):'';
+ if(item.status==='complete')return `Hoàn tất · ${pages||`${item.total_parts} đoạn`}`;
+ if(item.status==='translating')return `Đang dịch dở · ${item.translated_parts}/${item.total_parts} đoạn${pages?` · ${pages}`:''}`;
+ return pages?`Đã lưu nguyên tác · ${pages}`:'Đã lưu nguyên tác';
+}
+// Contract 8: a load that failed is explained where its content belongs, with Thử lại, or a sign-in link after a 401.
+function loadErrorCard(title,error,retry){
+ const card=document.createElement('div'),heading=document.createElement('p'),text=document.createElement('p');card.className='load-error';card.setAttribute('role','alert');heading.className='load-error-title';heading.textContent=title;
+ text.textContent=signedOut(error)?'Phiên đăng nhập đã hết hạn. Hãy đăng nhập lại để xem lịch sử dịch.':String(error?.message||error||'Không kết nối được máy chủ.');card.append(heading,text);
+ if(signedOut(error)){const link=signInLink('Đăng nhập');link.className='load-error-action';card.append(link);}
+ else{const button=document.createElement('button');button.type='button';button.className='load-error-action';button.textContent='Thử lại';button.addEventListener('click',retry);card.append(button);}
+ return card;
 }
 function renderHistory(){
  updateTitleControls();
  const section=$('#study-history'),root=$('#study-history-list');if(!section||!root)return;
- section.hidden=false;root.replaceChildren();$('#study-history-count').textContent=historyItems.length?`· ${historyItems.length} bản đã lưu`:'· chưa có';
+ section.hidden=false;root.replaceChildren();
+ if(historyError){$('#study-history-count').textContent='· chưa tải được';$('#study-books').hidden=true;root.append(loadErrorCard('Chưa tải được lịch sử dịch.',historyError,()=>loadHistoryView().then(()=>(historyError?root.querySelector('.load-error-action'):$('#study-history>summary'))?.focus())));return;}
+ $('#study-history-count').textContent=historyItems.length?`· ${historyItems.length} bản đã lưu`:'· chưa có';
  // The parts a whole-book run saved (one per chunk) are listed under that book, not one card each.
- const grouped=new Set([...wholeBook.sessionsByJob(historyItems,bookJobs).values()].flat().map(item=>item.id));renderStudyBooks();
+ const grouped=new Set([...jobSessions().values()].flat().map(item=>item.id));renderStudyBooks();
  if(!historyItems.length){const empty=document.createElement('p');empty.className='history-empty';empty.textContent='Chưa có bản dịch nào được lưu trong tài khoản này.';root.append(empty);return;}
  for(const item of historyItems.filter(item=>!grouped.has(item.id))){
   const card=document.createElement('article'),open=document.createElement('button'),title=document.createElement('strong'),progress=document.createElement('span'),date=document.createElement('time');
@@ -238,7 +286,7 @@ const coverSpans=()=>coverExcluded()?[{pageStart:cover.page,pageEnd:cover.page}]
 // The pages actually sent for translation. A session reopened from history has no picked file; its field is used as typed.
 function translationRange(){
  const value=$('#page-range').value.trim();if(!selectedFile||!selectedTotalPages)return {text:value,pages:null,excluded:false};
- return excludeCover(value,selectedTotalPages,cover.page,{translateCover:$('#cover-translate').checked});
+ return coverTools.excludeCover(value,selectedTotalPages,cover.page,{translateCover:$('#cover-translate').checked});
 }
 function setCoverImage(blob){if(cover.url)URL.revokeObjectURL(cover.url);cover.jpeg=blob||null;cover.url=blob?URL.createObjectURL(blob):'';}
 function resetCover(){setCoverImage(null);cover={page:0,detected:0,detectedJpeg:null,jpeg:null,url:'',source:'',replace:false,synced:'',task:cover.task+1,note:'',detecting:false};$('#cover-translate').checked=false;renderCover();}
@@ -260,7 +308,7 @@ function renderCover(){
 async function detectSelectedCover(file,version){
  const task=++cover.task;cover.detecting=true;renderCover();
  try{
-  const result=await detectCoverInFile(file);if(version!==selectionVersion||task!==cover.task)return;
+  const result=await coverTools.detectCoverInFile(file);if(version!==selectionVersion||task!==cover.task)return;
   cover.detected=result.page;cover.detectedJpeg=result.jpeg;
   if(!cover.source||cover.source==='detected'){cover.source='detected';cover.page=result.page;setCoverImage(result.jpeg);}
   await applyBookCover(version);
@@ -274,7 +322,7 @@ async function applyBookCover(version=selectionVersion){
  const remembered=Boolean(stored&&stored.page!==null&&stored.sha256&&stored.sha256===selectedSha256&&stored.page<=selectedTotalPages);
  if(!remembered&&cover.source!=='book')return;
  const page=remembered?stored.page:cover.detected,source=remembered?'book':'detected';if(cover.source===source&&cover.page===page)return;
- const image=page===cover.detected?cover.detectedJpeg:page?await pageJpeg(selectedFile,page).catch(()=>null):null;if(version!==selectionVersion)return;
+ const image=page===cover.detected?cover.detectedJpeg:page?await coverTools.pageJpeg(selectedFile,page).catch(()=>null):null;if(version!==selectionVersion)return;
  cover.source=source;cover.page=page;setCoverImage(image);renderCover();
 }
 // The cover is seldom known before the range is offered; the offer then moves past it, unless the student typed a range.
@@ -300,7 +348,7 @@ function openCoverDialog(){
   note.className='hint';note.textContent='Trang bìa được giữ nguyên ảnh gốc khi ghép sách và dùng làm ảnh bìa trong Thư viện riêng.';
   const show=()=>{clearTimeout(timer);timer=setTimeout(async()=>{
    const page=Number(input.value);if(!Number.isInteger(page)||page<1||page>total){caption.textContent=`Hãy nhập số từ 1 đến ${total}.`;return;}caption.textContent='Đang tải trang…';
-   try{const blob=await pageJpeg(file,page);if(Number(input.value)!==page)return;preview={page,blob};if(image.src)URL.revokeObjectURL(image.src);image.src=URL.createObjectURL(blob);image.alt=`Trang ${page} của tệp`;caption.textContent=`Trang ${page}`;}catch(error){caption.textContent=error.message;}
+   try{const blob=await coverTools.pageJpeg(file,page);if(Number(input.value)!==page)return;preview={page,blob};if(image.src)URL.revokeObjectURL(image.src);image.src=URL.createObjectURL(blob);image.alt=`Trang ${page} của tệp`;caption.textContent=`Trang ${page}`;}catch(error){caption.textContent=error.message;}
   },250);};
   input.addEventListener('input',show);show();body.append(label,input,figure,note);
   $('#book-dialog').addEventListener('close',()=>{clearTimeout(timer);if(image.src)URL.revokeObjectURL(image.src);},{once:true});
@@ -309,7 +357,7 @@ function openCoverDialog(){
  },async()=>{
   const page=Number($('#cover-page-input').value);if(!Number.isInteger(page)||page<1||page>total)throw new Error(`Hãy nhập số trang từ 1 đến ${total}.`);
   if(version!==selectionVersion)throw new Error('Tệp đã thay đổi. Hãy mở lại hộp chọn bìa.');
-  const blob=preview?.page===page?preview.blob:await pageJpeg(file,page);
+  const blob=preview?.page===page?preview.blob:await coverTools.pageJpeg(file,page);
   Object.assign(cover,{page,source:'student',replace:Boolean($('#cover-replace')?.checked),synced:'',note:''});setCoverImage(blob);coverChanged();
  },'Dùng trang này');
 }
@@ -337,7 +385,7 @@ async function syncBookCover(storyId){
 function renderStudyBooks(){
  const section=$('#study-books'),root=$('#study-books-list');if(!section||!root)return;
  const jobOf=book=>bookJobs.find(job=>job.storyId===book.id),books=studyBooks.filter(book=>book.parts.length>1||jobOf(book)),loose=bookJobs.filter(job=>!job.storyId||!studyBooks.some(book=>book.id===job.storyId));
- const opened=new Set([...root.querySelectorAll('details.book-job-parts[open]')].map(details=>details.dataset.job)),groups=wholeBook.sessionsByJob(historyItems,bookJobs);
+ const opened=new Set([...root.querySelectorAll('details.book-job-parts[open]')].map(details=>details.dataset.job)),groups=jobSessions();
  section.hidden=!books.length&&!loose.length;root.replaceChildren();
  for(const job of loose)root.append(studyBookRow(null,job,opened,groups));
  for(const book of books)root.append(studyBookRow(book,jobOf(book),opened,groups));
@@ -368,7 +416,7 @@ function jobPartList(job,parts,expanded){
 }
 function jobStatusLabel(job){
  if(bookRun&&bookJob?.id===job.id)return 'Đang dịch';
- if(wholeBook.heldElsewhere(job,bookRunner))return 'Đang dịch ở thiết bị khác';
+ if(wholeBook.heldElsewhere(job,bookRunner()))return 'Đang dịch ở thiết bị khác';
  if(job.status==='done')return job.pageStates.includes('.')?'Còn trang chưa dịch':'Hoàn tất';
  if(job.status==='paused')return ({quota_day:'Tạm dừng · hết hạn mức ngày',quota:'Tạm dừng · hết hạn mức',gemini_key:'Tạm dừng · cần khóa hợp lệ',network:'Tạm dừng · mất kết nối',gemini_unavailable:'Tạm dừng · Gemini quá tải',limit:'Tạm dừng · hết lượt trong ngày'})[job.pauseReason]||'Tạm dừng';
  // "running" with no run in this tab: the tab that ran it was closed; every finished chunk is kept.
@@ -437,23 +485,50 @@ async function persistHistory(){
  if(saved.libraryStoryId)syncBookCover(saved.libraryStoryId);
  return saved;
 }
+// While a save has failed, a warning stays in view (also in the floating action bar on phones) and closing the tab asks
+// first; the next successful save clears both.
+function setUnsaved(value,error=null){
+ unsaved=Boolean(value);const warning=$('#save-warning');warning.hidden=!unsaved;warning.replaceChildren();if(!unsaved)return;
+ // Signing in in another tab keeps this tab's work; the next save then goes through.
+ if(signedOut(error)){const link=signInLink('đăng nhập lại ở thẻ mới');link.target='_blank';link.rel='noopener';warning.append('Chưa lưu được tiến độ: phiên đăng nhập đã hết hạn. Đừng đóng tab; ',link,', rồi bấm Bắt đầu dịch để lưu tiếp.');}
+ else warning.append('Chưa lưu được tiến độ vào tài khoản. Đừng đóng tab; kiểm tra mạng rồi bấm Bắt đầu dịch để thử lưu lại.');
+}
+const sleep=ms=>new Promise(resolve=>setTimeout(resolve,ms));
+const retriableSave=error=>!error?.status||error.status===408||error.status===429||error.status>=500;
+// A lost connection or a busy server gets two more tries (after 1 s, then 3 s) before the save counts as failed. A first
+// save names its session, so a retry after a lost answer saves that session again instead of adding a second one.
 async function saveHistory(){
- historySave=historySave.catch(()=>{}).then(persistHistory);
- try{return await historySave;}catch(error){if(!historyWarningShown){historyWarningShown=true;$('#warnings').textContent+=`Không thể tự lưu lịch sử: ${error.message}\n`;}return null;}
+ if(!activeHistoryId&&!historyIdToCreate)historyIdToCreate=globalThis.crypto?.randomUUID?.()||'';
+ for(let attempt=0;;attempt++){
+  historySave=historySave.catch(()=>{}).then(persistHistory);
+  try{const saved=await historySave;setUnsaved(false);return saved;}
+  catch(error){if(attempt>=2||!retriableSave(error)){setUnsaved(true,error);return null;}await sleep(attempt?3000:1000);}
+ }
+}
+// A run never spends tokens on work it cannot keep: when the save before the next Gemini call failed, the run stops here.
+// After the last part nothing is left to send, so that save says only that the finished translation is not saved yet.
+async function saveBeforeSpending(finished=false){
+ const saved=await saveHistory();
+ if(unsaved&&finished)throw Object.assign(new Error('Đã dịch xong nhưng chưa lưu được bản dịch vào tài khoản. Bản dịch vẫn hiện trong tab này: đừng đóng tab. Kiểm tra mạng rồi bấm Bắt đầu dịch để lưu lại; không gọi Gemini lại.'),{code:'save_failed',status:0});
+ if(unsaved)throw Object.assign(new Error(`Đã dừng vì chưa lưu được tiến độ vào tài khoản, nên Hoa Trí không gửi thêm yêu cầu tới Gemini.${translationParts.some(text=>text?.trim())?' Phần đã dịch vẫn hiện trong tab này: đừng đóng tab.':''} Kiểm tra mạng rồi bấm Bắt đầu dịch để lưu và dịch tiếp.`),{code:'save_failed',status:0});
+ return saved;
 }
 // A whole-book chunk cannot go on from a save that failed (its part would be lost), so these saves report their errors.
-function saveHistoryStrict(){historySave=historySave.catch(()=>{}).then(persistHistory);return historySave;}
+// A translation that is not saved yet lives only in this tab: opening another session, picking a file or editing the
+// source (which starts a new session) asks first. True means: keep what is here.
+function keepUnsaved(){return unsaved&&typeof confirm==='function'&&!confirm('Phần đã dịch chưa được lưu vào tài khoản và sẽ mất nếu bạn mở hoặc nhập tài liệu khác. Vẫn tiếp tục?');}
+function saveHistoryStrict(){historySave=historySave.catch(()=>{}).then(persistHistory);return historySave.then(saved=>{setUnsaved(false);return saved;},error=>{setUnsaved(true,error);throw error;});}
 function glossaryText(value){return Object.entries(value||{}).map(([term,translation])=>`${term} = ${translation}`).join('\n');}
 async function openHistory(id){
- if(running)return;
+ if(running||keepUnsaved())return;
  const version=++selectionVersion;busy(true);
  try{
  await dualViewer.clear();pdfLayoutDocument=null;pdfExportUrl='';$('#download-pdf').disabled=true;
  const item=await api(`history/${encodeURIComponent(id)}`),state=item.state||{};if(version!==selectionVersion)return;unbindBook();selectedFile=null;selectedHash=Promise.resolve('');selectedSha256='';selectedTotalPages=0;resetCover();autoRange='';bookTarget={id:item.library_story_id||'',replaceChapterId:''};pdfAnalysis=null;preparedPages=new Map();preparedRangeKey=null;clearPageImages();ocrWarnings=[];$('#source').readOnly=false;$('#source-file').value='';$('#pdf-range-options').hidden=true;$('#page-range').value='';
- activeHistoryId=item.id;activeHistoryMeta={title:item.title,filename:item.filename};historyWarningShown=false;$('#content-title').value=item.title||'';$('#content-title').setCustomValidity('');$('#content-title').removeAttribute('aria-invalid');$('#content-title-hint').textContent='Có thể đổi tên rồi bấm Lưu tên; bản dịch đã lưu được giữ nguyên.';$('#source').value=state.source||'';$('#domain').value=item.domain||'general';$('#mode').value=item.mode||'economy';$('#glossary').value=glossaryText(state.manualGlossary);
+ activeHistoryId=item.id;activeHistoryMeta={title:item.title,filename:item.filename};setUnsaved(false);$('#content-title').value=item.title||'';$('#content-title').setCustomValidity('');$('#content-title').removeAttribute('aria-invalid');$('#content-title-hint').textContent='Có thể đổi tên rồi bấm Lưu tên; bản dịch đã lưu được giữ nguyên.';$('#source').value=state.source||'';$('#domain').value=item.domain||'general';$('#mode').value=item.mode||'economy';$('#glossary').value=glossaryText(state.manualGlossary);
  const parts=Array.isArray(state.parts)?state.parts:[],plan=parts.map(text=>({text,pages:[],blockIds:{}}));translationParts=Array.isArray(state.translationParts)?state.translationParts.slice(0,parts.length):[];while(translationParts.length<parts.length)translationParts.push('');
  translationState={source:state.source||'',domain:item.domain||'general',mode:item.mode||'economy',parts,plan,done:Math.min(Number(state.done)||0,parts.length),context:state.context||'',glossary:state.glossary||{},manualGlossary:state.manualGlossary||{},previousSource:state.previousSource||'',previousTranslation:state.previousTranslation||''};
- renderPartStream(plan);translationParts.forEach((text,index)=>{if(text)updatePart(index,text,index<translationState.done?'done':'queued');});$('#translation').value=translationParts.filter(Boolean).join('\n\n');$('#download').disabled=!$('#translation').value.trim();$('#download-rich').disabled=true;$('#warnings').textContent='';setFileStatus(item.filename?`${item.filename} · đã mở từ lịch sử tài khoản.`:'Đã mở bản dịch từ lịch sử tài khoản.');updateCount();workflow(translationState.done===parts.length?3:2);status(translationState.done===parts.length?'Bản dịch đã hoàn tất và có trong Thư viện riêng.':`Đã khôi phục ${translationState.done}/${parts.length} phần. Nhập khóa Gemini để tiếp tục.`);renderHistory();$('.workspace').scrollIntoView({behavior:'smooth',block:'start'});
+ renderPartStream(plan);translationParts.forEach((text,index)=>{if(text)updatePart(index,text,index<translationState.done?'done':'queued');});$('#translation').value=translationParts.filter(Boolean).join('\n\n');$('#download').disabled=!$('#translation').value.trim();$('#download-rich').disabled=true;$('#warnings').textContent='';setFileStatus(item.filename?`${item.filename} · đã mở từ lịch sử tài khoản.`:'Đã mở bản dịch từ lịch sử tài khoản.');updateCount();workflow(translationState.done===parts.length?3:2);status(translationState.done===parts.length?'Bản dịch đã hoàn tất và có trong Thư viện riêng.':`Đã khôi phục ${translationState.done}/${parts.length} đoạn. Nhập khóa Gemini để tiếp tục.`);renderHistory();$('.workspace').scrollIntoView({behavior:'smooth',block:'start'});
  if(state.pdfLayout){
   translationState.pdfLayout=state.pdfLayout;pdfLayoutDocument=await api(`pdf-layout/assets/${state.pdfLayout.assetId}/manifest`);$('#pdf-layout-enabled').checked=true;clearPartStream();syncPdfText();await dualViewer.setDocument(pdfLayoutDocument,pdfTranslations());$('#download-pdf').disabled=translationState.done!==parts.length;
   // Exports from an older renderer are rendered again from the saved translations: no Gemini call, no token cost.
@@ -462,21 +537,30 @@ async function openHistory(id){
  }
  }finally{busy(false);}
 }
+// A run disables the key field (busy) before the key is checked; it is enabled again here so it can show why and take
+// focus (above the floating action bar on phones).
+function askForKey(input){input.disabled=false;input.reportValidity();input.focus();}
 function key(){
  const input=$('#api-key'),entered=input.value.trim();
  if(entered){
-  if(entered.length<20||entered.length>500||/[\r\n\0]/u.test(entered)){input.setCustomValidity('Khóa Gemini API không hợp lệ.');input.reportValidity();input.focus();throw new Error('Khóa Gemini API không hợp lệ. Hãy sao chép lại toàn bộ khóa.');}
+  if(entered.length<20||entered.length>500||/[\r\n\0]/u.test(entered)){input.setCustomValidity('Khóa Gemini API không hợp lệ.');askForKey(input);throw new Error('Khóa Gemini API không hợp lệ. Hãy sao chép lại toàn bộ khóa.');}
   sessionKey=entered;input.value='';input.setCustomValidity('');input.removeAttribute('aria-invalid');$('#key-status').textContent='Đã nạp khóa Gemini cho phiên này.';workflow(2);
  }
- if(!sessionKey){input.setCustomValidity('Hãy nhập khóa Gemini API trước khi dịch.');input.setAttribute('aria-invalid','true');input.reportValidity();input.focus();throw new Error('Chưa có khóa Gemini. Hãy nhập khóa API riêng cho phiên này rồi bấm Bắt đầu dịch.');}
+ if(!sessionKey){input.setCustomValidity('Hãy nhập khóa Gemini API trước khi dịch.');input.setAttribute('aria-invalid','true');askForKey(input);throw new Error('Chưa có khóa Gemini. Hãy nhập khóa API riêng cho phiên này rồi bấm Bắt đầu dịch.');}
  return sessionKey;
 }
 function rejectKey(error){
  if(!/Gemini từ chối|Khóa Gemini/u.test(error?.message||''))return;
- sessionKey='';const input=$('#api-key');input.setAttribute('aria-invalid','true');input.focus();$('#key-status').textContent='Khóa vừa nhập chưa được Gemini chấp nhận.';
+ sessionKey='';const input=$('#api-key');input.setAttribute('aria-invalid','true');input.disabled=false;input.focus();$('#key-status').textContent='Khóa vừa nhập chưa được Gemini chấp nhận.';
 }
-function addUsage(value){bookRun?.recordUsage(value);for(const field of ['prompt','output','total','requests'])usage[field]+=(Number(value?.[field])||0);$('#usage-total').textContent=new Intl.NumberFormat('vi-VN').format(usage.total);$('#usage-detail').textContent=`${usage.requests} lượt gọi · ${usage.prompt} token đầu vào · ${usage.output} token đầu ra`;}
-function updateCount(){const source=$('#source').value,length=source.length;$('#source-count').textContent=`${new Intl.NumberFormat('vi-VN').format(length)} ký tự`;$('#part-count').textContent=`${length?createTranslationPlan(source,preparedPages).length:0} phần dịch`;$('#source-lookup').disabled=!hasHan(source);}
+function addUsage(value){bookRun?.recordUsage(value);for(const field of ['prompt','output','total','requests'])usage[field]+=(Number(value?.[field])||0);$('#usage-total').textContent=new Intl.NumberFormat('vi-VN').format(usage.total);const number=new Intl.NumberFormat('vi-VN');$('#usage-detail').textContent=`${number.format(usage.requests)} lần gửi · ${number.format(usage.prompt)} token gửi đi · ${number.format(usage.output)} token nhận về`;}
+function updateCount(){const source=$('#source').value,length=source.length;$('#source-count').textContent=`${new Intl.NumberFormat('vi-VN').format(length)} ký tự`;$('#part-count').textContent=`${length?createTranslationPlan(source,preparedPages).length:0} phần dịch`;$('#source-lookup').disabled=!hasHan(source);updateRunBar();}
+// A PDF fills the source box itself, so its empty box is hidden. On phones the action bar floats at the bottom of the
+// screen once there is something to translate, or a run to stop.
+function updateRunBar(){
+ $('.source-panel').classList.toggle('is-pdf',/\.pdf$/iu.test(selectedFile?.name||'')||Boolean(translationState?.pdfLayout||bookJob&&!selectedFile));
+ $('#run-bar').classList.toggle('is-floating',document.body.dataset.session==='in'&&(runActive||Boolean(selectedFile||bookJob||translationState||$('#source').value.trim())));
+}
 function segments(text,limit=5000){const pieces=[];let remaining=text;while(remaining.length>limit){let end=remaining.lastIndexOf('\n',limit);if(end<limit/2){end=0;for(const match of remaining.slice(0,limit).matchAll(/[。！？!?；;]\s*/gu))end=match.index+match[0].length;}if(end<limit/2)end=limit;if(/[\uD800-\uDBFF]/u.test(remaining[end-1]))end--;pieces.push(remaining.slice(0,end));remaining=remaining.slice(end);}if(remaining)pieces.push(remaining);return pieces;}
 function clearPartStream(){const root=$('#translation-parts');root.replaceChildren();root.hidden=true;}
 function renderPartStream(parts){
@@ -513,7 +597,7 @@ async function showLibraryMatch(version){
   $('#library-match-title').textContent=`${match.title} · ${match.chapters} phần`;$('#library-match-open').href=`/?read=${encodeURIComponent(match.id)}`;$('#library-match').hidden=false;
  }catch{}
 }
-function busy(value){running=value||starting;$('#content-title').disabled=running;updateTitleControls();$('#translate').disabled=running;$('#source-file').disabled=running;$('#source').disabled=running;$('#mode').disabled=running;$('#domain').disabled=running;$('#glossary').disabled=running;$('#page-range').disabled=running;$('#pdf-layout-enabled').disabled=running;$('#api-key').disabled=running;$('#clear-key').disabled=running;$('#check-gemini-model').disabled=running;$('#gemini-model').disabled=running||!Array.from($('#gemini-model').options).some(option=>option.value);$('#stop').disabled=!running;$('#book-target').disabled=running;$('#book-replace').disabled=running;$('#book-next-range').disabled=running;$('#cover-change').disabled=running;$('#cover-none').disabled=running;$('#cover-translate').disabled=running;$('#book-pages').disabled=running;document.querySelectorAll('[data-history-open],[data-history-merge],[data-book-order],[data-history-delete],[data-book-resume],[data-book-delete]').forEach(button=>{button.disabled=running;});renderBookMode();renderBookPanel();}
+function busy(value){running=value||starting;$('#content-title').disabled=running;updateTitleControls();$('#translate').disabled=running;$('#source-file').disabled=running;$('#source').disabled=running;$('#mode').disabled=running;$('#domain').disabled=running;$('#glossary').disabled=running;$('#page-range').disabled=running;$('#pdf-layout-enabled').disabled=running;$('#api-key').disabled=running;$('#clear-key').disabled=running;$('#check-gemini-model').disabled=running;$('#gemini-model').disabled=running||!Array.from($('#gemini-model').options).some(option=>option.value);$('#stop').disabled=!running;$('#stop').hidden=!runActive;$('#book-target').disabled=running;$('#book-replace').disabled=running;$('#book-next-range').disabled=running;$('#cover-change').disabled=running;$('#cover-none').disabled=running;$('#cover-translate').disabled=running;$('#book-pages').disabled=running;document.querySelectorAll('[data-history-open],[data-history-merge],[data-book-order],[data-history-delete],[data-book-resume],[data-book-delete]').forEach(button=>{button.disabled=running;});renderBookMode();renderBookPanel();updateRunBar();}
 
 function optionalKey(){
  if(sessionKey)return sessionKey;
@@ -542,15 +626,15 @@ async function downloadRichHtml(){
  const blob=new Blob(['\uFEFF'+html],{type:'text/html;charset=utf-8'}),url=URL.createObjectURL(blob),link=document.createElement('a');link.href=url;link.download=downloadFilename('html');link.click();setTimeout(()=>URL.revokeObjectURL(url),1000);
 }
 
-async function selected(file){workflow(1);await layoutConfiguration;const isPdf=file?.name.toLowerCase().endsWith('.pdf'),useLayout=isPdf&&$('#pdf-layout-enabled').checked;if(file?.size>(useLayout?wholeBook.SOURCE_MAX_BYTES:isPdf?PDF_MAX_BYTES:OTHER_MAX_BYTES))throw new Error(useLayout?'PDF giữ bố cục tối đa 100 MB (tệp trên 25 MB được dịch bằng chế độ Dịch cả quyển).':isPdf?'PDF tối đa 250 MB khi xử lý tại trình duyệt.':'Tệp tối đa 25 MB.');const version=++selectionVersion;selectedFile=file;unbindBook();resetHistoryIdentity();bookTarget={id:'',replaceChapterId:''};bookChoiceTouched=false;selectedHash=fileSha256(file);selectedSha256='';selectedTotalPages=0;resetCover();autoRange='';pdfAnalysis=null;preparedPages=new Map();preparedRangeKey=null;clearPageImages();ocrWarnings=[];translationState=null;translationParts=[];pdfLayoutDocument=null;pdfExportUrl='';pdfLayoutRange='';await dualViewer.clear();clearPartStream();$('#source').readOnly=false;$('#source').value='';$('#translation').value='';$('#warnings').textContent='';$('#download').disabled=true;$('#download-pdf').disabled=true;$('#pdf-range-options').hidden=true;$('#page-range').value='';updateCount();$('#library-match').hidden=true;if(!file){setFileStatus('Hoặc dán một đoạn tiếng Trung bên dưới.');return;}showLibraryMatch(version);
- if(useLayout){const {pdfPageCount}=await import('./pdf-client.js');setFileStatus('Đang kiểm tra số trang PDF…');const total=await pdfPageCount(file);if(version!==selectionVersion)return;$('#pdf-range-options').hidden=false;autoRange=$('#page-range').value=`1-${Math.min(3,total)}`;selectedTotalPages=total;const large=file.size>OTHER_MAX_BYTES;setFileStatus(large?`${total} trang · ${megabytes(file.size)} · tệp trên 25 MB được dịch bằng chế độ Dịch cả quyển.`:`${total} trang · dịch theo block có tọa độ; chọn phạm vi rồi bấm Bắt đầu dịch, hoặc chọn Dịch cả quyển.`);renderBookMode();if(large)setBookMode(true);prepareBookTarget(version,{suggest:true});coverTask=detectSelectedCover(file,version);findBookJob(version);return;}
+async function selected(file){workflow(1);await layoutConfiguration;const isPdf=file?.name.toLowerCase().endsWith('.pdf'),useLayout=isPdf&&$('#pdf-layout-enabled').checked;if(isPdf)await pdfTools();if(file?.size>(useLayout?wholeBook.SOURCE_MAX_BYTES:isPdf?PDF_MAX_BYTES:OTHER_MAX_BYTES))throw new Error(useLayout?'PDF giữ bố cục tối đa 100 MB (tệp trên 25 MB được dịch bằng chế độ Dịch cả quyển).':isPdf?'PDF tối đa 250 MB khi xử lý tại trình duyệt.':'Tệp tối đa 25 MB.');const version=++selectionVersion;selectedFile=file;unbindBook();resetHistoryIdentity();bookTarget={id:'',replaceChapterId:''};bookChoiceTouched=false;selectedHash=fileSha256(file);selectedSha256='';selectedTotalPages=0;resetCover();autoRange='';pdfAnalysis=null;preparedPages=new Map();preparedRangeKey=null;clearPageImages();ocrWarnings=[];translationState=null;translationParts=[];pdfLayoutDocument=null;pdfExportUrl='';pdfLayoutRange='';await dualViewer.clear();clearPartStream();$('#source').readOnly=false;$('#source').value='';$('#translation').value='';$('#warnings').textContent='';$('#download').disabled=true;$('#download-pdf').disabled=true;$('#pdf-range-options').hidden=true;$('#page-range').value='';updateCount();$('#library-match').hidden=true;if(!file){setFileStatus('Hoặc dán một đoạn tiếng Trung bên dưới.');return;}showLibraryMatch(version);
+ if(useLayout){const {pdfPageCount}=await import('./pdf-client.js');setFileStatus('Đang kiểm tra số trang PDF…');const total=await pdfPageCount(file);if(version!==selectionVersion)return;$('#pdf-range-options').hidden=false;autoRange=$('#page-range').value=`1-${Math.min(3,total)}`;selectedTotalPages=total;const large=file.size>OTHER_MAX_BYTES;setFileStatus(large?`${total} trang · ${megabytes(file.size)} · tệp trên 25 MB được dịch bằng chế độ Dịch cả quyển.`:`${total} trang · dịch từng đoạn ngay trên trang; chọn phạm vi rồi bấm Bắt đầu dịch, hoặc chọn Dịch cả quyển.`);renderBookMode();if(large)setBookMode(true);prepareBookTarget(version,{suggest:true});coverTask=detectSelectedCover(file,version);findBookJob(version);return;}
  if(!isPdf){await prepare();return;}
  setFileStatus('Đang kiểm tra lớp chữ PDF trên trình duyệt…');try{const {analyzePdf}=await import('./pdf-client.js');const analysis=await analyzePdf(file,(page,total)=>{if(version===selectionVersion)setFileStatus(`Đang đọc trang ${page}/${total}…`);});if(version!==selectionVersion)return;pdfAnalysis=analysis;}catch(error){if(version!==selectionVersion)return;selectedFile=null;throw error;}
  $('#pdf-range-options').hidden=false;selectedTotalPages=pdfAnalysis.totalPages;
  const start=pdfAnalysis.mode==='scan'&&pdfAnalysis.totalPages>30?Math.max(1,Math.floor(pdfAnalysis.totalPages/2)-1):1,end=Math.min(pdfAnalysis.totalPages,start+2);
  autoRange=$('#page-range').value=start===end?String(start):`${start}-${end}`;
- if(pdfAnalysis.mode==='text'){$('#source').value=pdfAnalysis.pages.filter(page=>page.number>=start&&page.number<=end).map(page=>page.text).join('\n\n');updateCount();setFileStatus(`${pdfAnalysis.totalPages} trang có lớp chữ · đang chọn ${$('#page-range').value} · không cần OCR. Hình gốc sẽ được giữ khi dịch.`);}
- else setFileStatus(`${pdfAnalysis.pagesWithText} trang có lớp chữ · ${pdfAnalysis.scanPages} trang scan. Đang chọn ${$('#page-range').value}; bấm Bắt đầu dịch để tự OCR và dịch.`);
+ if(pdfAnalysis.mode==='text'){$('#source').value=pdfAnalysis.pages.filter(page=>page.number>=start&&page.number<=end).map(page=>page.text).join('\n\n');updateCount();setFileStatus(`${pdfAnalysis.totalPages} trang có lớp chữ · đang chọn ${$('#page-range').value} · không cần nhận dạng chữ từ ảnh. Hình gốc sẽ được giữ khi dịch.`);}
+ else setFileStatus(`${pdfAnalysis.pagesWithText} trang có lớp chữ · ${pdfAnalysis.scanPages} trang scan. Đang chọn ${$('#page-range').value}; bấm Bắt đầu dịch để tự nhận dạng chữ và dịch.`);
  prepareBookTarget(version);detectSelectedCover(file,version);
 }
 async function geminiOcr(blob,page){
@@ -573,20 +657,21 @@ async function prepare(){if(!selectedFile)return false;busy(true);let localOcr=n
     keepPageImage(page,item.previewBlob);
     if(item.kind==='text'){preparedPages.set(page,{text:item.text,layout:item.layout,engine:'pdf-text',needsGemini:false});await keepPageFigures(page,item.layout);return;}
     if(!localOcr)localOcr=await import('./local-ocr.js');
-    status(`Đang OCR cục bộ trang ${page}/${total} · không tốn token…`);
+    if(!existing?.assessment&&!await allowOcrDownload(localOcr))throw Object.assign(new Error(`Chưa nhận dạng các trang scan vì bạn chọn để sau. Khi có Wi-Fi, bấm Bắt đầu dịch để tải bộ nhận dạng chữ (khoảng ${localOcr.DOWNLOAD_MB} MB, một lần) rồi dịch tiếp.`),{code:'ocr_declined'});
+    status(`Đang nhận dạng chữ trên thiết bị · trang ${page}/${total} · không tốn token…`);
     const assessment=existing?.assessment||await localOcr.recognizeChinesePage(item.blob,message=>{
-     if(message.status==='loading model')status('Đang nạp mô hình PaddleOCR lần đầu · không gửi tài liệu ra ngoài…');
-     if(message.status==='recognizing text')status(`OCR cục bộ trang ${page}/${total} · 0 token`);
-     if(message.status==='fallback')status('PaddleOCR chưa chạy được · chuyển sang Tesseract cục bộ…');
+     if(message.status==='loading model')status(`Đang tải bộ nhận dạng chữ lần đầu (khoảng ${localOcr.DOWNLOAD_MB} MB) · tài liệu không rời khỏi thiết bị…`);
+     if(message.status==='recognizing text')status(`Đang nhận dạng chữ trên thiết bị · trang ${page}/${total} · 0 token`);
+     if(message.status==='fallback')status('PaddleOCR chưa chạy được · chuyển sang Tesseract trên thiết bị…');
     });
     if(assessment.fallbackReason)ocrWarnings.push(`PaddleOCR chưa sẵn sàng; đã dùng Tesseract cục bộ (${assessment.fallbackReason}).`);
     const fallback=shouldUseGeminiOcr('hybrid',assessment);
     if(fallback&&optionalKey()){
-     ocrWarnings.push(`Trang ${page}: OCR cục bộ chỉ đạt ${assessment.confidence}% nên đã dùng Gemini cho riêng trang này.`);
+     ocrWarnings.push(`Trang ${page}: nhận dạng chữ trên thiết bị chỉ đạt ${assessment.confidence}% nên đã dùng Gemini cho riêng trang này.`);
      status(`Trang ${page}/${total} khó đọc · đang chuyển riêng trang này sang Gemini…`);preparedPages.set(page,{text:await geminiOcr(item.blob,page),layout:assessment.layout,engine:'gemini',needsGemini:false,assessment});
     }else{
      preparedPages.set(page,{text:assessment.text,layout:assessment.layout,engine:assessment.engine,confidence:assessment.confidence,metrics:assessment.metrics,assessment,needsGemini:assessment.needsGemini});
-     if(assessment.needsGemini)ocrWarnings.push(`Trang ${page}: OCR cục bộ đạt ${assessment.confidence}% và có thể thiếu chữ hoặc công thức${!optionalKey()?' (chưa có khóa để dùng Gemini dự phòng; nhập khóa rồi bấm Bắt đầu dịch lại để thử trang này bằng Gemini)':''}. Hãy đối chiếu ảnh gốc.`);
+     if(assessment.needsGemini)ocrWarnings.push(`Trang ${page}: nhận dạng chữ trên thiết bị đạt ${assessment.confidence}% và có thể thiếu chữ hoặc công thức${!optionalKey()?' (chưa có khóa để dùng Gemini dự phòng; nhập khóa rồi bấm Bắt đầu dịch lại để thử trang này bằng Gemini)':''}. Hãy đối chiếu ảnh gốc.`);
     }
     const figures=await keepPageFigures(page,assessment.layout),prepared=preparedPages.get(page);
     if(figures.length&&prepared&&['paddle','tesseract'].includes(assessment.engine))prepared.text=textOutsideFigures(assessment.layout,figures);
@@ -600,6 +685,18 @@ async function prepare(){if(!selectedFile)return false;busy(true);let localOcr=n
   updateCount();status('Đã chuẩn bị nguyên tác.');return Boolean($('#source').value.trim());
  }catch(error){rejectKey(error);fail(error);return false;}finally{if(localOcr)await localOcr.terminateLocalOcr().catch(()=>{});busy(false);stopRequested=false;}}
 
+// On Save-Data or a slow connection the first local OCR asks before downloading its engine; the answer holds for this tab.
+// Without navigator.connection (Safari, Firefox) nothing is asked, as before. Dừng counts as "Để sau".
+let ocrDownloadAllowed=false,ocrChoice=null;
+async function allowOcrDownload(localOcr){
+ if(ocrDownloadAllowed)return true;
+ const connection=navigator.connection,slow=Boolean(connection?.saveData)||/^(?:slow-2g|2g|3g)$/u.test(connection?.effectiveType||'');
+ if(!slow||await localOcr.localOcrCached())return ocrDownloadAllowed=true;
+ $('#ocr-download-text').textContent=`Tài liệu có trang scan. Hoa Trí nhận dạng chữ ngay trên thiết bị (không tốn token), nhưng lần đầu cần tải khoảng ${localOcr.DOWNLOAD_MB} MB${connection.saveData?' trong khi trình duyệt đang bật chế độ tiết kiệm dữ liệu':' qua một kết nối đang chậm'}. Những lần sau trình duyệt dùng lại bản đã tải.`;
+ $('#ocr-download').hidden=false;status('Đang chờ bạn chọn có tải bộ nhận dạng chữ hay không…');$('#ocr-download-yes').focus();
+ const allowed=await new Promise(resolve=>{ocrChoice=resolve;});ocrChoice=null;$('#ocr-download').hidden=true;$('#progress').focus();
+ return ocrDownloadAllowed=allowed;
+}
 function hasUsableKey(){return !!(sessionKey||$('#api-key').value.trim());}
 function needsPreparation(){
  if(!selectedFile||!selectedFile.name.toLowerCase().endsWith('.pdf'))return false;
@@ -609,16 +706,19 @@ function needsPreparation(){
  // A key arriving after a weak local-only OCR pass should trigger one retry of just those pages.
  return hasUsableKey()&&[...preparedPages.values()].some(entry=>entry?.needsGemini);
 }
+// The pressed button is disabled while the run goes on: keyboard focus moves to Dừng (or the progress line) and comes
+// back to Bắt đầu dịch when the run ends, unless something else (the key field) took it on purpose.
 async function run(){
- if(running||starting)return;requireContentTitle();starting=true;busy(true);
+ if(running||starting)return;requireContentTitle();const pressed=document.activeElement===$('#translate');starting=true;runActive=true;busy(true);
+ if(pressed)($('#stop').hidden?$('#progress'):$('#stop')).focus({preventScroll:true});
  try{
   await layoutConfiguration;
   if(bookMode&&bookAvailable()){await selectionTask;return await runWholeBook();}
   if($('#pdf-layout-enabled').checked&&(selectedFile?.name.toLowerCase().endsWith('.pdf')||translationState?.pdfLayout)){await selectionTask;return await runPdfLayout({fromRun:true});}
   await ensureStudyModel('text');
-  if(selectedFile&&!pdfAnalysis&&selectedFile.name.toLowerCase().endsWith('.pdf'))status('Đang chờ phân tích PDF; hệ thống sẽ tự OCR và dịch ngay sau đó…');
+  if(selectedFile&&!pdfAnalysis&&selectedFile.name.toLowerCase().endsWith('.pdf'))status('Đang chờ phân tích PDF; hệ thống sẽ tự nhận dạng chữ và dịch ngay sau đó…');
   return await runStudyTranslation({selectionTask,requireKey:key,needsPreparation,hasSource:()=>Boolean($('#source').value.trim()),hasFile:()=>Boolean(selectedFile),prepare,translate});
- }finally{starting=false;busy(false);}
+ }finally{starting=false;runActive=false;busy(false);if(pressed&&[document.body,$('#stop'),$('#progress')].includes(document.activeElement))$('#translate').focus({preventScroll:true});}
 }
 
 function pdfTranslations(){const blocks=pdfLayoutDocument?.pages.flatMap(p=>p.blocks)||[];return blocks.map((b,i)=>({id:b.id,translation:translationParts[i]||''})).filter(b=>b.translation.trim());}
@@ -642,14 +742,14 @@ async function adoptPdfLayout(result,{glossary={},context=''}={}){
 // heartbeat (whole-book runs) follows every batch: it keeps the job held while a long chunk is read.
 async function correctPdfOcr(model,{shouldStop=()=>false,heartbeat=async()=>{}}={}){
  // A manifest with OCR sheets is read a whole sheet (several blocks, one image) at a time.
- const pages=pdfLayoutDocument.pages.filter(p=>p.ocr),blocks=pages.flatMap(p=>p.blocks),pending=blocks.filter(b=>!b.ocrCorrected);
+ const {ocrImageBatches}=await boxLayout(),pages=pdfLayoutDocument.pages.filter(p=>p.ocr),blocks=pages.flatMap(p=>p.blocks),pending=blocks.filter(b=>!b.ocrCorrected);
  let done=blocks.length-pending.length;for(const ids of ocrImageBatches(pending,undefined,pages.flatMap(p=>p.ocrSheets||[]))){if(shouldStop())return false;status(`Đang đọc lại chữ trong ảnh đoạn ${Math.min(done+1,blocks.length)}–${Math.min(done+ids.length,blocks.length)}/${blocks.length}…`);const output=await api('pdf-layout/ocr-blocks',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({assetId:translationState.pdfLayout.assetId,blockIds:ids,apiKey:key(),model})});pdfLayoutDocument=output.document;model=output.model||model;addUsage(output.usage);if(output.warnings?.length)$('#warnings').textContent+=output.warnings.join('\n')+'\n';done+=ids.length;await heartbeat();}
  // History requires parts to match the manifest, which now holds the corrected sources.
  syncLayoutParts();delete translationState.pdfLayout.ocrPending;syncPdfText();await dualViewer.setDocument(pdfLayoutDocument,[]);return true;
 }
 function syncPdfText(){
  const blocks=pdfLayoutDocument.pages.flatMap(p=>p.blocks);$('#source').value=blocks.map(b=>b.text).join('\n\n');$('#source').readOnly=true;$('#source-lookup').disabled=!hasHan($('#source').value);
- $('#translation').value=blocks.map((b,i)=>{let text=translationParts[i]||'';for(const inline of b.inlines||[])text=text.replace(inline.token,inline.text);return text;}).filter(Boolean).join('\n\n');$('#download').disabled=!$('#translation').value;$('#source-count').textContent=`${$('#source').value.length} ký tự`;$('#part-count').textContent=`${blocks.length} block`;
+ $('#translation').value=blocks.map((b,i)=>{let text=translationParts[i]||'';for(const inline of b.inlines||[])text=text.replace(inline.token,inline.text);return text;}).filter(Boolean).join('\n\n');$('#download').disabled=!$('#translation').value;$('#source-count').textContent=`${$('#source').value.length} ký tự`;$('#part-count').textContent=`${blocks.length} đoạn`;
 }
 async function runPdfLayout({fromRun=false}={}){
  if(running&&!fromRun)return;
@@ -661,17 +761,17 @@ async function runPdfLayout({fromRun=false}={}){
    status('Đang cập nhật bố cục scan và tách lại vùng chữ khỏi hình gốc…');const result=await api('pdf-layout/refresh',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({assetId:translationState.pdfLayout.assetId,forceClone:true})}),priorTitle=historyTitle(),priorFilename=selectedFile?.name||activeHistoryMeta.filename||'',prior=historyItems.find(item=>item.id===activeHistoryId);
    // The refreshed copy is a new session; it rejoins the old one's book and takes over its part instead of adding the same pages twice.
    if(prior?.library_story_id)bookTarget={id:prior.library_story_id,replaceChapterId:prior.library_chapter_id||''};
-   resetHistoryIdentity();activeHistoryMeta={title:priorTitle,filename:priorFilename};await adoptPdfLayout(result);await saveHistory();
+   resetHistoryIdentity();activeHistoryMeta={title:priorTitle,filename:priorFilename};await adoptPdfLayout(result);await saveBeforeSpending();
   }
   if(!translationState?.pdfLayout||selectedFile&&pdfLayoutRange!==range){
-   if(!selectedFile)throw new Error('Hãy chọn PDF gốc.');status('Đang tách ảnh, công thức và block có tọa độ từ PDF…');const form=new FormData(),sha256=await selectedHash;form.set('file',selectedFile);form.set('pages',range);if(sha256)form.set('sha256',sha256);const result=await api('pdf-layout/extract',{method:'POST',body:form});
+   if(!selectedFile)throw new Error('Hãy chọn PDF gốc.');status('Đang tách ảnh, công thức và các đoạn chữ cùng vị trí của chúng trên trang PDF…');const form=new FormData(),sha256=await selectedHash;form.set('file',selectedFile);form.set('pages',range);if(sha256)form.set('sha256',sha256);const result=await api('pdf-layout/extract',{method:'POST',body:form});
    // Phones on plain HTTP cannot hash in the browser; the Worker's hash still lets the book and its cover remember this file.
    if(!selectedSha256&&/^[a-f\d]{64}$/u.test(result.document?.sourceSha256||''))selectedSha256=result.document.sourceSha256;
-   resetHistoryIdentity();pdfLayoutRange=range;if(bookChoiceActive())updateBookHint();clearPageImages();await adoptPdfLayout(result);await saveHistory();
+   resetHistoryIdentity();pdfLayoutRange=range;if(bookChoiceActive())updateBookHint();clearPageImages();await adoptPdfLayout(result);await saveBeforeSpending();
   }
   const outcome=await translateLayoutSession(selectedModel),blocks=pdfLayoutDocument.pages.flatMap(p=>p.blocks);
-  if(outcome.idle){$('#download-pdf').disabled=false;status('Đã dịch đủ các block. Bấm Xuất PDF tiếng Việt để tải bản giữ bố cục.');return;}
-  const complete=outcome.complete;$('#download-pdf').disabled=!complete;status(complete?'Đã dịch đủ các block. Đang xuất PDF tiếng Việt…':`Đã dừng sau ${translationState.done}/${blocks.length} block; có thể tiếp tục từ lịch sử.`);
+  if(outcome.idle){$('#download-pdf').disabled=false;status('Đã dịch đủ các đoạn. Bấm Xuất PDF tiếng Việt để tải bản giữ bố cục.');return;}
+  const complete=outcome.complete;$('#download-pdf').disabled=!complete;status(complete?'Đã dịch đủ các đoạn. Đang xuất PDF tiếng Việt…':`Đã dừng sau ${translationState.done}/${blocks.length} đoạn. ${unsaved?'Chưa lưu được tiến độ vào tài khoản: đừng đóng tab, bấm Bắt đầu dịch để thử lưu lại.':'Tiến độ đã lưu; có thể dịch tiếp từ Lịch sử dịch.'}`);
   if(complete)await exportLayoutPdf(false);
  }catch(error){rejectKey(error);fail(error);}finally{busy(false);stopRequested=false;}
 }
@@ -682,26 +782,26 @@ async function translateLayoutSession(model,{pageStop=false,shouldStop=()=>stopR
  if(translationState.pdfLayout.ocrPending||pdfOcrResumable()){if(!await correctPdfOcr(model,{shouldStop:pageStop?shouldStop:()=>false,heartbeat}))return {complete:false,model,idle:false};}
  // A save can land between the last OCR batch and the history update; untranslated parts follow the manifest.
  else if(!translationState.done)syncLayoutParts();
- const blocks=pdfLayoutDocument.pages.flatMap(p=>p.blocks),pageOf=new Map(pdfLayoutDocument.pages.flatMap(page=>page.blocks.map(b=>[b.id,page.number])));await saveHistory();
+ const {blockBatches}=await boxLayout(),blocks=pdfLayoutDocument.pages.flatMap(p=>p.blocks),pageOf=new Map(pdfLayoutDocument.pages.flatMap(page=>page.blocks.map(b=>[b.id,page.number])));await saveBeforeSpending();
  const idle=translationState.done===blocks.length;
  while(translationState.done<blocks.length){
   let [batch]=blockBatches(blocks.slice(translationState.done));
   if(shouldStop()){const page=translationState.done?pageOf.get(blocks[translationState.done-1].id):0;if(!pageStop||!page||pageOf.get(batch[0].id)!==page)break;batch=batch.filter(b=>pageOf.get(b.id)===page);}
-  status(`Đang dịch block ${translationState.done+1}–${translationState.done+batch.length}/${blocks.length}…`);
+  status(`Đang dịch đoạn ${translationState.done+1}–${translationState.done+batch.length}/${blocks.length}…`);
   const result=await api('translate-blocks',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({apiKey:key(),model,blocks:batch.map(({id,source})=>({id,source})),domain:translationState.domain,mode:translationState.mode,context:translationState.context,glossary:translationState.glossary})});
   // Counted before the checks below: tokens are spent even when an answer is refused.
   addUsage(result.usage);
   if(result.model){model=result.model;$('#gemini-model-status').textContent=`Đã dùng ${result.model}.`;if([...$('#gemini-model').options].some(o=>o.value===result.model))$('#gemini-model').value=result.model;}
-  const translated=new Map(result.blocks.map(b=>[b.id,b.translation]));for(const b of batch){const text=translated.get(b.id);if(!text)throw new Error(`Thiếu bản dịch block ${b.id}.`);translationParts[translationState.done++]=text;}
+  const translated=new Map(result.blocks.map(b=>[b.id,b.translation]));for(const b of batch){const text=translated.get(b.id);if(!text)throw new Error(`Gemini trả thiếu bản dịch của đoạn ${b.id}.`);translationParts[translationState.done++]=text;}
   if(result.warnings?.length)$('#warnings').textContent+=result.warnings.join('\n')+'\n';
-  translationState.context=result.context||translationState.context;translationState.glossary={...translationState.glossary,...result.glossary,...translationState.fixedGlossary,...translationState.manualGlossary};syncPdfText();await dualViewer.update(pdfTranslations());await saveHistory();workflow(3);
+  translationState.context=result.context||translationState.context;translationState.glossary={...translationState.glossary,...result.glossary,...translationState.fixedGlossary,...translationState.manualGlossary};syncPdfText();await dualViewer.update(pdfTranslations());await saveBeforeSpending();workflow(3);
   await heartbeat();
  }
  return {complete:translationState.done===blocks.length,model,idle};
 }
 // show:false (whole-book runs) skips loading every exported chunk into the viewer.
 async function exportLayoutPdf(download=true,{show=true}={}){
- if(!translationState?.pdfLayout||!activeHistoryId)throw new Error('Hãy lưu đủ các block trước khi xuất PDF.');
+ if(!translationState?.pdfLayout||!activeHistoryId)throw new Error('Hãy dịch và lưu đủ các đoạn trước khi xuất PDF.');
  if(!pdfExportUrl){status('Đang đo chữ, điều chỉnh cỡ font và xuất PDF tiếng Việt…');const result=await api('pdf-layout/render',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({assetId:translationState.pdfLayout.assetId,historyId:activeHistoryId})});pdfExportUrl=result.url;translationState.pdfLayout.exported=true;translationState.pdfLayout.renderVersion=result.renderVersion||2;if(show)await dualViewer.setExportedPdf(result.url);}
  status(show?'PDF tiếng Việt đã được lưu vào Thư viện riêng. Hai bản đang hiển thị song song.':'PDF tiếng Việt của phần này đã được lưu vào Thư viện riêng.');
  if(download){const response=await fetch(pdfExportUrl,{credentials:'same-origin'});if(!response.ok)throw new Error('Không tải được PDF.');const url=URL.createObjectURL(await response.blob()),link=document.createElement('a');link.href=url;link.download=downloadFilename('pdf');link.click();setTimeout(()=>URL.revokeObjectURL(url),1000);}
@@ -716,24 +816,29 @@ async function translate(){
  if(!continuing){
   translationState={source,domain,mode,parts,plan,done:0,context:'',glossary:{...manualGlossary},manualGlossary,previousSource:'',previousTranslation:''};
   translationParts=[];renderPartStream(plan);$('#translation').value='';$('#warnings').textContent=ocrWarnings.join('\n')+(ocrWarnings.length?'\n':'');
-  if(pageImages.size&&domain==='math')$('#warnings').textContent+='OCR chữ không xác nhận tính đúng của công thức. Hãy đối chiếu ký hiệu với hình gốc.\n';
+  if(pageImages.size&&domain==='math')$('#warnings').textContent+='Nhận dạng chữ không xác nhận tính đúng của công thức. Hãy đối chiếu ký hiệu với hình gốc.\n';
  }else{
   for(const term of Object.keys(translationState.manualGlossary||{}))if(!Object.hasOwn(manualGlossary,term))delete translationState.glossary[term];
   translationState.manualGlossary=manualGlossary;Object.assign(translationState.glossary,manualGlossary);
   if(!$('#translation-parts').children.length){renderPartStream(plan);translationParts.forEach((text,index)=>{if(text)updatePart(index,text,index<translationState.done?'done':'queued');});}
  }
- if(translationState.done===parts.length){status('Tài liệu này đã dịch xong trong phiên. Không gọi Gemini lại.');return;}
- key();busy(true);stopRequested=false;let activeIndex=-1,lastSaved=await saveHistory();
+ if(translationState.done===parts.length){
+  // A finished translation whose last save failed: Bắt đầu dịch saves it again (setUnsaved says so), without Gemini.
+  if(unsaved){busy(true);try{status('Đang lưu bản dịch vào tài khoản…');const saved=await saveHistory();if(saved)status(saved.libraryStoryId&&saved.status==='complete'?'Đã lưu bản dịch. Bản dịch đã có trong Thư viện riêng.':'Đã lưu bản dịch vào tài khoản.');else status('Vẫn chưa lưu được bản dịch vào tài khoản. Đừng đóng tab; kiểm tra mạng rồi bấm Bắt đầu dịch để thử lại.','error');}finally{busy(false);}return;}
+  status('Tài liệu này đã dịch xong trong phiên. Không gọi Gemini lại.');return;
+ }
+ key();busy(true);stopRequested=false;let activeIndex=-1,lastSaved=null;
  try{
+  lastSaved=await saveBeforeSpending();
   for(let index=translationState.done;index<parts.length;index++){
    if(stopRequested)break;activeIndex=index;const part=parts[index];updatePart(index,undefined,'working');status(`Đang dịch phần ${index+1}/${parts.length}…`);
    const result=await api('translate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({apiKey:key(),model:$('#gemini-model').value,source:part,mode,domain,context:translationState.context,glossary:translationState.glossary,previousSource:translationState.previousSource,previousTranslation:translationState.previousTranslation})});
    translationParts[index]=result.translation;updatePart(index,result.translation,'done');$('#translation').value=translationParts.join('\n\n');$('#download').disabled=false;renderPageImages();workflow(3);
    translationState.context=result.context||translationState.context;translationState.glossary={...(result.glossary||translationState.glossary),...translationState.manualGlossary};translationState.previousSource=part.slice(-350);translationState.previousTranslation=result.translation.slice(-500);translationState.done=index+1;addUsage(result.usage);
    if(result.warnings?.length)$('#warnings').textContent+=`Phần ${index+1}: ${result.warnings.join('; ')}\n`;
-   lastSaved=await saveHistory()||lastSaved;
+   activeIndex=-1;lastSaved=await saveBeforeSpending(index===parts.length-1)||lastSaved;
   }
-  status(stopRequested?`Đã dừng sau ${translationState.done}/${parts.length} phần. Tiến độ đã lưu vào tài khoản; bấm Bắt đầu dịch để tiếp tục.`:lastSaved?.libraryStoryId?`Hoàn tất ${parts.length} phần. Bản dịch đã được lưu vào Thư viện riêng.`:`Hoàn tất ${parts.length} phần. Hãy đối chiếu bản dịch với nguyên tác.`);
+  status(stopRequested?`Đã dừng sau ${translationState.done}/${parts.length} phần. Tiến độ đã lưu vào tài khoản; bấm Bắt đầu dịch để tiếp tục.`:lastSaved?.libraryStoryId&&lastSaved.status==='complete'?`Hoàn tất ${parts.length} phần. Bản dịch đã được lưu vào Thư viện riêng.`:`Hoàn tất ${parts.length} phần. Hãy đối chiếu bản dịch với nguyên tác.`);
  }catch(error){if(activeIndex>=0)updatePart(activeIndex,undefined,'failed');rejectKey(error);fail(error);}finally{busy(false);stopRequested=false;}
 }
 
@@ -744,7 +849,7 @@ const bookAvailable=()=>Boolean(layoutConfig.configured&&$('#pdf-layout-enabled'
 const bookForced=()=>Boolean(selectedFile?selectedFile.size>OTHER_MAX_BYTES:bookJob);
 const megabytes=bytes=>bytes<1048576?`${Math.max(1,Math.round(bytes/1024))} KB`:`${new Intl.NumberFormat('vi-VN',{maximumFractionDigits:1}).format(bytes/1048576)} MB`;
 function translateLabel(text){const node=[...$('#translate').childNodes].find(item=>item.nodeType===3);if(node)node.nodeValue=`${text} `;}
-function bookFileStatus(){if(selectedFile&&selectedTotalPages)setFileStatus(bookMode?`${selectedTotalPages} trang · ${megabytes(selectedFile.size)} · Hoa Trí tự chia thành từng lượt tối đa 20 trang; bìa và trang không có chữ Trung không tốn token.`:`${selectedTotalPages} trang · dịch theo block có tọa độ; chọn phạm vi rồi bấm Bắt đầu dịch, hoặc chọn Dịch cả quyển.`);}
+function bookFileStatus(){if(selectedFile&&selectedTotalPages)setFileStatus(bookMode?`${selectedTotalPages} trang · ${megabytes(selectedFile.size)} · Hoa Trí tự chia thành từng lượt tối đa 20 trang; bìa và trang không có chữ Trung không tốn token.`:`${selectedTotalPages} trang · dịch từng đoạn ngay trên trang; chọn phạm vi rồi bấm Bắt đầu dịch, hoặc chọn Dịch cả quyển.`);}
 // quiet: a countdown's later seconds are shown, not read aloud each second by a screen reader.
 function bookStatus(text,{quiet=false}={}){bookStatusText=text;const line=$('#whole-book-status');if(!line)return;line.setAttribute('aria-live',quiet?'off':'polite');line.textContent=text;}
 function renderBookMode(){
@@ -818,7 +923,7 @@ function renderBookEstimate(states){
  const projection=bookJob?wholeBook.usageProjection({...bookJob,pageStates:states}):null;
  if(projection?.pending)root.append(line(`Theo mức quyển này đã dùng (khoảng ${f(projection.perPage)} token mỗi trang): còn khoảng ${f(projection.remaining)} token cho ${projection.pending} trang.`,'p','estimate-total'));
  if(bookSurvey&&!bookSurvey.done&&!bookSurvey.failed)root.append(line(`Đang đọc lớp chữ của tệp: ${bookSurvey.kinds.length}/${bookSurvey.total||'?'} trang…`,'p'));
- root.append(line('Số đo thật: một trang có lớp chữ khoảng 867 token; trang scan cần thêm 2.100–5.200 token cho bước đọc ảnh. Số thật tùy lượng chữ, công thức và model; trang trống chỉ biết sau khi tách trang.','p','hint'));
+ root.append(line('Số token thật tùy lượng chữ, công thức và phiên bản Gemini; trang trống chỉ biết sau khi tách trang.','p','hint'));
 }
 // Text layers only (no drawing): a 300-page book takes seconds, after the cover detector is done with the file.
 function startBookSurvey(){
@@ -827,13 +932,14 @@ function startBookSurvey(){
  Promise.resolve(coverTask).catch(()=>{}).then(()=>current()?wholeBook.surveyPages(file,{cancelled:()=>!current(),onProgress:kinds=>{if(current()){survey.kinds=kinds;renderBookPanel();}}}):null)
   .then(kinds=>{if(kinds&&current()){survey.kinds=kinds;survey.done=true;renderBookPanel();}}).catch(()=>{if(current()){survey.failed=true;renderBookPanel();}});
 }
-async function loadBookJobs(){const data=await api('book-jobs').catch(()=>null);if(data)bookJobs=Array.isArray(data.jobs)?data.jobs:[];if(bookJob)bookJob=bookJobs.find(job=>job.id===bookJob.id)||bookJob;if(!bookRun)flushBookReports();return bookJobs;}
+// whole-book.js is loaded before the jobs are kept: every view of a job needs it.
+async function loadBookJobs(){const data=await api('book-jobs').catch(()=>null);if(data){const jobs=Array.isArray(data.jobs)?data.jobs:[];if(jobs.length)await pdfTools();bookJobs=jobs;}if(bookJob)bookJob=bookJobs.find(job=>job.id===bookJob.id)||bookJob;if(!bookRun&&bookJobs.length)flushBookReports();return bookJobs;}
 // Tokens a run in this browser spent but could not report (its last report failed, the tab closed) are sent the next
 // time the jobs are listed: tokens only, accepted whichever device runs the book, each report counted once.
 function flushBookReports(){
  for(const job of bookJobs){
-  const pending=bookReports.load(job.id).slice(0,20);if(!pending.length)continue;
-  api(`book-jobs/${encodeURIComponent(job.id)}`,{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({reports:pending})}).then(data=>{const sent=new Set(pending.map(report=>report.id));bookReports.save(job.id,bookReports.load(job.id).filter(report=>!sent.has(report.id)));upsertJob(data?.job);renderBookPanel();renderStudyBooks();}).catch(()=>{});
+  const pending=bookReports().load(job.id).slice(0,20);if(!pending.length)continue;
+  api(`book-jobs/${encodeURIComponent(job.id)}`,{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({reports:pending})}).then(data=>{const sent=new Set(pending.map(report=>report.id));bookReports().save(job.id,bookReports().load(job.id).filter(report=>!sent.has(report.id)));upsertJob(data?.job);renderBookPanel();renderStudyBooks();}).catch(()=>{});
  }
 }
 function upsertJob(job){if(!job?.id)return job;const index=bookJobs.findIndex(entry=>entry.id===job.id);if(index>=0)bookJobs[index]=job;else bookJobs.unshift(job);if(bookJob?.id===job.id)bookJob=job;return job;}
@@ -856,7 +962,7 @@ async function findBookJob(version){
 // "Tiếp tục" in the history: the run goes on from the original kept in the account; no file to pick again.
 async function openBookJob(id){
  if(running)return;const job=bookJobs.find(entry=>entry.id===id);if(!job)return;
- await layoutConfiguration;if(!layoutConfig.configured)throw new Error('Dịch vụ PDF giữ bố cục chưa sẵn sàng nên chưa dịch tiếp được quyển này. Hãy thử lại sau.');$('#pdf-layout-enabled').checked=true;
+ await Promise.all([layoutConfiguration,pdfTools()]);if(!layoutConfig.configured)throw new Error('Dịch vụ PDF giữ bố cục chưa sẵn sàng nên chưa dịch tiếp được quyển này. Hãy thử lại sau.');$('#pdf-layout-enabled').checked=true;
  const version=++selectionVersion;busy(true);
  try{
   const same=Boolean(selectedFile)&&await bookHash()===job.sourceSha256;if(version!==selectionVersion)return;
@@ -908,14 +1014,14 @@ async function createBookJob(source){
 // A run continued without the picked file still gives a new book its cover image, drawn from the stored original.
 async function ensureBookCover(source){
  const page=bookJob.pageStates.indexOf('c')+1;if(selectedFile||!page||cover.page===page&&cover.jpeg||studyBooks.find(book=>book.id===bookJob.storyId)?.cover?.image)return;
- const jpeg=await pageJpeg(source.file,page).catch(()=>null);Object.assign(cover,{page,source:'detected',replace:false,synced:'',note:''});setCoverImage(jpeg);
+ const jpeg=await coverTools.pageJpeg(source.file,page).catch(()=>null);Object.assign(cover,{page,source:'detected',replace:false,synced:'',note:''});setCoverImage(jpeg);
 }
 // A chunk session saved earlier (in another tab, before a reload) becomes the open session again, as the history opens it.
 async function resumeChunkSession(id){
  const item=await api(`history/${encodeURIComponent(id)}`),state=item.state||{};if(!state.pdfLayout)throw Object.assign(new Error('Phần này không có bố cục PDF.'),{status:409});
  const document=await api(`pdf-layout/assets/${state.pdfLayout.assetId}/manifest`);
  await dualViewer.clear();pdfLayoutDocument=document;pdfExportUrl='';pdfLayoutRange='';clearPageImages();
- activeHistoryId=item.id;activeHistoryMeta={title:item.title,filename:item.filename};historyWarningShown=false;bookChunkId=item.id;bookTarget={id:item.library_story_id||bookJob?.storyId||'',replaceChapterId:''};
+ activeHistoryId=item.id;activeHistoryMeta={title:item.title,filename:item.filename};bookChunkId=item.id;bookTarget={id:item.library_story_id||bookJob?.storyId||'',replaceChapterId:''};
  const parts=Array.isArray(state.parts)?state.parts:[];translationParts=Array.isArray(state.translationParts)?state.translationParts.slice(0,parts.length):[];while(translationParts.length<parts.length)translationParts.push('');
  const fixedGlossary={...(bookJob?.glossary||{})};translationState={source:state.source||'',domain:item.domain||'general',mode:item.mode||'economy',parts,plan:parts.map(text=>({text,pages:[],blockIds:{}})),done:Math.min(Number(state.done)||0,parts.length),context:state.context||'',glossary:{...(state.glossary||{}),...fixedGlossary,...(state.manualGlossary||{})},manualGlossary:state.manualGlossary||{},fixedGlossary,previousSource:'',previousTranslation:'',pdfLayout:state.pdfLayout};
  // OCR that never finished goes on from the manifest, which keeps every batch already read and paid for.
@@ -962,7 +1068,7 @@ async function bookRunnerFree(wait){
  for(;;){
   const job=await api(`book-jobs/${encodeURIComponent(bookJob.id)}`).then(data=>upsertJob(data.job)).catch(error=>{if(error.status===404)throw error;return null;});
   renderBookPanel();renderStudyBooks();
-  if(!job||!wholeBook.heldElsewhere(job,bookRunner))return true;
+  if(!job||!wholeBook.heldElsewhere(job,bookRunner()))return true;
   if(!wait){bookBusy=true;const message=wholeBook.pauseMessage('busy',{data:{retryAfter:job.leaseSeconds}});bookStatus(message);status(message,'error');return false;}
   const stopped=await wholeBook.countdown(Math.min(10,Math.max(2,job.leaseSeconds)),{onTick:left=>{bookStatus(wholeBook.waitMessage('busy',left),{quiet:announced});announced=true;},stopped:()=>stopRequested});
   if(stopped){bookBusy=true;const message='Đã thôi chờ. Quyển này vẫn đang được dịch ở thiết bị khác; bấm Chờ rồi dịch tiếp khi muốn chờ tiếp.';bookStatus(message);status(message);return false;}
@@ -973,7 +1079,7 @@ async function runWholeBook(){
  // Pressed while another device runs the book: the student chose to wait for it.
  const waiting=bookBusy;busy(true);stopRequested=false;bookBusy=false;
  try{
-  await ensureStudyModel('pdf');
+  await pdfTools();wake??=wholeBook.createWakeLock();await ensureStudyModel('pdf');
   if(bookJob&&!await bookRunnerFree(waiting))return;
   if(bookJob&&await wholeBook.jobLockHeld(bookJob.id))throw new Error('Quyển này đang được dịch ở một tab khác của trình duyệt. Hãy dùng tab đó, hoặc đóng nó rồi thử lại.');
   // Waited for another device that has finished the book meanwhile: nothing is left to download or translate here.
@@ -988,7 +1094,7 @@ async function runWholeBook(){
   const updates=resumed?wholeBook.resumeUpdates(bookJob.pageStates,bookPagesEdited?bookChosenPages(bookJob.totalPages):null,bookPagesEdited):{};
   setBookMode(true);await ensureBookCover(source);bookNotes=[];
   let chunkText='',waitingFor='';
-  const run=bookRun=wholeBook.createBookRun({api,source,steps:bookSteps,shouldStop:()=>stopRequested,runner:bookRunner,reports:bookReports,ui:{
+  const run=bookRun=wholeBook.createBookRun({api,source,steps:bookSteps,shouldStop:()=>stopRequested,runner:bookRunner(),reports:bookReports(),ui:{
    job(job){const changed=job!==bookJob;bookJob=upsertJob(job);renderBookPanel();if(changed)renderStudyBooks();},
    chunk(chunk){bookWorking=chunk?new Set(chunk.pages):null;chunkText=chunk?`Đang dịch ${pageLabel(chunk.start,chunk.pages.at(-1))}…`:'';if(chunk)bookStatus(chunkText);renderBookPanel();},
    waiting(reason,left){if(!reason){waitingFor='';if(chunkText)bookStatus(chunkText);return;}bookStatus(wholeBook.waitMessage(reason,left),{quiet:waitingFor===reason});waitingFor=reason;},
@@ -1011,7 +1117,7 @@ function openDeleteDialog(id){
  openBookDialog('Xóa bản dịch?',body=>{const note=document.createElement('p');note.textContent=`Xóa “${item.title||'Bản dịch chưa đặt tên'}”${pages} khỏi lịch sử và Thư viện riêng? Bản dịch, PDF tiếng Việt và tệp gốc chỉ dùng cho phần này sẽ bị xóa vĩnh viễn.`;body.append(note);},()=>deleteHistory(id),'Xóa vĩnh viễn','Đang xóa…');
 }
 async function deleteHistory(id){
- const item=historyItems.find(entry=>entry.id===id),groups=wholeBook.sessionsByJob(historyItems,bookJobs),job=item&&bookJobs.find(entry=>groups.get(entry.id).some(part=>part.id===id));let result;
+ const item=historyItems.find(entry=>entry.id===id),groups=jobSessions(),job=item&&bookJobs.find(entry=>groups.get(entry.id)?.some(part=>part.id===id));let result;
  try{result=await api(`history/${encodeURIComponent(id)}`,{method:'DELETE'});}
  catch(error){if(error.status!==404)throw error;await loadHistory();status('Bản dịch này đã được xóa trước đó.');return;}
  historyItems=historyItems.filter(entry=>entry.id!==id);if(id===bookChunkId)bookChunkId='';
@@ -1026,16 +1132,18 @@ function openJobDeleteDialog(id){
  const job=bookJobs.find(entry=>entry.id===id);if(!job||running)return;
  openBookDialog('Xóa tiến độ dịch cả quyển?',body=>{const note=document.createElement('p');note.textContent=`Xóa bảng tiến độ của “${job.title}”? Các phần đã dịch vẫn nằm trong Lịch sử dịch và Thư viện riêng. Lần sau dịch cả quyển này, Hoa Trí bắt đầu bảng mới và bỏ qua các trang sách đã có.`;body.append(note);},async()=>{
   await api(`book-jobs/${encodeURIComponent(id)}`,{method:'DELETE'}).catch(error=>{if(error.status!==404)throw error;});
-  bookReports.save(id,[]);bookJobs=bookJobs.filter(entry=>entry.id!==id);if(bookJob?.id===id){bookJob=null;bookStatus('');updateTitleControls();}renderHistory();renderBookPanel();status('Đã xóa tiến độ dịch cả quyển.');
+  bookReports().save(id,[]);bookJobs=bookJobs.filter(entry=>entry.id!==id);if(bookJob?.id===id){bookJob=null;bookStatus('');updateTitleControls();}renderHistory();renderBookPanel();status('Đã xóa tiến độ dịch cả quyển.');
  },'Xóa tiến độ','Đang xóa…');
 }
 
+$('#source').addEventListener('beforeinput',event=>{if(keepUnsaved())event.preventDefault();});
 $('#source').addEventListener('input',()=>{resetHistoryIdentity();if(!bookChoiceActive())bookTarget={id:'',replaceChapterId:''};translationState=null;translationParts=[];clearPartStream();$('#translation').value='';$('#download').disabled=true;updateCount();});
 $('#content-title').addEventListener('input',event=>{event.currentTarget.setCustomValidity('');event.currentTarget.removeAttribute('aria-invalid');updateTitleControls();$('#content-title-hint').textContent=activeHistoryId?'Bấm Lưu tên để cập nhật lịch sử và Thư viện riêng.':'Tên này xuất hiện trong lịch sử, Thư viện riêng và tệp tải xuống.';});
 $('#save-title').addEventListener('click',()=>renameHistory().catch(fail));
 $('#domain').addEventListener('change',event=>{if(event.target.value==='math'&&!$('#glossary').value.trim())$('#glossary').value=MATH_GLOSSARY;if(translationState?.pdfLayout){translationState.domain=event.target.value;translationState.manualGlossary=parseStudyGlossary($('#glossary').value);Object.assign(translationState.glossary,translationState.manualGlossary);}else translationState=null;});
 $('#pdf-layout-enabled').addEventListener('change',()=>{if(selectedFile)selectionTask=selected(selectedFile).catch(fail);else if(bookJob)unbindBook();});
 $('#library-match-dismiss').addEventListener('click',()=>{$('#library-match').hidden=true;});
+$('#source-file').addEventListener('click',event=>{if(keepUnsaved())event.preventDefault();});
 $('#source-file').addEventListener('change',event=>{selectionTask=selected(event.target.files[0]).catch(error=>{fail(error);return false;});});
 $('#study-history-list').addEventListener('click',event=>{const remove=event.target.closest('[data-history-delete]');if(remove){openDeleteDialog(remove.dataset.historyDelete);return;}const merge=event.target.closest('[data-history-merge]');if(merge){openMergeDialog(merge.dataset.historyMerge);return;}const button=event.target.closest('[data-history-open]');if(button)openHistory(button.dataset.historyOpen).catch(fail);});
 $('#study-books-list').addEventListener('click',event=>{
@@ -1044,8 +1152,8 @@ $('#study-books-list').addEventListener('click',event=>{
 });
 $('#book-mode').addEventListener('change',event=>{if(running||event.target.name!=='book-mode')return;setBookMode(event.target.value==='book');bookFileStatus();if(bookMode&&selectedFile&&!bookJob)findBookJob(selectionVersion);});
 $('#book-pages').addEventListener('input',event=>{const input=event.currentTarget,total=bookJob?.totalPages||selectedTotalPages;bookPagesEdited=true;try{if(total)bookChosenPages(total);input.setCustomValidity('');input.removeAttribute('aria-invalid');}catch(error){input.setCustomValidity(error.message);input.setAttribute('aria-invalid','true');}renderBookPanel();});
-// Closing the tab mid-run loses only the page in progress, but the browser asks first.
-addEventListener('beforeunload',event=>{if(bookRun){event.preventDefault();event.returnValue='';}});
+// Closing the tab mid-run (or with progress not saved) would lose work, so the browser asks first.
+addEventListener('beforeunload',event=>{if(bookRun||runActive||unsaved){event.preventDefault();event.returnValue='';}});
 $('#source-lookup').addEventListener('click',()=>lookupTextarea($('#source')));
 attachHanziLookup($('#translation-parts'),{selector:'.region-description[lang|="zh"],.translation-document'});
 attachHanziLookup($('#pdf-dual-viewer'),{selector:'[data-hanzi-lookup]'});
@@ -1059,21 +1167,54 @@ $('#book-next-range').addEventListener('click',event=>{$('#page-range').value=ev
 $('#book-dialog-form').addEventListener('submit',async event=>{event.preventDefault();if(!dialogSubmit)return;const button=$('#book-dialog-submit');button.disabled=true;$('#book-dialog-status').textContent=dialogWorking;try{await dialogSubmit();closeBookDialog();}catch(error){$('#book-dialog-status').textContent=error.message;button.disabled=false;}});
 $('#book-dialog-cancel').addEventListener('click',closeBookDialog);
 $('#translate').addEventListener('click',()=>run().catch(fail));
-$('#check-gemini-model').addEventListener('click',()=>{if(running)return;ensureStudyModel($('#pdf-layout-enabled').checked&&(selectedFile?.name.toLowerCase().endsWith('.pdf')||translationState?.pdfLayout)?'pdf':'text').then(model=>status(`Đã kiểm tra ${model}. Bấm Bắt đầu dịch để tiếp tục.`)).catch(fail);});
-$('#stop').addEventListener('click',()=>{stopRequested=true;const message=bookRun?'Sẽ dừng khi xong trang đang dịch; tiến độ được lưu.':'Sẽ dừng sau yêu cầu đang chạy.';status(message);if(bookRun)bookStatus(message);});
+$('#check-gemini-model').addEventListener('click',()=>{if(running)return;ensureStudyModel($('#pdf-layout-enabled').checked&&(selectedFile?.name.toLowerCase().endsWith('.pdf')||translationState?.pdfLayout)?'pdf':'text').then(model=>status(`Khóa dùng được ${model}. Bấm Bắt đầu dịch để tiếp tục.`)).catch(fail);});
+$('#stop').addEventListener('click',()=>{stopRequested=true;ocrChoice?.(false);const message=bookRun?'Sẽ dừng khi xong trang đang dịch; tiến độ được lưu.':'Sẽ dừng sau yêu cầu đang chạy.';status(message);if(bookRun)bookStatus(message);});
 $('#api-key').addEventListener('input',event=>{event.currentTarget.setCustomValidity('');event.currentTarget.removeAttribute('aria-invalid');});
 $('#clear-key').addEventListener('click',()=>{sessionKey='';$('#api-key').value='';$('#key-status').textContent='Chưa nạp khóa cho phiên này.';status('Đã xóa khóa API khỏi phiên.');});
 $('#download').addEventListener('click',()=>{const blob=new Blob(['\uFEFF'+$('#translation').value],{type:'text/plain;charset=utf-8'}),url=URL.createObjectURL(blob),link=document.createElement('a');link.href=url;link.download=downloadFilename('txt');link.click();setTimeout(()=>URL.revokeObjectURL(url),1000);});
 $('#download-rich').addEventListener('click',()=>downloadRichHtml().catch(fail));
 $('#download-pdf').addEventListener('click',()=>{if(running)return;busy(true);exportLayoutPdf().catch(fail).finally(()=>busy(false));});
-$('#evaluate').addEventListener('click',()=>{const candidate=$('#translation').value.trim(),reference=$('#reference').value.trim();if(!candidate||!reference){fail(new Error('Cần có cả bản dịch AI và bản dịch chuẩn để đánh giá.'));return;}const result=evaluateStudyTranslation(candidate,reference);$('#evaluation-result').innerHTML=`<strong>BLEU-4 tham khảo: ${result.bleu}</strong><span>Công thức khớp tuyệt đối: ${result.formulaRetention}% (${result.formulasMatched}/${result.formulasTotal})</span><small>${result.candidateTokens} token bản dịch AI · ${result.referenceTokens} token ground truth</small>`;});
+$('#evaluate').addEventListener('click',()=>{
+ const candidate=$('#translation').value.trim(),reference=$('#reference').value.trim();if(!candidate||!reference){fail(new Error('Cần có cả bản dịch của AI và bản dịch mẫu để so sánh.'));return;}
+ const result=evaluateStudyTranslation(candidate,reference),number=new Intl.NumberFormat('vi-VN'),line=(tag,text)=>{const node=document.createElement(tag);node.textContent=text;return node;};
+ $('#evaluation-result').replaceChildren(line('strong',`Độ giống bản mẫu: ${number.format(result.bleu)}/100`),line('span',result.formulasTotal?`Công thức giữ đúng: ${number.format(result.formulaRetention)}% (${result.formulasMatched}/${result.formulasTotal})`:'Bản mẫu không có công thức để so.'),line('small',`So ${number.format(result.candidateTokens)} từ và dấu câu của bản AI với ${number.format(result.referenceTokens)} của bản mẫu.`));
+});
 // Same avatar + name control as the library header, so both pages look like one product.
 function renderHeaderAccount(user){
  const name=String(user.name||user.email||'Tài khoản').trim(),words=name.split(/\s+/u),initials=(words[0][0]+(words.length>1?words.at(-1)[0]:'')).toLocaleUpperCase('vi-VN');
  const link=document.createElement('a'),avatar=document.createElement('span'),label=document.createElement('span');
  link.className='header-account';link.href='/#account';link.title=name;link.setAttribute('aria-label',`Tài khoản của ${name}`);avatar.className='header-avatar';label.className='header-account-name';label.textContent=name;
- if(user.picture){const image=document.createElement('img');image.src=user.picture;image.alt='';image.width=32;image.height=32;image.referrerPolicy='no-referrer';avatar.append(image);}else avatar.textContent=initials;
- link.append(avatar,label);document.querySelector('.site-header-actions')?.replaceChildren(link);
+ if(/^https:\/\//u.test(String(user.picture||''))){const image=document.createElement('img');image.src=user.picture;image.alt='';image.width=32;image.height=32;image.referrerPolicy='no-referrer';avatar.append(image);}else avatar.textContent=initials;
+ link.append(avatar,label);document.querySelector('.site-header-actions .header-login')?.replaceWith(link);
 }
-fetch('/api/me',{credentials:'same-origin'}).then(response=>response.json()).then(data=>{if(data.authenticated){renderHeaderAccount(data.user);$('#account-status').hidden=true;$('#study-history').hidden=false;$('#study-history-count').textContent='· đang tải…';$('#account-status').textContent=`Đang học với tài khoản ${data.user.name||data.user.email}.`;loadHistory().then(()=>{if(bookJobs.some(job=>job.status!=='done'&&/[.f]/u.test(job.pageStates)))$('#study-history').open=true;}).catch(error=>{historyItems=[];renderHistory();$('#warnings').textContent+=`Không tải được lịch sử: ${error.message}\n`;});return;}$('#account-status').innerHTML='Hãy <a href="/#account">đăng nhập hoặc tạo tài khoản</a> trước khi dịch.';$('#translate').disabled=true;}).catch(()=>{$('#account-status').textContent='Không kiểm tra được trạng thái đăng nhập.';$('#translate').disabled=true;});
+$('#ocr-download-yes').addEventListener('click',()=>ocrChoice?.(true));
+$('#ocr-download-no').addEventListener('click',()=>ocrChoice?.(false));
+// The history explains its own loading failure in place, with Thử lại (contract 8).
+function loadHistoryView(){
+ historyError=null;$('#study-history-count').textContent='· đang tải…';$('#study-history-list').replaceChildren();
+ return loadHistory().then(()=>{if(bookJobs.some(job=>job.status!=='done'&&/[.f]/u.test(job.pageStates)))$('#study-history').open=true;}).catch(error=>{historyError=error;renderHistory();$('#study-history').open=true;});
+}
+// Signed out, the form could not be used: a card says why and links to sign in. A failed check offers Thử lại.
+function sessionCard(kind){
+ const card=$('#session-card'),title=document.createElement('h2'),text=document.createElement('p'),actions=document.createElement('div');title.id='session-card-title';actions.className='session-card-actions';
+ if(kind==='out'){
+  title.textContent='Đăng nhập để dùng Xưởng dịch';text.textContent='Xưởng dịch lưu nguyên tác, bản dịch và tiến độ vào tài khoản của bạn, nên cần đăng nhập trước khi chọn tài liệu. Khi dịch, bạn dùng khóa Gemini riêng, tạo miễn phí ở Google AI Studio.';
+  const login=signInLink('Đăng nhập hoặc tạo tài khoản'),library=document.createElement('a');login.href='/#account?sau=xuong-dich';login.className='primary';library.href='/';library.textContent='Đọc Học liệu không cần đăng nhập';actions.append(login,library);
+ }else{
+  title.textContent='Chưa kiểm tra được phiên đăng nhập';text.textContent='Mạng đang chập chờn hoặc máy chủ tạm thời chưa trả lời. Hãy bấm Thử lại sau giây lát.';
+  const retry=document.createElement('button');retry.type='button';retry.className='primary';retry.textContent='Thử lại';retry.addEventListener('click',()=>checkSession().then(()=>($('#session-card').hidden?$('#main'):$('#session-card .primary'))?.focus()));actions.append(retry);
+ }
+ card.replaceChildren(title,text,actions);card.hidden=false;
+}
+function checkSession(){
+ document.body.dataset.session='checking';$('#session-card').hidden=true;$('#account-status').hidden=false;$('#account-status').textContent='Đang kiểm tra phiên đăng nhập…';
+ return fetch('/api/me',{credentials:'same-origin'}).then(response=>{if(!response.ok)throw new Error(`HTTP ${response.status}`);return response.json();}).then(data=>{
+  if(!data?.authenticated){document.body.dataset.session='out';sessionKnown(false);$('#translate').disabled=true;sessionCard('out');return;}
+  document.body.dataset.session='in';sessionKnown(true);renderHeaderAccount(data.user);$('#account-status').hidden=true;$('#study-history').hidden=false;$('#account-status').textContent=`Đang học với tài khoản ${data.user.name||data.user.email}.`;$('#translate').disabled=running;updateRunBar();loadHistoryView();
+ }).catch(()=>{document.body.dataset.session='error';$('#translate').disabled=true;sessionCard('error');});
+}
+// The page ends above the floating action bar on phones, and a focused field scrolls above it, however tall the bar is
+// (a save warning, Dừng, the progress line).
+if(globalThis.ResizeObserver)new ResizeObserver(([entry])=>document.documentElement.style.setProperty('--run-bar-height',`${Math.ceil(entry.target.getBoundingClientRect().height)}px`)).observe($('#run-bar'));
+checkSession();
 updateCount();

@@ -86,3 +86,21 @@ test('Logged routes keep their shape but lose ids and hashes',()=>{
  assert.equal(routeLabel(`/api/my/study/sources/${'ab'.repeat(32)}`),'/api/my/study/sources/:id');
  assert.equal(routeLabel('/api/jobs/123/run'),'/api/jobs/:id/run');assert.equal(routeLabel('/api/my/study/pdf-layout/extract'),'/api/my/study/pdf-layout/extract');
 });
+
+test('Covers: the ?v=<cover_key> URL is cached for good, any other is revalidated by ETag; parts and covers are not indexed',async()=>{
+ let cancelled=0;
+ const env={DB:{prepare(sql){return {bind(){return this;},async first(){return sql.includes('cover_key')?{cover_key:'covers/s/k2'}:sql.includes('FROM chapters')?{title:'Bài 1',story_id:'s',file_key:'reader/c.pdf'}:{id:'s',visibility:'public'};}};}},
+  FILES:{async get(key){return key.startsWith('covers/')?{body:new ReadableStream({start(c){c.enqueue(new Uint8Array([0xff,0xd8,0xff]));c.close();},cancel(){cancelled++;}}),httpEtag:'"etag-k2"',httpMetadata:{contentType:'image/jpeg'}}:{body:new TextEncoder().encode('%PDF-1.7')};}}};
+ const current=await call('/api/covers/s?v=covers%2Fs%2Fk2',{},env);
+ assert.equal(current.status,200);assert.equal(current.headers.get('Cache-Control'),'private, max-age=31536000, immutable');
+ assert.equal(current.headers.get('ETag'),'"etag-k2"');assert.equal(current.headers.get('Content-Type'),'image/jpeg');assert.equal(current.headers.get('X-Robots-Tag'),'noindex');
+ assert.deepEqual([...new Uint8Array(await current.arrayBuffer())],[0xff,0xd8,0xff]);
+ // An old key (the cover was replaced) or no key: the browser must ask again, and an unchanged cover costs a 304.
+ for(const path of ['/api/covers/s?v=covers%2Fs%2Fk1','/api/covers/s']){
+  const response=await call(path,{},env);assert.equal(response.headers.get('Cache-Control'),'no-cache',path);assert.equal(response.headers.get('X-Robots-Tag'),'noindex',path);
+ }
+ const unchanged=await call('/api/covers/s',{headers:{'If-None-Match':'"etag-k2"'}},env);
+ assert.equal(unchanged.status,304);assert.equal(await unchanged.text(),'');assert.equal(cancelled,1,'the stored image is not read for a 304');
+ assert.equal((await call('/api/covers/s',{headers:{'If-None-Match':'"etag-k1"'}},env)).status,200);
+ const part=await call('/api/chapter-file/chapter-1',{},env);assert.equal(part.status,200);assert.equal(part.headers.get('X-Robots-Tag'),'noindex');
+});

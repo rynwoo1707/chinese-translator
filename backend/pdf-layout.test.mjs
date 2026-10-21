@@ -52,6 +52,29 @@ test('PDF config reports availability and limits without disclosing the service 
  await assert.rejects(()=>pdfLayoutRoute(new Request(origin+base+'/config'),{PDF_LAYOUT_SERVICE_URL:'http://external.example.test',PDF_LAYOUT_SERVICE_TOKEN:'secret'},base+'/config',reader),/HTTPS/);
 });
 
+test('The preview font is cached by the browser for a day and revalidated with its ETag, without asking the service again',async t=>{
+ // Its own service URL: the Worker's font cache is keyed by it, so other tests start cold.
+ const env={...environment().env,PDF_LAYOUT_SERVICE_URL:'https://font-cache.example.test/v1/'},css='@font-face{font-family:HoaTriPDF;src:url(data:font/ttf;base64,AAEAAA==)}',calls=[];
+ t.mock.method(globalThis,'fetch',async(url,options)=>{calls.push({url:String(url),method:options.method,auth:options.headers.Authorization});return Response.json({css});});
+ const get=headers=>pdfLayoutRoute(new Request(origin+base+'/font',{headers}),env,base+'/font',reader);
+ const first=await get();
+ assert.equal(first.status,200);assert.deepEqual(await first.json(),{css});
+ assert.equal(first.headers.get('Cache-Control'),'private, max-age=86400');assert.match(first.headers.get('Content-Type'),/^application\/json/u);
+ const etag=first.headers.get('ETag');assert.match(etag,/^"[a-f\d]{32}"$/u);
+ assert.deepEqual(calls,[{url:'https://font-cache.example.test/v1/font',method:'GET',auth:'Bearer service-secret'}]);
+ // The browser's revalidation (also with the weak tag a compressing CDN may hand out) costs no body and no service call.
+ for(const tag of [etag,`W/${etag}`,`"other", ${etag}`]){const again=await get({'If-None-Match':tag});assert.equal(again.status,304);assert.equal(await again.text(),'');assert.equal(again.headers.get('ETag'),etag);assert.equal(again.headers.get('Cache-Control'),'private, max-age=86400');}
+ const changed=await get({'If-None-Match':'"stale"'});assert.equal(changed.status,200);assert.deepEqual(await changed.json(),{css});
+ assert.equal(calls.length,1,'the Worker answered from its own short cache');
+});
+
+test('A preview font answer without @font-face is refused instead of being cached',async t=>{
+ const env={...environment().env,PDF_LAYOUT_SERVICE_URL:'https://font-broken.example.test/v1/'};let calls=0;
+ t.mock.method(globalThis,'fetch',async()=>{calls++;return Response.json({css:calls===1?'':'@font-face{font-family:HoaTriPDF}'});});
+ await assert.rejects(()=>pdfLayoutRoute(new Request(origin+base+'/font'),env,base+'/font',reader),/phông chữ không hợp lệ/u);
+ const fixed=await pdfLayoutRoute(new Request(origin+base+'/font'),env,base+'/font',reader);assert.equal(fixed.status,200);assert.equal(calls,2);
+});
+
 test('PDF endpoints require an authenticated same-origin student session',async()=>{
  const {env}=environment(),path=base+'/config',url=new URL(origin+path);
  const unauthenticated={...env,DB:{prepare(){return {bind(){return this;},async first(){return null;}};}}};

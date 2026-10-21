@@ -208,13 +208,15 @@ export function cardModel({chars,start,end,tapped=start,entries=[],record,radica
 }
 
 export class DictionaryError extends Error{constructor(code,message){super(message||code);this.name='DictionaryError';this.code=code;}}
-// Loader over the static files. Errors are DictionaryError with code 'missing' (not built or not deployed: the SPA
-// fallback answers missing files with index.html, so only JSON responses count) or 'network' (worth a retry).
+// Loader over the static files. Errors are DictionaryError with code 'missing' (not built or not deployed: a missing
+// file is answered with an HTML page — the 404 page, or index.html on older deployments — so only JSON responses
+// count) or 'network' (worth a retry).
 export function createDictionary({fetch:fetcher=(...args)=>globalThis.fetch(...args),url=MANIFEST_URL,cacheSize=160}={}){
  let manifestPromise=null;
  const pending=new Map(),indexes=new Map(),entries=new Map(),hints={trad:new Set(),simp:new Set()};
- // A "missing" answer is asked once more with revalidation: the SPA fallback serves index.html for a missing file, and
- // under v/<id>/ it carries the year-long immutable header, so a browser would otherwise keep that wrong answer.
+ // A "missing" answer is asked once more with revalidation: a missing file gets an HTML page (the 404 page, or
+ // index.html on older deployments), and under v/<id>/ it carries the year-long immutable header, so a browser would
+ // otherwise keep that wrong answer.
  async function getJson(path,reload=false){
   let response;
   try{response=await fetcher(path,reload?{credentials:'same-origin',cache:'no-cache'}:{credentials:'same-origin'});}catch(error){throw new DictionaryError('network',error?.message);}

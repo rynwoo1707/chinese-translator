@@ -15,13 +15,16 @@ import {listStudyModels} from './gemini-models.js';
 import {fileDisposition} from './download-filename.js';
 import {readerTerms} from './reader-glossary.js';
 import {saveCover} from './covers.js';
-import {json,withSecurityHeaders,limitBody,crossOrigin,originRefused,errorResponse,isLoopback} from './http.js';
+import {json,withSecurityHeaders,limitBody,crossOrigin,originRefused,errorResponse,isLoopback,logEvent,routeLabel} from './http.js';
+import {sitePage} from './site-pages.js';
 import {healthRoute} from './health.js';
 import {accountRoute,adminAccountRoute} from './account.js';
 import {rateLimit,dailyMax} from './rate-limit.js';
 import {SAMPLE_PREFIX,validSlug,isSampleBook,libraryRows,readChapters,libraryPublicRoute,libraryAdminRoute,bookPagesReady,rangedPdfResponse} from './library-books.js';
 import {removeFile} from './study-history.js';
 const id=()=>crypto.randomUUID();
+// Published parts and covers are reached from the reader, never meant as search results of their own.
+function noindex(response){try{response.headers.set('X-Robots-Tag','noindex');return response;}catch{const copy=new Response(response.body,response);copy.headers.set('X-Robots-Tag','noindex');return copy;}}
 const TRANSLATION_CHUNK_SIZE=10000;
 const GENRES=['Chuyên khảo · Nghiên cứu','Toán học · STEM','Lịch sử Trung Hoa','Cổ văn · Hán Nôm','Triết học · Tư tưởng','Văn hóa · Xã hội','Địa lý · Khảo cổ','Giáo dục','Ngôn ngữ học','Tài liệu khác'];
 function required(value,max=200){if(typeof value!=='string'||!value.trim()||value.length>max)throw new Error('Nội dung trống hoặc vượt giới hạn cho phép.');return value.trim();}
@@ -125,7 +128,10 @@ export async function processJob(jobId,env){
 // routes, then the routes. Whatever a route throws becomes a JSON error; internal ones are logged with the request's ray.
 export default {async fetch(request,env,ctx){
  const url=new URL(request.url),path=url.pathname;
- if(!path.startsWith('/api/'))return env.ASSETS.fetch(request);
+ if(!path.startsWith('/api/')){
+  try{return await sitePage(request,env,url);}
+  catch(error){logEvent('page_error',{route:routeLabel(path),name:error?.name||typeof error,message:String(error?.message||'').slice(0,300)});return env.ASSETS.fetch(request);}
+ }
  let body;
  try{
   const health=await healthRoute(request,env,path);if(health)return withSecurityHeaders(health);
@@ -163,7 +169,7 @@ async function route(request,env,ctx,url,path){
    if(!chapter||!await canReadStory(request,env,chapter.story_id,admin))return json({error:'Không tìm thấy tài liệu hoặc bạn không có quyền đọc.'},404);
    if(!chapter.file_key)return json({error:'Không tìm thấy tài liệu đã đăng.'},404);
    // By byte ranges, like the originals: "Đọc song ngữ" fetches only the pages it shows of a long part too.
-   return rangedPdfResponse(request,env,chapter.file_key,'Không tìm thấy tài liệu đã đăng.',{disposition:fileDisposition(`${chapter.title||'Bản dịch Hoa Trí'}.vi.pdf`)});
+   return noindex(await rangedPdfResponse(request,env,chapter.file_key,'Không tìm thấy tài liệu đã đăng.',{disposition:fileDisposition(`${chapter.title||'Bản dịch Hoa Trí'}.vi.pdf`)}));
   }
   const coverMatch=path.match(/^\/api\/covers\/([^/]+)$/);
   if(coverMatch&&method==='GET'){
@@ -171,7 +177,11 @@ async function route(request,env,ctx,url,path){
    const coverInfo=await env.DB.prepare('SELECT cover_key FROM stories WHERE id=?').bind(coverMatch[1]).first();
    const cover=coverInfo?.cover_key?await env.FILES.get(coverInfo.cover_key):null;
    if(!cover)return json({error:'Chưa có ảnh bìa.'},404);
-   return new Response(cover.body,{headers:{'Content-Type':cover.httpMetadata.contentType,'Cache-Control':'no-cache','X-Content-Type-Options':'nosniff'}});
+   // The library asks for ?v=<cover_key>; every new cover gets a new key, so that URL never changes content.
+   // private: a private book's cover needs the reader's cookie.
+   const etag=cover.httpEtag||null,headers={'Content-Type':cover.httpMetadata?.contentType||'application/octet-stream','Cache-Control':url.searchParams.get('v')===coverInfo.cover_key?'private, max-age=31536000, immutable':'no-cache','X-Content-Type-Options':'nosniff','X-Robots-Tag':'noindex',...(etag?{ETag:etag}:{})};
+   if(etag&&request.headers.get('If-None-Match')===etag){await cover.body?.cancel?.();return new Response(null,{status:304,headers});}
+   return new Response(cover.body,{headers});
   }
   const libraryResponse=await libraryPublicRoute(request,env,path,admin);if(libraryResponse)return libraryResponse;
   if(path==='/api/requests'&&method==='POST'){

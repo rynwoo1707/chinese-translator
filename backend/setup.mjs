@@ -140,5 +140,5 @@ else console.log(`
 ${problems.length?'Đã làm xong các bước còn lại; sửa LỖI ở trên rồi chạy lại "npm run setup".':'Cài đặt xong.'} Chạy app (2 cửa sổ terminal, đều ở thư mục dự án):
   1) ${npm} run dev:pdf-layout   (dịch vụ PDF giữ bố cục, cổng ${layoutPort})
   2) ${npm} run dev              (web, mở địa chỉ wrangler in ra, thường là http://127.0.0.1:8787)
-Sau đó: tạo tài khoản ở /#account, mở /study.html, nhập "Tên nội dung", dán khóa Gemini API của bạn và chọn tệp để dịch.
+Sau đó: tạo tài khoản ở /#account, mở /study, nhập "Tên nội dung", dán khóa Gemini API của bạn và chọn tệp để dịch.
 `);

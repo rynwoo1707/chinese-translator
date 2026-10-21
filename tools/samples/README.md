@@ -26,9 +26,9 @@ Công cụ làm bản dịch mẫu giữ bố cục trang **mà không gọi Gem
 ## Các bước
 
 ```
-npm run samples -- init campbell --pdf "D:\Sach\campbell.pdf" --title "Sinh học Campbell"
+npm run samples -- init tai-lieu-mau --pdf "D:\Tai-lieu\tai-lieu-mau.pdf" --title "Tài liệu mẫu"
 ```
-Lệnh này chép PDF thành `samples/campbell/source.pdf` và tạo `sample.json`. Tên tệp gốc dài hay có chữ Trung đều được. Mở `sample.json` để điền:
+Lệnh này chép PDF thành `samples/tai-lieu-mau/source.pdf` và tạo `sample.json`. Tên tệp gốc dài hay có chữ Trung đều được. Mở `sample.json` để điền:
 
 | Trường | Ý nghĩa |
 |---|---|
@@ -41,14 +41,14 @@ Lệnh này chép PDF thành `samples/campbell/source.pdf` và tạo `sample.jso
 | `translateCover` | `false`: bìa giữ ảnh gốc và được bỏ khỏi `ranges`. |
 | `publishSource` | `"excerpt"` (mặc định): người đọc nhận bản gốc gồm bìa và các trang đã dịch. `"full"`: cả tệp gốc (tối đa 100 MB), chỉ khi được phép công bố cả quyển. |
 | `glossary` | Thuật ngữ Trung → Việt bắt buộc dùng, ví dụ `{"细胞": "tế bào"}`. |
-| `rights` | `{"confirmed": true, "note": "ai cho phép, phạm vi"}`. |
+| `rights` | Mặc định nên ghi `{"localOnly": true, "note": "…"}`: sách chỉ được đăng lên máy chủ trên máy này, không bao giờ lên trang công khai. Chỉ khi chủ sách cho phép công bố các trang gốc và bản dịch mới đổi thành `{"confirmed": true, "note": "ai cho phép, phạm vi"}`. Sách còn bản quyền luôn giữ `localOnly`. |
 
 Sau đó chạy:
 
 ```
-npm run samples -- extract campbell
+npm run samples -- extract tai-lieu-mau
 ```
-Lệnh này tạo `samples/campbell/work/`:
+Lệnh này tạo `samples/tai-lieu-mau/work/`:
 - `RULES.md`: quy tắc đọc ảnh và dịch, chép nguyên văn quy tắc Hoa Trí gửi Gemini;
 - mỗi phần một thư mục `c01/`, `c02/`…: `blocks.json` (danh sách đoạn), `texts.template.json`, ảnh trang `pages/`, ảnh đoạn trang scan `crops/` và `sheets/`, ảnh công thức `inlines/`.
 
@@ -57,28 +57,28 @@ PDF lớn hơn 25 MB vẫn dùng được: công cụ cắt riêng các trang đ
 Người dịch đọc `work/RULES.md`, chép `texts.template.json` thành `texts.json` trong cùng thư mục rồi điền. Sau đó lặp lại cho đến khi không còn lỗi:
 
 ```
-npm run samples -- check campbell c01      # mọi lỗi và cảnh báo trong một lượt
-npm run samples -- render campbell c01     # check rồi dựng render/c01.vi.pdf và ảnh render/p<trang>.compare.png
-npm run samples -- status campbell         # phần nào đã sẵn sàng đăng
+npm run samples -- check tai-lieu-mau c01      # mọi lỗi và cảnh báo trong một lượt
+npm run samples -- render tai-lieu-mau c01     # check rồi dựng render/c01.vi.pdf và ảnh render/p<trang>.compare.png
+npm run samples -- status tai-lieu-mau         # phần nào đã sẵn sàng đăng
 ```
 Nếu chữ Việt không vừa khung, `render` báo lỗi. Hãy dịch gọn hơn (không bỏ ý). `--preview-overflow` cho xem bản lỗi nhưng bản đó không đăng được.
 
 ## Đăng, thay, gỡ
 
 ```
-npm run samples -- publish campbell --draft              # bản nháp: chỉ quản trị viên xem được
-npm run samples -- publish campbell --replace            # công khai, thay bản đã đăng (giữ nguyên mã sách)
-npm run samples -- unpublish campbell                    # ẩn sách, giữ nguyên mã; publish --replace để hiện lại
-npm run samples -- remove campbell --yes                 # xóa sách khỏi máy chủ, giữ nguyên thư mục làm việc
+npm run samples -- publish tai-lieu-mau --draft              # bản nháp: chỉ quản trị viên xem được
+npm run samples -- publish tai-lieu-mau --replace            # công khai, thay bản đã đăng (giữ nguyên mã sách)
+npm run samples -- unpublish tai-lieu-mau                    # ẩn sách, giữ nguyên mã; publish --replace để hiện lại
+npm run samples -- remove tai-lieu-mau --yes                 # xóa sách khỏi máy chủ, giữ nguyên thư mục làm việc
 ```
 - `--target` mặc định là `local` (`http://127.0.0.1:8787`, máy chủ mở bằng `start.cmd`).
 - Đăng vào thư viện thật trên máy này sẽ ghi vào `.wrangler/state`. Hãy sao lưu thư mục đó trước.
-- Lên máy chủ thật:
+- Lên máy chủ thật, chỉ với sách có `"rights": {"confirmed": true}` và không có `"localOnly": true` (`localOnly` chặn mọi máy chủ ngoài máy này):
   ```
   $env:HOATRI_ADMIN_TOKEN="…"
-  npm run samples -- publish campbell --target https://ten-mien
+  npm run samples -- publish tai-lieu-mau --target https://ten-mien
   ```
-  (PowerShell; bỏ trống biến này thì lệnh sẽ hỏi mã.) `"rights": {"localOnly": true}` chặn mọi máy chủ ngoài máy này.
+  (PowerShell; bỏ trống biến này thì lệnh sẽ hỏi mã.)
 - Còn cảnh báo thì lệnh dừng lại hỏi. Thêm `--yes` để đăng luôn.
 - Kết quả được ghi vào `samples/<mã>/published.json` (mã sách, các phần, PDF gốc, thời gian; không có mã quản trị).
 

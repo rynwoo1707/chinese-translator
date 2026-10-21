@@ -54,6 +54,26 @@ async function oneAtATime(env,reader,cap,work){
  try{const capped=await cap(env,reader);return capped||await work();}
  finally{await lease.release();}
 }
+// The preview font (~800 KB of base64 CSS) is the same for every student: the browser keeps it a day, then asks again
+// with its ETag and gets a 304 when nothing changed. The Worker keeps it a few minutes, so a class opening the viewer
+// at once does not fetch it from the service once per student.
+const FONT_TTL_MS=10*60*1000;
+let fontCache=null;
+async function previewFont(env){
+ const source=serviceUrl(env)?.href||'';
+ if(fontCache?.source===source&&fontCache.expires>Date.now())return fontCache;
+ const result=await service(env,'font');if(typeof result?.css!=='string'||!result.css.includes('@font-face'))throw new Error('Dịch vụ PDF trả phông chữ không hợp lệ.');
+ const body=JSON.stringify({css:result.css}),digest=new Uint8Array(await crypto.subtle.digest('SHA-256',new TextEncoder().encode(body)));
+ fontCache={source,body,etag:`"${[...digest.subarray(0,16)].map(x=>x.toString(16).padStart(2,'0')).join('')}"`,expires:Date.now()+FONT_TTL_MS};
+ return fontCache;
+}
+// If-None-Match lists tags; a CDN that compressed the body may have made ours weak (W/"…"), which still names it.
+const etagMatches=(header,etag)=>String(header||'').split(',').map(tag=>tag.trim().replace(/^W\//u,'')).some(tag=>tag==='*'||tag===etag);
+async function fontResponse(request,env){
+ const font=await previewFont(env),headers={'Cache-Control':'private, max-age=86400','ETag':font.etag};
+ if(etagMatches(request.headers.get('If-None-Match'),font.etag))return new Response(null,{status:304,headers});
+ return new Response(font.body,{headers:{...headers,'Content-Type':'application/json; charset=utf-8'}});
+}
 function validAsset(id){if(!/^[a-f\d-]{36}$/iu.test(id||''))throw new Error('Mã PDF không hợp lệ.');return id;}
 // A re-extracted selection keeps the stored page numbers; block, sheet and strip IDs follow them.
 function renumberPage(page,number){
@@ -102,7 +122,7 @@ async function extractChunk(env,reader,form,file){
 export async function pdfLayoutRoute(request,env,path,reader){
  if(!path.startsWith(base))return null;
  if(path===base+'/config'&&request.method==='GET')return reply({configured:Boolean(serviceUrl(env)),maxBytes:25*1024*1024,maxPages:20});
- if(path===base+'/font'&&request.method==='GET')return reply(await service(env,'font'));
+ if(path===base+'/font'&&request.method==='GET')return fontResponse(request,env);
  if(!env.FILES?.get||!env.FILES?.put)return reply({error:'Thiếu lưu trữ PDF.'},503);
  const asset=path.match(/^\/api\/my\/study\/pdf-layout\/assets\/([a-f\d-]{36})\/(manifest|original|translated)$/iu);
  if(asset&&request.method==='GET'){

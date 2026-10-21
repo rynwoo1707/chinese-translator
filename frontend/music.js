@@ -13,7 +13,8 @@ function player(){
 function sync(){const button=document.querySelector('#music-toggle');if(!button)return;button.setAttribute('aria-pressed',String(enabled));button.textContent=enabled?'Ⅱ Dừng nhạc':'♫ Bật nhạc nền';button.title=enabled&&!playing?'Nhạc sẽ phát sau lần tương tác đầu tiên; bấm để tắt':'Nhạc nền The Weight of Unspoken Days';}
 async function startMusic(){if(!enabled||playing||starting)return;starting=true;try{await player().play();}finally{starting=false;sync();}}
 export function stopMusic(){enabled=false;remember();audio?.pause();sync();}
-export function musicMarkup(){return `<aside class="background-music" aria-label="Nhạc nền"><button id="music-toggle" type="button" aria-pressed="${enabled}">${enabled?'Ⅱ Dừng nhạc':'♫ Bật nhạc nền'}</button></aside>`;}
+// Drawn inside the page footer (a group, not a landmark), never floating over the content.
+export function musicMarkup(){return `<div class="background-music" role="group" aria-label="Nhạc nền"><button id="music-toggle" type="button" aria-pressed="${enabled}">${enabled?'Ⅱ Dừng nhạc':'♫ Bật nhạc nền'}</button></div>`;}
 export function bindMusic(onError){const button=document.querySelector('#music-toggle');if(!button)return;sync();button.onclick=()=>{if(enabled)stopMusic();else{enabled=true;remember();sync();void startMusic().catch(error=>onError(error.message));}};void startMusic().catch(()=>{});}
 function unlock(event){if(event.target.closest?.('#music-toggle')||!document.querySelector('#music-toggle')||!enabled)return;void startMusic().catch(()=>{});}
 document.addEventListener('pointerdown',unlock);

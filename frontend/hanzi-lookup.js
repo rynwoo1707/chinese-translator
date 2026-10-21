@@ -37,12 +37,12 @@ const ATTRIBUTION='Dữ liệu: CC-CEDICT (MDBG) và CVDICT (Phong Phan) theo CC
 
 // Every rule is scoped under .hanzi-panel and outweighs the pages' bare element rules (study.css lifts every button on
 // hover; style.css restyles h2, label and input), so the panel looks the same on every page.
-export const hanziStyles=`.hanzi-panel{--hz-bg:#fffdf7;--hz-text:#283127;--hz-muted:#5d6656;--hz-line:#ddd8c6;--hz-accent:#a44636;--hz-soft:#f3f0e4;--hz-button:#fff;--hz-focus:#5f7550;--hz-zh:'Noto Serif SC','Noto Sans SC','Source Han Serif SC','Songti SC','SimSun','Microsoft YaHei',serif;position:fixed;z-index:1050;right:16px;bottom:16px;box-sizing:border-box;width:380px;max-width:calc(100vw - 32px);max-height:calc(100vh - 32px);display:flex;flex-direction:column;margin:0;padding:0;background:var(--hz-bg);color:var(--hz-text);border:1px solid var(--hz-line);border-radius:14px;box-shadow:0 16px 40px rgba(39,53,35,.22);font:14px/1.55 'Be Vietnam Pro',system-ui,sans-serif;text-align:left;letter-spacing:normal}
+export const hanziStyles=`.hanzi-panel{--hz-bg:#fffdf7;--hz-text:#283127;--hz-muted:#5d6656;--hz-line:#ddd8c6;--hz-accent:#a44636;--hz-soft:#f3f0e4;--hz-button:#fff;--hz-focus:#536b43;--hz-zh:'Noto Serif SC','Noto Sans SC','Source Han Serif SC','Songti SC','SimSun','Microsoft YaHei',serif;position:fixed;z-index:1050;right:16px;bottom:16px;box-sizing:border-box;width:380px;max-width:calc(100vw - 32px);max-height:calc(100vh - 32px);display:flex;flex-direction:column;margin:0;padding:0;background:var(--hz-bg);color:var(--hz-text);border:1px solid var(--hz-line);border-radius:14px;box-shadow:0 16px 40px rgba(39,53,35,.22);font:14px/1.55 'Be Vietnam Pro',system-ui,sans-serif;text-align:left;letter-spacing:normal}
 .hanzi-panel[data-theme=night]{--hz-bg:#222b28;--hz-text:#e1e6dd;--hz-muted:#aeb8aa;--hz-line:#3d4844;--hz-accent:#eaa995;--hz-soft:#2c3632;--hz-button:#303a36;--hz-focus:#c3d3b1;box-shadow:0 16px 40px rgba(0,0,0,.45)}
 .hanzi-panel[hidden],.hanzi-panel [hidden]{display:none!important}.hanzi-panel *{box-sizing:border-box}
 .hanzi-panel button{font:inherit;font-weight:500;color:inherit;background:var(--hz-button);border:1px solid var(--hz-line);border-radius:9px;min-height:36px;padding:5px 10px;margin:0;cursor:pointer;line-height:1.4}
 .hanzi-panel button:hover:not(:disabled){transform:none;box-shadow:none;border-color:var(--hz-muted);background:var(--hz-soft)}.hanzi-panel button:disabled{opacity:.45;cursor:default;border-color:var(--hz-line);background:var(--hz-button)}
-.hanzi-panel button:focus-visible,.hanzi-panel input:focus-visible,.hanzi-panel a:focus-visible,.hanzi-panel summary:focus-visible{outline:2px solid var(--hz-focus);outline-offset:2px}
+.hanzi-panel button:focus-visible,.hanzi-panel input:focus-visible,.hanzi-panel a:focus-visible,.hanzi-panel summary:focus-visible{outline:3px solid var(--hz-focus);outline-offset:2px}
 .hz-head{display:flex;align-items:center;gap:8px;padding:6px 6px 6px 16px;border-bottom:1px solid var(--hz-line);background:none}
 .hz-head h2{flex:1;min-width:0;margin:0;font-size:14px;font-weight:600;line-height:1.4;overflow-wrap:anywhere;font-family:inherit;letter-spacing:normal}
 .hanzi-panel .hz-close{width:36px;padding:0;font-size:20px;line-height:1;border-color:transparent;background:transparent}
@@ -50,6 +50,7 @@ export const hanziStyles=`.hanzi-panel{--hz-bg:#fffdf7;--hz-text:#283127;--hz-mu
 .hz-note{margin:0 0 10px;padding:8px 10px;border-radius:8px;background:var(--hz-soft);color:var(--hz-muted);font-size:12.5px}
 .hz-search{display:grid;gap:4px;margin-bottom:10px}.hz-search label{font-size:12px;color:var(--hz-muted)}
 .hz-search input{width:100%;min-height:40px;margin:0;padding:6px 10px;border:1px solid var(--hz-line);border-radius:9px;background:var(--hz-button);color:inherit;font:18px/1.4 var(--hz-zh)}
+@media(pointer:coarse){.hanzi-panel .hz-close{width:44px;min-height:44px}.hz-search input{min-height:44px}}
 .hz-strip-label{margin:0 0 4px;font-size:12px;color:var(--hz-muted)}
 .hz-strip{margin:0 0 10px;padding:2px 0 6px;max-height:8.4em;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere;border-bottom:1px solid var(--hz-line);font:21px/1.95 var(--hz-zh)}
 .hanzi-panel .hz-strip .hz-c{min-height:0;min-width:0;padding:0 2px;border:0;border-radius:5px;background:none;font:inherit;font-weight:400;line-height:inherit;vertical-align:baseline}
@@ -61,13 +62,13 @@ export const hanziStyles=`.hanzi-panel{--hz-bg:#fffdf7;--hz-text:#283127;--hz-mu
 .hz-readings{list-style:none;margin:0;padding:0}.hz-reading{margin:0;padding:8px 0;border-top:1px dashed var(--hz-line)}.hz-reading:first-child{border-top:0;padding-top:0}.hz-minor{opacity:.82}
 .hz-pron{margin:0 0 4px;display:flex;flex-wrap:wrap;align-items:baseline;gap:2px 14px}.hz-pinyin{font-size:18px;font-weight:600}.hz-hv b{font-weight:600}
 .hz-label{margin:2px 0;display:flex;flex-wrap:wrap;align-items:center;gap:6px;font-size:12px;color:var(--hz-muted)}
-.hz-badge{display:inline-block;padding:0 7px;border:1px solid var(--hz-line);border-radius:999px;background:var(--hz-soft);font-size:11px;line-height:1.6;color:var(--hz-muted);cursor:help}
+.hz-badge{display:inline-block;padding:0 7px;border:1px solid var(--hz-line);border-radius:999px;background:var(--hz-soft);font-size:12px;line-height:1.6;color:var(--hz-muted);cursor:help}
 .hz-senses{margin:0;padding-left:18px}.hz-senses li{margin:1px 0;overflow-wrap:anywhere}
 .hz-en{margin-top:4px}.hz-en .hz-senses{font-size:13px;color:var(--hz-muted)}.hz-cl{margin:4px 0 0;font-size:13px}
 .hz-section{margin-top:12px}.hz-section h3{margin:0 0 6px;font-size:12px;font-weight:600;line-height:1.4;color:var(--hz-muted);font-family:inherit;letter-spacing:normal}
 .hz-row{display:flex;flex-wrap:wrap;gap:6px}.hz-row button{display:inline-flex;align-items:baseline;gap:6px}.hz-zh{font-family:var(--hz-zh);font-size:17px}
 .hz-meta{margin:12px 0 0;font-size:13px;color:var(--hz-muted)}.hz-actions{display:flex;flex-wrap:wrap;gap:6px;margin-top:14px}
-.hz-foot{padding:4px 16px 10px;border-top:1px solid var(--hz-line);background:none;font-size:11px;line-height:1.5;color:var(--hz-muted);text-align:left;letter-spacing:normal}
+.hz-foot{padding:4px 16px 10px;border-top:1px solid var(--hz-line);background:none;font-size:12px;line-height:1.5;color:var(--hz-muted);text-align:left;letter-spacing:normal}
 .hz-toggle{display:flex;align-items:center;gap:8px;min-height:36px;margin:0;font-size:12.5px;color:var(--hz-text);cursor:pointer}.hz-toggle input{flex:none;width:18px;height:18px;margin:0;padding:0;accent-color:var(--hz-accent)}
 .hz-attribution{margin:0}.hz-attribution a{color:inherit;text-decoration:underline}
 .hanzi-panel :lang(zh-Hant){font-family:'Noto Serif TC','Noto Sans TC','Source Han Serif TC','PMingLiU','Microsoft JhengHei',serif}

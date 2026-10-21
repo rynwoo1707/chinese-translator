@@ -49,12 +49,14 @@ for(const width of [390,1280])test(`Đọc song ngữ at ${width} px: both pages
  let shown=await frames(page);
  assert.deepEqual(shown.map(frame=>frame.text),['Original page 3','Ban dich trang 3']);
  assert.equal(shown[0].width,shown[1].width);assert.equal(shown[0].height,shown[1].height);
- if(width<760)assert.ok(shown[1].top>=shown[0].top+shown[0].height,'stacked on a phone');else assert.equal(shown[0].top,shown[1].top,'side by side');
+ // DOM order is original, translation; a phone stacks them with the Vietnamese page on top.
+ if(width<760)assert.ok(shown[0].top>=shown[1].top+shown[1].height,'stacked on a phone, the translation first');else assert.equal(shown[0].top,shown[1].top,'side by side');
  assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),'no sideways page scroll');
  assert.equal(await page.locator('[data-bi="prev"]').first().isDisabled(),true);
  await page.locator('[data-bi="next"]').first().click();
  await both(()=>{const texts=[...document.querySelectorAll('.bilingual-page .textLayer')].map(layer=>layer.textContent);return texts.length===2&&texts.every(text=>text.trim().endsWith(' 4'));});
  assert.equal(await position(page),'Trang 4 · 2/2');assert.deepEqual((await frames(page)).map(frame=>frame.text),['Original page 4','Ban dich trang 4']);
+ assert.equal(await page.locator('[data-bi="announce"]').textContent(),'Đã chuyển đến trang 4, 2 trên 2','the new page is announced politely');assert.equal(await page.locator('[data-bi="announce"]').getAttribute('aria-live'),'polite');
  assert.equal(await page.evaluate(()=>document.activeElement?.dataset.bi),'prev','focus moves to the other page button when this one is disabled');
  await page.keyboard.press('ArrowLeft');await page.waitForFunction(()=>document.querySelector('[data-bi="position"]').textContent==='Trang 3 · 1/2');
  await page.keyboard.press('+');await page.waitForFunction(()=>document.querySelector('[data-bi="zoom"]').textContent==='125%');

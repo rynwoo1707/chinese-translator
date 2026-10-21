@@ -191,8 +191,8 @@ export async function postDeployChecks(base,{fetch=globalThis.fetch,sha=null,adm
   try{
    const response=await fetch(new URL(path,base),{method,headers,signal:AbortSignal.timeout(timeoutMs)}),text=method==='HEAD'?'':await response.text();
    let json;try{json=JSON.parse(text);}catch{}
-   return {status:response.status,type:response.headers.get('content-type')||'',headers:response.headers,json};
-  }catch(error){return {status:0,type:'',headers:new Headers(),json:undefined,error:error?.cause?.code||error?.name||String(error)};}
+   return {status:response.status,type:response.headers.get('content-type')||'',headers:response.headers,json,text};
+  }catch(error){return {status:0,type:'',headers:new Headers(),json:undefined,text:'',error:error?.cause?.code||error?.name||String(error)};}
  };
  // A new version takes a few seconds to reach every location.
  let health;
@@ -212,8 +212,17 @@ export async function postDeployChecks(base,{fetch=globalThis.fetch,sha=null,adm
  if(home.status!==200||!/text\/html/iu.test(home.type))bad(`Trang chủ trả ${home.status||home.error} (${home.type||'không có Content-Type'}).`);
  else if(home.headers.get('content-security-policy')||home.headers.get('content-security-policy-report-only'))ok('Trang chủ có Content-Security-Policy.');
  else warn('Trang chủ chưa có header Content-Security-Policy (frontend/_headers).');
- // A missing file comes back as index.html with status 200 (single-page-application fallback): never text/html here.
- // Module scripts also need a JavaScript type, or the browser refuses them.
+ // Link previews and the sitemap take the address the request came to: a workers.dev name shows on every shared card.
+ const host=new URL(base).hostname,origin=new URL(base).origin;
+ if(/\.workers\.dev$/iu.test(host))warn(`Trang đang chạy ở ${host}: link chia sẻ sẽ hiện tên này trên thẻ xem trước và trong sitemap. Gắn tên miền riêng trước khi chia sẻ link đầu tiên (ONBOARDING mục 5.3), rồi kiểm tra lại bằng --url https://<tên miền>.`);
+ const sitemap=await get('/sitemap.xml');
+ if(sitemap.status===200&&sitemap.text?.includes(`<loc>${origin}/</loc>`))ok(`/sitemap.xml liệt kê các trang trên ${origin}.`);
+ else warn(`/sitemap.xml trả ${sitemap.status||sitemap.error} hoặc không dùng địa chỉ ${origin}: kiểm tra "run_worker_first" trong wrangler.jsonc.`);
+ const missing=await get('/khong-co-trang-nay-hoa-tri',{method:'HEAD'});
+ if(missing.status===404)ok('Đường dẫn không tồn tại trả 404 (frontend/404.html).');
+ else warn(`Đường dẫn không tồn tại trả ${missing.status||missing.error} thay vì 404: kiểm tra "not_found_handling": "404-page" trong wrangler.jsonc.`);
+ // A missing file comes back as frontend/404.html (text/html, status 404); an older deploy answered index.html with
+ // status 200. Either way it is never text/html here. Module scripts also need a JavaScript type, or the browser refuses them.
  for(const [path,type] of [['/vendor/pdf.mjs',/javascript/iu],['/vendor/pdf-lib.esm.min.js',/javascript/iu],['/vendor/paddle/models/det.tar',null]]){
   const asset=await get(path,{method:'HEAD'});
   if(asset.status===200&&(type?type.test(asset.type):!/text\/html/iu.test(asset.type)))ok(`${path}: ${asset.type||'?'}.`);
@@ -277,7 +286,7 @@ function afterDeployText(base,{previous,bookmark}){
  return [
   '\nKiểm tra bằng tay (không tốn token Gemini):',
   `  - ${base||'<URL Worker>'}/#account: tạo một tài khoản thử, đăng xuất rồi đăng nhập lại.`,
-  `  - ${base||'<URL Worker>'}/study.html: dòng dịch vụ PDF ghi "Dịch theo từng block; giữ hình gốc, công thức và vị trí."`,
+  `  - ${base||'<URL Worker>'}/study: dòng dịch vụ PDF ghi "Dịch từng đoạn ngay tại chỗ; giữ hình gốc, công thức và vị trí chữ."`,
   `  - ${base||'<URL Worker>'}/admin: đăng nhập bằng ADMIN_TOKEN, mở "Cài đặt".`,
   `  - Xem lỗi trực tiếp: ${NPX} wrangler tail`,
   'Nếu cần quay lại:',

@@ -4,7 +4,7 @@
 
 Web app dịch sách và tài liệu tiếng Trung sang tiếng Việt bằng Gemini (mỗi người dịch dán khóa Gemini của mình), chạy trên Cloudflare Workers (D1 + R2). Một dịch vụ PDF riêng (Python/PyMuPDF + Chromium) tách trang và dựng PDF tiếng Việt theo bố cục trang gốc.
 
-- **Xưởng dịch học tập** (`/study.html`): dịch PDF theo phạm vi (tối đa 20 trang mỗi lượt, tệp tới 25 MB) hoặc **"Dịch cả quyển"** (tệp tới 100 MB, tự chia lượt, dừng rồi dịch tiếp được, kể cả trên máy khác); cũng nhận TXT, DOCX, EPUB, AZW3.
+- **Xưởng dịch học tập** (`/study`): dịch PDF theo phạm vi (tối đa 20 trang mỗi lượt, tệp tới 25 MB) hoặc **"Dịch cả quyển"** (tệp tới 100 MB, tự chia lượt, dừng rồi dịch tiếp được, kể cả trên máy khác); cũng nhận TXT, DOCX, EPUB, AZW3.
 - **Thư viện riêng**: "Tải cả quyển" ghép bản dịch vào đúng chỗ trong sách gốc; **"Đọc song ngữ"** đặt trang gốc cạnh trang dịch.
 - **Tra chữ Hán**: pinyin, âm Hán Việt và nghĩa bằng từ điển offline, không dùng Gemini.
 - 7 lĩnh vực; Toán, Vật lý, Hóa học, Sinh học, Tin học có sẵn thuật ngữ sách giáo khoa.
@@ -31,6 +31,9 @@ Chạy bằng lệnh (cả macOS/Linux): `npm ci`, `npm run setup`, rồi `npm s
 
 - Dịch vụ PDF (Docker + Caddy) và Worker (`npm run deploy:check`, `npm run deploy`): [deploy/pdf-layout/README.md](deploy/pdf-layout/README.md). Chưa deploy thật lần nào.
 - Trước khi công khai: điền 4 loại chỗ trống `[[CHƯA ĐIỀN: …]]` trong `frontend/dieu-khoan.html` và `frontend/quyen-rieng-tu.html` (ONBOARDING mục 5.1; deploy từ chối khi còn chỗ trống), và chạy `npm run prepare:dict` nếu muốn "Tra chữ Hán" hoạt động trên site.
+- Gắn tên miền riêng cho Worker trước khi chia sẻ link đầu tiên: thẻ xem trước và `sitemap.xml` lấy đúng địa chỉ mà link dùng, nên link `*.workers.dev` sẽ hiện tên đó (ONBOARDING mục 5.3).
+- Khi cập nhật, deploy Worker trước hoặc cùng lúc với dịch vụ PDF, không bao giờ để dịch vụ PDF mới chạy với Worker cũ (ONBOARDING mục 5.2).
+- Trang có Content-Security-Policy trong `frontend/_headers`; cách nới cho một tính năng mới: ONBOARDING mục 9.
 
 Hướng dẫn đầy đủ (cài đặt, cách dùng, deploy, xử lý sự cố, giới hạn đã biết): [ONBOARDING.md](ONBOARDING.md). Làm "Ví dụ mẫu" cho thư viện công khai: [tools/samples/README.md](tools/samples/README.md).
 

@@ -38,23 +38,34 @@ test('Privacy page states what the code really stores',()=>{
  const privacy=text(pages.privacy),auth=read('backend/reader-auth.js'),history=read('backend/study-history.js');
  const iterations=Number(/PBKDF2_ITERATIONS=(\d+)/u.exec(auth)[1]);assert.match(privacy,new RegExp(`PBKDF2-SHA256 \\(${iterations.toLocaleString('vi-VN')} vòng, chuỗi muối ngẫu nhiên 16 byte\\)`,'u'));
  assert.match(auth,/salt=crypto\.getRandomValues\(new Uint8Array\(16\)\)/u);
- const days=/maxAge=(\d+)\*24\*60\*60/u.exec(auth)[1];assert.match(privacy,new RegExp(`hết hạn sau ${days} ngày`,'u'));
+ const days=/(?:maxAge|SESSION_MAX_AGE)=(\d+)\*24\*60\*60/u.exec(auth)[1];assert.match(privacy,new RegExp(`hết hạn sau ${days} ngày`,'u'));
  for(const name of ['SESSION_COOKIE','STATE_COOKIE','RETURN_COOKIE'])assert.ok(privacy.includes(new RegExp(`const ${name}='([^']+)'`,'u').exec(auth)[1]),name);
  assert.match(auth,/cookie\(STATE_COOKIE,state,600,url\)/u);assert.match(privacy,/tự hết hạn sau 10 phút/u);
  assert.match(auth,/SHA-?256|hashToken/u);assert.match(privacy,/chỉ lưu mã băm SHA-256 của cookie/u);
  const preview=Number(/PREVIEW=(\d+)/u.exec(history)[1]);assert.match(privacy,new RegExp(`${preview.toLocaleString('vi-VN')} ký tự đầu`,'u'));
  const chapter=Number(/content=state\.translation\.slice\(0,(\d+)\)/u.exec(history)[1]);assert.match(privacy,new RegExp(`${chapter.toLocaleString('vi-VN')} ký tự đầu của mỗi phần`,'u'));
- // Every key the pages keep in localStorage is named, and nothing named is gone from the code.
+ // Every key the pages keep in localStorage or sessionStorage is named, and nothing named is gone from the code. study.js
+ // and whole-book.js reach it through a variable (browserStorage, storage); a key built as PREFIX+id is listed as "PREFIX…".
  const keys=new Set();
- for(const file of ['app.js','music.js','hanzi-lookup.js','study.js','bilingual-reader.js','library-samples.js','site-footer.js']){
+ for(const file of ['app.js','music.js','hanzi-lookup.js','study.js','whole-book.js','bilingual-reader.js','library-samples.js','site-footer.js','site-header.js']){
   const source=existsSync(new URL(`frontend/${file}`,root))?read(`frontend/${file}`):'';
-  for(const [,argument] of source.matchAll(/localStorage\??\.(?:getItem|setItem|removeItem)\(\s*([^,)]+)/gu)){const literal=/^(['"])(.+)\1$/u.exec(argument.trim());keys.add(literal?literal[2]:new RegExp(`\\b${argument.trim()}=(['"])([^'"]+)\\1`,'u').exec(source)?.[2]);}
+  const constant=name=>new RegExp(`\\b${name}=(['"])([^'"]+)\\1`,'u').exec(source)?.[2];
+  for(const [,raw] of source.matchAll(/\b(?:localStorage|sessionStorage|browserStorage|storage)\??\.(?:getItem|setItem|removeItem)\(\s*([^,)]+)/gu)){
+   const argument=raw.trim(),literal=/^(['"])(.+)\1$/u.exec(argument),prefix=/^(\w+)\+/u.exec(argument);
+   keys.add(literal?literal[2]:prefix?constant(prefix[1])&&`${constant(prefix[1])}…`:constant(argument));
+  }
  }
  assert.ok(!keys.has(undefined),'every localStorage key resolves to a name');
- const listed=new Set([...pages.privacy.matchAll(/<code>([a-zA-Z.]+)<\/code>/gu)].map(match=>match[1]).filter(name=>!/^cat_hien_/u.test(name)));
+ assert.ok(keys.has('hoa-tri-runner')&&keys.has('hoa-tri-book-usage:…'),[...keys].join(', '));
+ const listed=new Set([...pages.privacy.matchAll(/<code>([\w.:…-]+)<\/code>/gu)].map(match=>match[1]).filter(name=>!/^cat_hien_/u.test(name)));
  assert.deepEqual([...keys].sort(),[...listed].sort());
- // Google Fonts is named exactly while a stylesheet still loads it.
- const fonts=/fonts\.googleapis\.com/u.test(read('frontend/style.css')+read('frontend/study.css'));assert.equal(/Google Fonts/u.test(privacy),fonts);
+ // Fonts: while a page or stylesheet still loads Google Fonts, the page names Google Fonts as a third party; once none
+ // does, it says the fonts come from Hoa Trí itself, and the pages that state it link the self-hosted fonts.
+ const sources=['frontend/style.css','frontend/study.css','frontend/index.html','frontend/study.html','frontend/dieu-khoan.html','frontend/quyen-rieng-tu.html','frontend/404.html'].map(read).join('\n');
+ const google=/fonts\.(?:googleapis|gstatic)\.com/u.test(sources);
+ assert.equal(/<strong>Google Fonts:<\/strong>/u.test(pages.privacy),google,'Google Fonts is listed as a third party exactly while it is loaded');
+ assert.equal(/Phông chữ của trang \(Be Vietnam Pro, Noto Serif\) do chính máy chủ Hoa Trí cung cấp/u.test(privacy),!google,'self-hosted fonts are stated exactly while nothing loads Google Fonts');
+ for(const page of ['index.html','dieu-khoan.html','quyen-rieng-tu.html','404.html'])assert.match(read(`frontend/${page}`),/<link rel="stylesheet" href="\/fonts\/fonts\.css">/u,page);
  // The Gemini key: the page promises it is never stored; no browser storage call may mention it.
  assert.match(privacy,/Khóa Gemini của bạn\. Khóa chỉ nằm trong bộ nhớ của tab đang mở/u);assert.doesNotMatch(read('frontend/study.js'),/(?:localStorage|sessionStorage)[^;]*apiKey/u);
  assert.match(privacy,/Không quảng cáo, không công cụ phân tích/u);assert.match(privacy,/18 tuổi/u);
@@ -115,4 +126,20 @@ test('Homepage head and robots.txt',()=>{
  for(const pattern of [/<html lang="vi">/u,/<meta name="description" content="[^"]{40,}">/u,/<meta property="og:title" content="Hoa Trí — [^"]+">/u,/<meta property="og:description" content="[^"]+">/u,/<meta property="og:locale" content="vi_VN">/u,/<meta property="og:type" content="website">/u,/<meta name="theme-color" content="#[0-9a-f]{6}">/u])assert.match(index,pattern);
  assert.match(index,/<noscript>[\s\S]*?Hoa Trí cần bật JavaScript[\s\S]*href="\/dieu-khoan"[\s\S]*href="\/quyen-rieng-tu"[\s\S]*<\/noscript>/u);
  assert.match(robots,/^User-agent: \*$/mu);assert.match(robots,/^Disallow: \/api\/$/mu);assert.match(robots,/^Disallow: \/admin$/mu);assert.doesNotMatch(robots,/^Disallow: \/$/mu);
+ // The library's own data stays crawlable, so a crawler renders the home page as a reader sees it.
+ for(const path of ['/api/library','/api/me'])assert.match(robots,new RegExp(`^Allow: ${path}$`,'mu'),path);
+ // The Worker turns the relative line into an absolute URL on the request's origin (backend/site-pages.js).
+ assert.match(robots,/^Sitemap: \/sitemap\.xml$/mu);
+});
+
+test('Legal pages: header with the two sections, the request link and sign-in; links use /study',()=>{
+ for(const [name,html] of Object.entries(pages)){
+  const header=/<header class="site-masthead">[\s\S]*?<\/header>/u.exec(html)?.[0]||'';
+  assert.match(header,/<a href="\/">[\s\S]*?<span>Học liệu<\/span><\/a>/u,name);assert.match(header,/<a href="\/study">[\s\S]*?Xưởng dịch/u,name);
+  assert.match(header,/<a class="header-request" href="\/#yeu-cau">[\s\S]*?Yêu cầu dịch/u,name);assert.match(header,/<a class="header-login" href="\/#account">Đăng nhập<\/a>/u,name);
+  assert.doesNotMatch(html,/study\.html/u,`${name}: /study, never /study.html (a redirect)`);
+  assert.match(html,/<script type="module" src="\/site-header\.js"><\/script>/u,name);
+ }
+ // Sample books are local-only unless the owner publishes one: the terms never claim the library has them.
+ assert.match(text(pages.terms),/Nếu Thư viện có sách gắn nhãn “Ví dụ mẫu”/u);assert.doesNotMatch(text(pages.terms),/Sách có nhãn “Ví dụ mẫu” trong Thư viện là/u);
 });

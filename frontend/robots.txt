@@ -1,3 +1,7 @@
 User-agent: *
+Allow: /api/library
+Allow: /api/me
 Disallow: /api/
 Disallow: /admin
+
+Sitemap: /sitemap.xml

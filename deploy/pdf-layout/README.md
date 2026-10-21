@@ -87,6 +87,7 @@ cd deploy/pdf-layout && docker compose up -d --build && docker image prune -f
 
 - Build lại khi một trong các tệp sau thay đổi: `services/pdf-layout/`, `package.json`, `package-lock.json`, `frontend/pdf-box-layout.js`, `frontend/math-text.js`.
 - Lúc container khởi động lại, các lượt đang chạy sẽ lỗi; người dùng chỉ cần bấm dịch lại.
+- **Thứ tự cập nhật:** deploy Worker (phần B) trước hoặc cùng lúc với dịch vụ PDF. Hai bên dùng chung bộ kiểm tra tài liệu (`frontend/pdf-box-layout.js`); dịch vụ mới chạy với Worker cũ có thể khiến mọi trang scan báo "Ảnh trang PDF không hợp lệ.".
 - **Cập nhật Caddy:** đổi tag `caddy:2.11.7-alpine` trong `docker-compose.yml` (đọc ghi chú phát hành của Caddy trước), rồi chạy `docker compose up -d caddy`.
 - **Cập nhật Node trong image:** image dùng đúng bản `node:22.23.3-bookworm-slim`, nên build lại vài tháng sau vẫn ra đúng môi trường CI đã thử. Muốn lên bản mới, sửa dòng `FROM` trong `services/pdf-layout/Dockerfile`, đợi CI xanh, rồi build lại.
 
@@ -141,6 +142,7 @@ npx.cmd wrangler r2 bucket create muc-viet-files --location apac
 - **Không** đổi `bucket_name`: dữ liệu R2 local gắn với tên bucket.
 - Muốn Worker tên khác `muc-viet-cms` (ví dụ `hoa-tri`)? Đổi `"name"` trước lần deploy đầu. Đổi về sau là đổi URL, callback Google và phải đặt lại secret.
 - Nên dùng gói Workers Paid. Gói Free chỉ cho 10 ms CPU, không đủ cho đăng nhập (PBKDF2) và PDF lớn.
+- Gắn tên miền riêng (Workers → Settings → Domains & Routes) **trước** lần chia sẻ link đầu tiên: thẻ xem trước khi dán link vào Zalo/Facebook và địa chỉ canonical lấy theo tên miền mà người dùng mở, nên link `*.workers.dev` sẽ hiện tên đó. Sau khi tên miền chạy ổn, đặt `"workers_dev": false` để không còn bản trùng (xem ONBOARDING).
 - Muốn có nút "Tra chữ Hán" trên production thì chạy `npm run prepare:dict` một lần trước khi deploy. Dữ liệu nằm trong `frontend/vendor/dict` và không commit. Thiếu dữ liệu này, script chỉ cảnh báo chứ không dừng.
 
 **Tệp secret** dạng `TÊN=giá trị`, đặt **ngoài** thư mục dự án, ví dụ `C:\Users\<bạn>\hoa-tri-secrets\production.env`:

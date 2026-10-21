@@ -9,7 +9,7 @@ export const PUBLISH_SOURCES=Object.freeze(['excerpt','full']);
 const RANGE=/^\s*\d+(?:\s*[-–]\s*\d+)?(?:\s*,\s*\d+(?:\s*[-–]\s*\d+)?)*\s*$/u;
 
 export function sampleTemplate(slug,{title='',author='',source='source.pdf'}={}){
- return {slug,title,author,genre:'Tài liệu khác',domain:'general',source,ranges:[],cover:'auto',translateCover:false,publishSource:'excerpt',glossary:{},rights:{confirmed:false,note:''}};
+ return {slug,title,author,genre:'Tài liệu khác',domain:'general',source,ranges:[],cover:'auto',translateCover:false,publishSource:'excerpt',glossary:{},rights:{confirmed:false,localOnly:true,note:''}};
 }
 export function validGlossary(value,where='glossary'){
  if(value===undefined||value===null)return {};

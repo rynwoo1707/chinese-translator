@@ -8,6 +8,8 @@ const RETURN_COOKIE='cat_hien_oauth_return';
 export const TERMS_VERSION='2026-10';
 const TERMS_REQUIRED='Hãy đồng ý với Điều khoản sử dụng và Chính sách quyền riêng tư để tạo tài khoản.';
 const DISABLED='Tài khoản này đang bị tạm khóa. Hãy liên hệ quản trị viên.';
+const RESET_INVALID='Liên kết đặt lại mật khẩu không hợp lệ hoặc đã hết hạn. Hãy xin quản trị viên một liên kết mới.';
+const SESSION_MAX_AGE=30*24*60*60,RESET_MS=24*60*60*1000,RESET_OPEN_MS=30*60*1000;
 const enc=new TextEncoder();
 
 export function cookieValue(request,name){
@@ -18,6 +20,7 @@ export function cookieValue(request,name){
 export async function hashToken(value){return [...new Uint8Array(await crypto.subtle.digest('SHA-256',enc.encode(value)))].map(x=>x.toString(16).padStart(2,'0')).join('');}
 const bytesToBase64=bytes=>btoa(String.fromCharCode(...bytes));
 const base64ToBytes=value=>Uint8Array.from(atob(value),c=>c.charCodeAt(0));
+const bytesToBase64Url=bytes=>bytesToBase64(bytes).replace(/\+/gu,'-').replace(/\//gu,'_').replace(/=+$/u,'');
 // Deployed Workers reject PBKDF2 above 100,000 iterations (wrangler dev allows more), so new hashes use that maximum and
 // record it; an unprefixed hash is from before this change and was made with 210,000 iterations.
 const PBKDF2_ITERATIONS=100000,LEGACY_PBKDF2_ITERATIONS=210000;
@@ -75,7 +78,29 @@ export async function checkPassword(env,userId,password){
  return typeof password==='string'&&password.length>0&&password.length<=128&&await passwordMatches(credential,password)?'ok':'wrong';
 }
 export function googleConfigured(env){return !!(env.GOOGLE_CLIENT_ID&&env.GOOGLE_CLIENT_SECRET);}
-async function createSession(env,userId,url){const token=crypto.randomUUID()+crypto.randomUUID(),maxAge=30*24*60*60;await env.DB.prepare('DELETE FROM reader_sessions WHERE expires_at<=?').bind(Date.now()).run();await env.DB.prepare('INSERT INTO reader_sessions(token_hash,user_id,expires_at) VALUES(?,?,?)').bind(await hashToken(token),userId,Date.now()+maxAge*1000).run();return cookie(SESSION_COOKIE,token,maxAge,url);}
+// A new session: the cookie for the browser and the hash of its token, the only part the database keeps.
+async function newSession(url){const token=crypto.randomUUID()+crypto.randomUUID();return {hash:await hashToken(token),expiresAt:Date.now()+SESSION_MAX_AGE*1000,cookie:cookie(SESSION_COOKIE,token,SESSION_MAX_AGE,url)};}
+async function createSession(env,userId,url){const session=await newSession(url);await env.DB.prepare('DELETE FROM reader_sessions WHERE expires_at<=?').bind(Date.now()).run();await env.DB.prepare('INSERT INTO reader_sessions(token_hash,user_id,expires_at) VALUES(?,?,?)').bind(session.hash,userId,session.expiresAt).run();return session.cookie;}
+
+// Password reset links (migration 0020; no e-mail is sent). An admin creates one for an account with a password
+// (account.js): {token,expiresAt} — the token is returned this once, only its SHA-256 is stored — or {refused}:
+// 'missing', 'google' (no password to reset) or 'disabled'. A locked account gets no link: the link signs the student
+// in, which a lock refuses (as login does), so the admin unlocks first; locking also removes the links it had. The
+// account's older links stop working, and links past their 24 hours are cleared.
+export async function createPasswordReset(env,userId){
+ const db=env.DB,token=bytesToBase64Url(crypto.getRandomValues(new Uint8Array(32))),now=Date.now(),expires=now+RESET_MS;
+ const results=await db.batch([
+  db.prepare('DELETE FROM reader_password_resets WHERE user_id=?1 OR expires_at<=?2').bind(userId,now),
+  db.prepare('INSERT INTO reader_password_resets(token_hash,user_id,expires_at) SELECT ?1,u.id,?2 FROM reader_users u JOIN reader_credentials c ON c.user_id=u.id WHERE u.id=?3 AND u.disabled_at IS NULL AND u.deleting_at IS NULL').bind(await hashToken(token),expires,userId)
+ ]);
+ if(results[1]?.meta?.changes)return {token,expiresAt:new Date(expires).toISOString()};
+ const user=await db.prepare('SELECT u.disabled_at,u.deleting_at,c.user_id AS credential FROM reader_users u LEFT JOIN reader_credentials c ON c.user_id=u.id WHERE u.id=?').bind(userId).first();
+ return {refused:!user||user.deleting_at?'missing':!user.credential?'google':'disabled'};
+}
+// The account a link (by its hash) can still reset, with its lock; null for a link that is unknown, used or expired, or
+// whose account is being deleted or has no password.
+const resetLink=(env,tokenHash)=>env.DB.prepare('SELECT r.user_id,u.disabled_at FROM reader_password_resets r JOIN reader_users u ON u.id=r.user_id JOIN reader_credentials c ON c.user_id=r.user_id WHERE r.token_hash=? AND r.used_at IS NULL AND r.expires_at>? AND u.deleting_at IS NULL').bind(tokenHash,Date.now()).first();
+const resetRefused=link=>link?.disabled_at?json({error:DISABLED,code:'account_disabled'},403):json({error:RESET_INVALID,code:'reset_link_invalid'},400);
 export async function authRoute(request,env,url,path){
  if(path==='/api/me'&&request.method==='GET'){
   const user=await currentReader(request,env),{mode,domains}=registrationPolicy(env),shared={googleConfigured:googleConfigured(env),registration:{mode,domains},termsVersion:TERMS_VERSION};
@@ -108,6 +133,44 @@ export async function authRoute(request,env,url,path){
   if(!credential||!await passwordMatches(credential,password))return json({error:'Email hoặc mật khẩu không đúng.'},401);
   if(credential.disabled_at)return json({error:DISABLED,code:'account_disabled'},403);
   return json({ok:true},200,{'Set-Cookie':await createSession(env,credential.user_id,url)});
+ }
+ // Opening a link trades its token for a fresh one, good for 30 minutes at most (never past the link's own expiry): the
+ // address with the first token stays in the browser's history (Ctrl+H, address suggestions), which on a school's shared
+ // computer would let the next person use it. The page keeps the fresh token in memory only.
+ if(path==='/api/auth/password-reset/open'&&request.method==='POST'){
+  if(!sameOrigin(request,url))return refused();
+  const body=await request.json(),token=body?.token;
+  if(typeof token!=='string'||!/^[A-Za-z0-9_-]{43}$/u.test(token))return resetRefused(null);
+  const tokenHash=await hashToken(token),ip=clientIp(request),limit=await rateLimit(env,[{binding:'API_LIMITER',key:`password-reset-ip:${ip}`},{binding:'AUTH_LIMITER',key:`password-reset:${tokenHash}|${ip}`}]);if(limit)return limit;
+  const link=await resetLink(env,tokenHash);if(!link||link.disabled_at)return resetRefused(link);
+  const fresh=bytesToBase64Url(crypto.getRandomValues(new Uint8Array(32))),now=Date.now();
+  // Only one of two opens sent at once finds the old hash still there.
+  const changed=await env.DB.prepare('UPDATE reader_password_resets SET token_hash=?1,expires_at=MIN(expires_at,?2) WHERE token_hash=?3 AND used_at IS NULL AND expires_at>?4').bind(await hashToken(fresh),now+RESET_OPEN_MS,tokenHash,now).run();
+  if(!changed?.meta?.changes)return resetRefused(null);
+  return json({token:fresh});
+ }
+ if(path==='/api/auth/password-reset'&&request.method==='POST'){
+  if(!sameOrigin(request,url))return refused();
+  const body=await request.json(),token=body?.token;
+  if(typeof token!=='string'||!/^[A-Za-z0-9_-]{43}$/u.test(token))return resetRefused(null);
+  // Checked before the link is looked up, as at login: per network, the loose cap a whole class shares (a teacher may
+  // hand out several links at once); per link and network, the strict one. A link (32 random bytes) cannot be guessed.
+  const tokenHash=await hashToken(token),ip=clientIp(request),limit=await rateLimit(env,[{binding:'API_LIMITER',key:`password-reset-ip:${ip}`},{binding:'AUTH_LIMITER',key:`password-reset:${tokenHash}|${ip}`}]);if(limit)return limit;
+  // As at login, only someone holding a valid link learns that its account is locked, and nothing changes.
+  const link=await resetLink(env,tokenHash);if(!link||link.disabled_at)return resetRefused(link);
+  const password=validatePassword(body.password),salt=crypto.getRandomValues(new Uint8Array(16)),hash=await passwordHash(password,salt),session=await newSession(url),db=env.DB,now=Date.now();
+  // One transaction. The new session is the claim: it is inserted only while the link is unused and unexpired and its
+  // account open, and every other statement waits for it, so a link sent twice at once changes the password once.
+  const claimed='EXISTS (SELECT 1 FROM reader_sessions WHERE token_hash=?1)';
+  const results=await db.batch([
+   db.prepare('INSERT INTO reader_sessions(token_hash,user_id,expires_at) SELECT ?1,r.user_id,?2 FROM reader_password_resets r JOIN reader_users u ON u.id=r.user_id JOIN reader_credentials c ON c.user_id=r.user_id WHERE r.token_hash=?3 AND r.used_at IS NULL AND r.expires_at>?4 AND u.disabled_at IS NULL AND u.deleting_at IS NULL').bind(session.hash,session.expiresAt,tokenHash,now),
+   db.prepare(`UPDATE reader_password_resets SET used_at=?2 WHERE token_hash=?3 AND ${claimed}`).bind(session.hash,now,tokenHash),
+   db.prepare(`UPDATE reader_credentials SET password_hash=?2,password_salt=?3 WHERE user_id=?4 AND ${claimed}`).bind(session.hash,storedHash(hash),bytesToBase64(salt),link.user_id),
+   // Every other session of the account ends: whoever knew the old password is signed out.
+   db.prepare(`DELETE FROM reader_sessions WHERE user_id=?2 AND token_hash<>?1 AND ${claimed}`).bind(session.hash,link.user_id)
+  ]);
+  if(!results[0]?.meta?.changes)return resetRefused(await resetLink(env,tokenHash));
+  return json({ok:true},200,{'Set-Cookie':session.cookie});
  }
  if(path==='/api/auth/google/start'&&request.method==='GET'){
   if(!googleConfigured(env))return json({error:'Đăng nhập Google chưa được cấu hình trên máy chủ.'},503);

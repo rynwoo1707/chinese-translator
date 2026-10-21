@@ -21,7 +21,7 @@ Rồi mở thư mục `C:\src\chinese-translator` và **bấm đúp `start.cmd`*
 
 ## 1. Dự án là gì
 
-Hoa Trí là web app dịch sách và tài liệu tiếng Trung sang tiếng Việt bằng Gemini, chạy trên Cloudflare Workers (`backend/worker.js`, giao diện tĩnh `frontend/`, cơ sở dữ liệu D1, kho tệp R2). Người học đăng nhập, mở "Xưởng dịch học tập" (`/study.html`), dán khóa Gemini của mình và chọn PDF; app tách trang thành từng block (có OCR cho trang scan), dịch, rồi xuất PDF tiếng Việt theo bố cục trang gốc và lưu theo sách trong "Thư viện riêng". Việc tách trang và dựng PDF do một dịch vụ riêng đảm nhận (`services/pdf-layout`: Node + Python/PyMuPDF + Tesseract tích hợp + Chromium), vì Worker không chạy được Python hay Chromium. Khu quản trị `/admin` dùng khóa Gemini máy chủ để dịch, đối chiếu và xuất bản sách lên thư viện công khai.
+Hoa Trí là web app dịch sách và tài liệu tiếng Trung sang tiếng Việt bằng Gemini, chạy trên Cloudflare Workers (`backend/worker.js`, giao diện tĩnh `frontend/`, cơ sở dữ liệu D1, kho tệp R2). Người học đăng nhập, mở "Xưởng dịch học tập" (`/study`), dán khóa Gemini của mình và chọn PDF; app tách trang thành từng block (có OCR cho trang scan), dịch, rồi xuất PDF tiếng Việt theo bố cục trang gốc và lưu theo sách trong "Thư viện riêng". Việc tách trang và dựng PDF do một dịch vụ riêng đảm nhận (`services/pdf-layout`: Node + Python/PyMuPDF + Tesseract tích hợp + Chromium), vì Worker không chạy được Python hay Chromium. Khu quản trị `/admin` dùng khóa Gemini máy chủ để dịch, đối chiếu và xuất bản sách lên thư viện công khai.
 
 Bố cục được đo thật, không ước: xem `docs/layout-metrics.md` (tóm tắt ở mục 8). Khi viết báo cáo, dùng các câu trong mục "Câu nên dùng trong báo cáo" của tài liệu đó, không dùng "giữ nguyên 90–95% bố cục" hay "tiết kiệm 80% thời gian" (chưa đo).
 
@@ -31,7 +31,7 @@ Bố cục được đo thật, không ước: xem `docs/layout-metrics.md` (tó
 |---|---|
 | `rynwoo1707/chinese-translator` | repo GitHub (công khai) |
 | `muc-viet-cms` | tên Worker trong `wrangler.jsonc`; URL `https://muc-viet-cms.<subdomain>.workers.dev` |
-| `muc-viet` (binding `DB`) | cơ sở dữ liệu D1; 17 migration `0001`–`0017` trong `database/migrations/`. Mới trong đợt này: `0014` (hạn mức ngày, khóa tài khoản, phiên bản điều khoản), `0015` (trang gốc của phần sách công khai), `0016` ("Dịch cả quyển"), `0017` (môn học của mục lịch sử) |
+| `muc-viet` (binding `DB`) | cơ sở dữ liệu D1; 20 migration `0001`–`0020` trong `database/migrations/`. Mới trong đợt này: `0014` (hạn mức ngày, khóa tài khoản, phiên bản điều khoản), `0015` (trang gốc của phần sách công khai), `0016` ("Dịch cả quyển"), `0017` (môn học của mục lịch sử), `0018` (mỗi tài khoản một lượt gọi dịch vụ PDF), `0019` (thiết bị đang chạy "Dịch cả quyển"), `0020` (link đặt lại mật khẩu) |
 | `muc-viet-files` (binding `FILES`) | bucket R2 |
 | `services/pdf-layout/` | dịch vụ PDF, cổng mặc định 8091 |
 | `deploy/pdf-layout/` | Docker compose + Caddy cho dịch vụ PDF, và runbook deploy (`README.md`) |
@@ -96,14 +96,14 @@ npm.cmd run setup
 | 4 | dữ liệu OCR `chi_sim` + `eng` cho dịch vụ PDF (= `npm run prepare:pdf-ocr`) | `.runtime/tessdata` |
 | 5 | tìm Edge/Chrome/Chromium và phông Times New Roman/DejaVu Serif để xuất PDF | ghi đường dẫn vào `.dev.vars` nếu máy cần |
 | 6 | tạo `.dev.vars` từ `.dev.vars.example`, sinh `ADMIN_TOKEN` và `PDF_LAYOUT_SERVICE_TOKEN` ngẫu nhiên 64 hex (không in ra) | `.dev.vars` |
-| 7 | áp các migration còn thiếu trong 17 migration vào D1 local (= `npm run db:local`) | `.wrangler/state` |
+| 7 | áp các migration còn thiếu trong 20 migration vào D1 local (= `npm run db:local`) | `.wrangler/state` |
 | 8 | từ điển Pinyin & Hán Việt cho "Tra chữ Hán" (= `npm run prepare:dict`): tải 6 tệp nguồn khoảng 29 MB có kiểm SHA-256, dựng khoảng 5 s (tốn khoảng 0,9 GB RAM), không dùng Gemini | `.runtime/dict-sources/`, `frontend/vendor/dict/` (1.282 tệp, khoảng 24 MB) |
 
 - Cần Internet (`npm ci`, `pip`, mô hình từ `paddle-model-ecology.bj.bcebos.com`, nguồn từ điển). Nếu chỉ riêng bcebos.com bị chặn: chép 3 tệp `det.tar`, `rec.tar`, `manifest.json` từ máy khác vào `frontend/vendor/paddle/models/` rồi chạy lại `setup` (bước 1 sẽ bỏ qua). Thiếu mô hình thì bước 2 và 4 cũng bị bỏ qua.
 - Bước 8 lỗi chỉ là **CẢNH BÁO**: nút "Tra chữ Hán" báo chưa có dữ liệu, phần dịch vẫn chạy; có mạng thì chạy `npm.cmd run prepare:dict`. Dữ liệu đã có thì nó in "Từ điển đã có, bỏ qua."; khi `backend/dictionary-build.js` hoặc `frontend/hanzi-dict.js` đổi, nó dựng lại từ bản đã tải (không tải lại).
 - Máy không ra được các trang nguồn từ điển: chép 6 tệp `cedict_ts.u8`, `CVDICT.u8`, `hanviet.csv`, `hanviet-LICENSE.txt`, `Unihan.zip`, `CJKRadicals.txt` vào một thư mục rồi chạy `npm.cmd run prepare:dict -- --from <thư mục>`; hoặc chép nguyên thư mục `.runtime/dict-sources` của máy khác vào đúng chỗ đó trong dự án rồi chạy `npm.cmd run prepare:dict`. Tệp khác phiên bản đã kiểm bị từ chối. Muốn lên phiên bản nguồn mới: `node backend/prepare-dictionary.mjs --print-hashes [url…]` in kích thước và SHA-256, rồi sửa `SOURCES` trong `backend/prepare-dictionary.mjs`.
 - Nguồn và giấy phép từ điển: CC-CEDICT (MDBG, CC BY-SA 4.0), CVDICT (Phong Phan, CC BY-SA 4.0; nghĩa tiếng Việt phần lớn dịch máy), hanviet-pinyin-wordlist (MIT), Unihan và CJKRadicals 18.0.0 (Unicode License v3). Dữ liệu gộp phát hành theo CC BY-SA 4.0: `LICENSE.txt` nằm cùng dữ liệu và được deploy theo, còn dòng ghi nguồn ở chân bảng tra (`frontend/hanzi-lookup.js`) và ở chân trang (`frontend/site-footer.js`) **phải giữ nguyên**.
-- Báo **LỖI** không tìm thấy Python: cài Python 3 từ python.org (tích "Add python.exe to PATH"), mở cửa sổ PowerShell mới rồi chạy lại `npm.cmd run setup`. Khi thiếu Python, `dev:pdf-layout` vẫn khởi động (kèm CẢNH BÁO "không chạy được PyMuPDF…") và `/study.html` vẫn báo "Dịch theo từng block…", nhưng "Bắt đầu dịch →" với PDF giữ bố cục sẽ báo "Không tìm thấy Python để chạy dịch vụ PDF (python)…". Muốn dịch tạm khi chưa có Python: bỏ tích "Giữ bố cục PDF và xuất bản tiếng Việt" (PDF xử lý trong trình duyệt, chỉ ra văn bản/HTML).
+- Báo **LỖI** không tìm thấy Python: cài Python 3 từ python.org (tích "Add python.exe to PATH"), mở cửa sổ PowerShell mới rồi chạy lại `npm.cmd run setup`. Khi thiếu Python, `dev:pdf-layout` vẫn khởi động (kèm CẢNH BÁO "không chạy được PyMuPDF…") và `/study` vẫn báo "Dịch từng đoạn ngay tại chỗ…", nhưng "Bắt đầu dịch →" với PDF giữ bố cục sẽ báo "Không tìm thấy Python để chạy dịch vụ PDF (python)…". Muốn dịch tạm khi chưa có Python: bỏ tích "Giữ bố cục PDF và xuất bản tiếng Việt" (PDF xử lý trong trình duyệt, chỉ ra văn bản/HTML).
 - **CẢNH BÁO** không tìm thấy trình duyệt hoặc phông: dịch vụ PDF chạy được nhưng không xuất được PDF. Cài Microsoft Edge (Windows có sẵn) rồi chạy lại `setup`.
 - `.dev.vars` không được commit. Mã vào trang `/admin` là giá trị dòng `ADMIN_TOKEN`. `GEMINI_API_KEY` để trống được: chỉ xưởng dịch `/admin` cần, người học dán khóa riêng trên trang. Mỗi dòng dạng `KEY=value` (không `export`, không chú thích cuối dòng); khóa lặp lại thì dòng **cuối** thắng. Ý nghĩa từng biến: mục 5.4.
 - **Sau mỗi lần cập nhật code** (`git pull`), chạy lại `npm.cmd run setup` (ít nhất `npm.cmd run db:local`) trước `npm run dev`/`npm start`: hai lệnh này không áp migration. Thiếu migration `0014`–`0017` thì đăng nhập, lịch sử và "Dịch cả quyển" báo "Cơ sở dữ liệu chưa được cập nhật lên phiên bản mới…" (mã `schema_outdated`). `start.cmd` tự làm việc này.
@@ -131,7 +131,7 @@ Mặc định là `http://127.0.0.1:8787`; nếu cổng bận, Wrangler tự l�
 |---|---|
 | `http://127.0.0.1:8787/` | thư viện công khai |
 | `http://127.0.0.1:8787/#account` | đăng ký, đăng nhập, "Thư viện riêng", xóa tài khoản |
-| `http://127.0.0.1:8787/study.html` | "Xưởng dịch học tập" (cần đăng nhập) |
+| `http://127.0.0.1:8787/study` | "Xưởng dịch học tập" (cần đăng nhập) |
 | `http://127.0.0.1:8787/admin` | khu quản trị |
 | `http://127.0.0.1:8787/dieu-khoan`, `/quyen-rieng-tu` | điều khoản sử dụng, chính sách quyền riêng tư |
 | `http://127.0.0.1:8787/api/health` | kiểm tra sức khỏe: D1 và cấu hình dịch vụ PDF, không cần đăng nhập |
@@ -148,7 +148,7 @@ curl.exe -s http://127.0.0.1:8787/api/health  # "ok":true, "database":"ok", "pdf
 node backend/check-gemini-runtime.mjs        # chỉ gọi /api/status bằng ADMIN_TOKEN; cổng khác thì thêm http://127.0.0.1:8789
 ```
 
-Đăng nhập rồi mở `/study.html`: dòng trạng thái PDF phải là "Dịch theo từng block; giữ hình gốc, công thức và vị trí." Nếu không, xem mục 6. Dòng này chỉ xác nhận Worker có cấu hình và đọc được phông qua dịch vụ; Python/PyMuPDF chỉ chạy khi tách trang, Chromium khi xuất PDF.
+Đăng nhập rồi mở `/study`: dòng trạng thái PDF phải là "Dịch từng đoạn ngay tại chỗ; giữ hình gốc, công thức và vị trí chữ." Nếu không, xem mục 6. Dòng này chỉ xác nhận Worker có cấu hình và đọc được phông qua dịch vụ; Python/PyMuPDF chỉ chạy khi tách trang, Chromium khi xuất PDF.
 
 ### 3.2 macOS / Linux (chưa chạy thử)
 
@@ -176,7 +176,7 @@ Dùng đúng token đang có trong `.dev.vars` (và `PDF_LAYOUT_SERVICE_URL=http
 
 ### 4.1 Dịch theo phạm vi
 
-Trong `/study.html` (phải đăng nhập):
+Trong `/study` (phải đăng nhập):
 
 1. **"Tên nội dung"** (bắt buộc): dùng cho lịch sử, "Thư viện riêng" và tên tệp tải về. "Lưu tên" đổi tên mà không gọi Gemini.
 2. **"Chọn tài liệu từ thiết bị"** → chọn PDF. Ô "Giữ bố cục PDF và xuất bản tiếng Việt" chỉ được tích khi dịch vụ PDF sẵn sàng. Bật: hiện "Cách dịch PDF" với "Dịch theo phạm vi" (mặc định, tệp tối đa 25 MB, tải cả tệp lên) và "Dịch cả quyển" (mục 4.2; tệp 25–100 MB chỉ dùng được cách này). Tắt: tới 250 MB, xử lý trong trình duyệt, chỉ ra văn bản/HTML.
@@ -228,6 +228,7 @@ Từ điển offline trong `/vendor/dict/` (bước 8 của `setup`): không dù
 - **Xóa một bản dịch:** "Lịch sử dịch của tôi" → "Xóa" trên mục đó (không bấm được khi đang dịch). Mục bị xóa khỏi lịch sử và khỏi sách; sách trống thì bị xóa cùng bìa; PDF, ảnh và bản gốc chỉ mục đó dùng bị xóa vĩnh viễn (tệp mục khác, bìa hay lượt dịch cả quyển còn dùng thì giữ). Nếu mục là một phần của "Dịch cả quyển", các trang của nó trở lại "Chưa dịch" để dịch lại được.
 - **Xóa tài khoản:** `/#account` → "Xóa tài khoản…" → nhập "Mật khẩu hiện tại" (tài khoản Google không cần) và chữ `XÓA` → "Xóa vĩnh viễn". Xóa lịch sử, sách riêng, bản gốc và bản dịch, yêu cầu dịch kèm tệp, phiên đăng nhập, mật khẩu và các lượt dịch cả quyển; sách đã công bố trong thư viện chung vẫn giữ nhưng không còn gắn tên. Đang có việc admin chạy trên sách riêng của người đó thì báo "Một tài liệu của bạn đang được xử lý…" (thử lại sau). Tệp R2 xóa là mất hẳn; D1 Time Travel vẫn khôi phục được hàng đã xóa trong thời hạn lưu của Cloudflare.
 - **Quản trị viên:** `/admin` → "Học sinh & thư viện riêng": "Khóa tài khoản" (đăng xuất mọi phiên, đăng nhập báo "Tài khoản này đang bị tạm khóa…"), "Mở khóa", "Xóa tài khoản" (như trên). Mỗi tài khoản hiện phiên bản điều khoản đã đồng ý.
+- **Học sinh quên mật khẩu** (không gửi e-mail): `/admin` → "Học sinh & thư viện riêng" → "Tạo link đặt lại mật khẩu" → "Sao chép" rồi gửi riêng cho học sinh (Zalo, tin nhắn). Link chỉ hiện một lần, chỉ mở được một lần (mở ra là phải đặt mật khẩu trong 30 phút; đóng trang trước khi lưu thì cần link mới, vì link đã mở nằm trong lịch sử trình duyệt của máy dùng chung), hết hạn sau 24 giờ; tạo link mới thì link cũ mất hiệu lực; đặt lại xong, mọi phiên đăng nhập khác của học sinh đó bị đăng xuất. Tài khoản Google không có mật khẩu (đăng nhập bằng Google); tài khoản đang khóa phải mở khóa trước. Cần migration `0020`.
 - **Giới hạn mỗi phút** (binding trong `wrangler.jsonc`, Cloudflare đếm theo từng vị trí, chỉ để chặn dồn dập): `AUTH_LIMITER` 10/phút cho đăng nhập theo email, đăng ký theo IP, xóa tài khoản; `HEAVY_LIMITER` 12/phút mỗi tài khoản cho tải tệp, tách trang, dựng PDF, gửi yêu cầu dịch; `API_LIMITER` 120/phút cho các thao tác khác và đăng nhập theo IP. Vượt thì báo "Bạn thao tác quá nhanh. Hãy đợi khoảng một phút rồi thử lại."
 - **Hạn mức mỗi ngày** (đếm trong bảng D1 `rate_limits`, đặt lại lúc 0:00 giờ Việt Nam; đặt biến bằng `0` để tắt): `DAILY_REGISTRATIONS_PER_IP` 30 tài khoản mỗi IP, `DAILY_REQUESTS_PER_USER` 20 yêu cầu dịch, `DAILY_PDF_EXTRACTS_PER_USER` 100 lần tách PDF (kể cả mỗi lượt của "Dịch cả quyển"), `DAILY_SOURCE_UPLOADS_PER_USER` 30 lần tải bản gốc. Cả lớp tạo tài khoản cùng lúc trong một mạng trường (chung IP) sẽ chạm cả 10/phút lẫn 30/ngày: cho đăng ký rải ra hoặc tăng `DAILY_REGISTRATIONS_PER_IP`. Thiếu binding hoặc D1 lỗi thì giới hạn tự bỏ qua, không chặn người dùng.
 
@@ -277,8 +278,11 @@ Trình duyệt không bao giờ gọi thẳng dịch vụ PDF và không thấy 
 - [ ] Chạy `npm run prepare:dict` nếu muốn "Tra chữ Hán" hoạt động trên production: `frontend/vendor/dict` không commit, nên deploy lấy bản trên máy deploy; thiếu thì script chỉ cảnh báo.
 - [ ] 2 chuỗi ngẫu nhiên **mới**, khác bản local: `ADMIN_TOKEN` (tối thiểu 32 ký tự) và `PDF_LAYOUT_SERVICE_TOKEN` (tối thiểu 24 ký tự); nên dùng 64 hex: `node -e "console.log(require('node:crypto').randomBytes(32).toString('hex'))"` (chạy 2 lần) hoặc `openssl rand -hex 32`. Cất trong trình quản lý mật khẩu, không ghi vào repo.
 - [ ] Máy chủ Linux có Docker cho dịch vụ PDF: tên miền trỏ thẳng về máy (DNS only, mây xám), mở cổng 80 và 443.
+- [ ] **Tên miền riêng cho trang web** (ví dụ `hoatri.example.vn`), gắn vào Worker **trước khi chia sẻ link đầu tiên** (mục 5.3): thẻ xem trước trên Zalo, Facebook, Messenger và `sitemap.xml` lấy đúng địa chỉ mà link dùng, nên link `*.workers.dev` sẽ hiện tên đó, và các ứng dụng chat còn lưu thẻ cũ một thời gian.
 
-### 5.2 Dịch vụ PDF (deploy trước Worker)
+### 5.2 Dịch vụ PDF
+
+**Thứ tự với Worker:** cả hai phía phải chạy cùng một commit, vì chúng dùng chung bộ kiểm tra tài liệu (`frontend/pdf-box-layout.js`). Lần đầu chưa có người dùng nên dựng dịch vụ trước cũng được (để có URL và token cho Worker). Mỗi lần cập nhật về sau: **deploy Worker trước hoặc cùng lúc với dịch vụ PDF**, không để dịch vụ mới chạy với Worker cũ. Ví dụ đã gặp: dịch vụ mới lưu ảnh trang scan dạng JPEG, còn bộ kiểm tra cũ chỉ nhận PNG nên mọi trang scan báo "Ảnh trang PDF không hợp lệ." (`docs/pdf-layout-pipeline.md`, mục "Thứ tự cập nhật").
 
 Làm theo phần A của `deploy/pdf-layout/README.md`. Tóm tắt:
 
@@ -326,11 +330,20 @@ npm.cmd run deploy                                                              
 - `d1 create` ghi UUID thật vào `database_id` và giữ `"preview_database_id": "local-db"`, nên dev local vẫn mở D1 cũ. UUID không bí mật: commit thay đổi đó. `r2 bucket create` có hỏi thêm vào cấu hình thì từ chối (binding `FILES` đã có). **Không** đổi `bucket_name` (dữ liệu R2 local gắn với tên bucket).
 - Tệp secret dạng `TÊN=giá trị`, nằm **ngoài** thư mục dự án, không đặt tên `.dev.vars…`: `ADMIN_TOKEN`, `PDF_LAYOUT_SERVICE_URL`, `PDF_LAYOUT_SERVICE_TOKEN`; tùy chọn `GEMINI_API_KEY`, `GOOGLE_CLIENT_ID` + `GOOGLE_CLIENT_SECRET`. **Không bao giờ** dùng `.dev.vars` local làm tệp secret: nó chứa URL 127.0.0.1 và khóa cá nhân.
 - Tên model và `REGISTRATION_MODE` nay là **var** trong `wrangler.jsonc`: không còn bước `wrangler secret put GEMINI_MODEL`. Worker nào đã có secret trùng tên một var (thường là `GEMINI_MODEL` từ hướng dẫn cũ) thì xóa secret đó, ví dụ `npx.cmd wrangler secret delete GEMINI_MODEL`: script dừng khi một tên vừa là var vừa là secret.
-- Script lần lượt: kiểm tra trên máy (Node ≥ 22.13, cây git sạch, `wrangler.jsonc`, không còn `[[CHƯA ĐIỀN`, tệp secret) → đọc Cloudflare (đăng nhập, bucket, secret, phiên bản đang chạy) → chép `frontend/vendor`, `npm test` có chặn Gemini/Google/Cloudflare, `wrangler deploy --dry-run` → liệt kê migration chờ, in điểm khôi phục Time Travel, hỏi `Gõ CÓ để tiếp tục:` rồi áp → `wrangler deploy --strict` gắn tag là mã commit → kiểm tra `/api/health`, `/vendor/`, `/api/library`, `/api/me`, `/api/status` (báo nếu `ADMIN_TOKEN` ngắn hơn 32 ký tự) và `/vendor/dict/manifest.json`, rồi in danh sách kiểm tra tay và lệnh quay lại.
+- Script lần lượt: kiểm tra trên máy (Node ≥ 22.13, cây git sạch, `wrangler.jsonc`, không còn `[[CHƯA ĐIỀN`, tệp secret) → đọc Cloudflare (đăng nhập, bucket, secret, phiên bản đang chạy) → chép `frontend/vendor`, `npm test` có chặn Gemini/Google/Cloudflare, `wrangler deploy --dry-run` → liệt kê migration chờ, in điểm khôi phục Time Travel, hỏi `Gõ CÓ để tiếp tục:` rồi áp → `wrangler deploy --strict` gắn tag là mã commit → kiểm tra `/api/health`, CSP của trang chủ, `/sitemap.xml` (đúng địa chỉ), một đường dẫn lạ trả 404, `/vendor/`, `/api/library`, `/api/me`, `/api/status` (báo nếu `ADMIN_TOKEN` ngắn hơn 32 ký tự) và `/vendor/dict/manifest.json`, cảnh báo khi địa chỉ vẫn là `*.workers.dev`, rồi in danh sách kiểm tra tay và lệnh quay lại.
 - Tùy chọn: `--yes` (không hỏi trước khi áp migration), `--skip-tests`, `--allow-dirty`, `--allow-placeholders`, `--allow-stale`, `--url https://…` (địa chỉ để kiểm tra, ví dụ tên miền riêng). Đặt biến `HOATRI_ADMIN_TOKEN` để script kiểm tra cả `/api/status` bằng mã quản trị.
 - Quay lại: `npx wrangler rollback <version-id>` (không hoàn tác migration và secret); dữ liệu D1: `npx wrangler d1 time-travel restore DB --bookmark=<bookmark>`; R2 không có bản lưu.
 - Deploy tay (không dùng script): `npx.cmd wrangler d1 migrations apply DB --remote`, `npm.cmd run build` (BẮT BUỘC: điền `frontend/vendor/`), `npx.cmd wrangler deploy`. `wrangler deploy` lấy thẳng `backend/worker.js` và `frontend/` (không dùng `dist/`) và không chạy npm script nào.
 - Lần đầu có thể phải đăng ký subdomain `workers.dev` trong dashboard. Kích thước đo bằng `--dry-run` ngày 19/10/2026: bundle 3.238 KiB (690 KiB gzip); khoảng 1.550 tệp tĩnh khi đã có từ điển (từ điển chiếm 1.282 tệp), tệp lớn nhất 16,7 MB (giới hạn 25 MiB mỗi tệp).
+
+**Tên miền riêng (làm trước khi chia sẻ link đầu tiên).** Worker tự viết địa chỉ tuyệt đối (canonical, `og:url`, ảnh xem trước `/og-hoa-tri.png`, `sitemap.xml`, dòng `Sitemap:` của `robots.txt`) theo địa chỉ mà yêu cầu gửi tới (`backend/site-pages.js`); không có tên miền nào ghi cứng trong code. Vì vậy:
+
+1. Tên miền phải là một zone trong cùng account Cloudflare. Dashboard: Workers & Pages → `muc-viet-cms` → Settings → Domains & Routes → Add → Custom domain → nhập `hoatri.example.vn`. Hoặc thêm vào `wrangler.jsonc` rồi deploy lại: `"routes": [{"pattern": "hoatri.example.vn", "custom_domain": true}]`.
+2. Google OAuth: thêm `https://hoatri.example.vn/api/auth/google/callback` vào Authorized redirect URIs (mục 5.5).
+   Cũng trong dashboard, ở zone của tên miền: SSL/TLS → Edge Certificates → bật **Always Use HTTPS**. Nếu tắt, ai gõ `http://hoatri.example.vn` sẽ đăng nhập qua kết nối không mã hóa (cookie đăng nhập chỉ có cờ `Secure` khi trang chạy HTTPS). Worker tự gửi `Strict-Transport-Security` (180 ngày) trên các trang HTTPS, nên sau lần mở đầu tiên, trình duyệt chỉ dùng HTTPS cho tên miền này.
+3. Kiểm tra lại bằng `npm.cmd run deploy -- --url https://hoatri.example.vn` (bước cuối cảnh báo khi địa chỉ kiểm tra vẫn là `*.workers.dev`). Mở `https://hoatri.example.vn/sitemap.xml`: mọi `<loc>` phải là tên miền mới.
+4. Khi tên miền chạy ổn, đặt `"workers_dev": false` trong `wrangler.jsonc` và deploy lại, để máy tìm kiếm không thấy hai bản của cùng trang (mỗi bản tự khai canonical theo địa chỉ của nó).
+5. Link đã chia sẻ trước đó vẫn giữ thẻ cũ trong bộ nhớ của ứng dụng chat; Facebook làm mới bằng Sharing Debugger, Zalo tự làm mới sau một thời gian.
 
 ### 5.4 Biến môi trường và secret
 
@@ -385,23 +398,30 @@ curl.exe -s "$W/api/status"       # "authenticated":false, không có "adminToke
 curl.exe -s -o NUL -w "%{http_code} %{content_type}`n" "$W/vendor/pdf.mjs"                 # 200 text/javascript; charset=utf-8
 curl.exe -s -o NUL -w "%{http_code} %{content_type}`n" "$W/vendor/paddle/models/det.tar"   # 200 application/x-tar
 curl.exe -s -o NUL -w "%{http_code} %{content_type}`n" "$W/vendor/dict/manifest.json"      # 200 application/json (khi đã chạy prepare:dict)
+curl.exe -s -o NUL -w "%{http_code} %{content_type}`n" "$W/khong-co-trang-nay"             # 404 text/html (trang 404.html)
+curl.exe -s "$W/sitemap.xml"      # các <loc> bắt đầu bằng đúng $W
+curl.exe -s "$W/robots.txt"       # dòng cuối: Sitemap: $W/sitemap.xml
+curl.exe -sI "$W/" | findstr /i "content-security-policy x-frame-options"   # có cả hai
 npx.cmd wrangler d1 migrations list DB --remote                            # không còn chờ
 ```
 
-Thấy `text/html` nghĩa là tệp không có: site trả `index.html` với mã 200 cho mọi đường dẫn lạ. Khi đó chạy `npm run build` (hoặc `npm run prepare:dict` với từ điển) rồi deploy lại. macOS/Linux: dùng `curl` thay `curl.exe`, `/dev/null` thay `NUL`, bỏ `` `n ``.
+Thấy `text/html` ở một tệp nghĩa là tệp không có: site trả trang 404 (`frontend/404.html`, mã 404) cho mọi đường dẫn lạ. Khi đó chạy `npm run build` (hoặc `npm run prepare:dict` với từ điển) rồi deploy lại. macOS/Linux: dùng `curl` thay `curl.exe`, `/dev/null` thay `NUL`, `grep -i` thay `findstr /i`, bỏ `` `n ``.
 
 - [ ] Để `npx.cmd wrangler tail` chạy trong một cửa sổ riêng suốt lúc kiểm tra.
 - [ ] Mở một dòng log trong Workers Logs: nếu thấy header của yêu cầu (cookie…), đặt `observability.logs.invocation_logs` thành `false` trong `wrangler.jsonc` rồi deploy lại.
 - [ ] Dịch vụ PDF: `/health` trả 401 khi không có token, `{"ok":true,…}` khi có (mục 5.2).
 - [ ] `/dieu-khoan`, `/quyen-rieng-tu`: không còn chữ "CHƯA ĐIỀN"; chân trang có liên kết pháp lý và dòng ghi nguồn từ điển.
 - [ ] `/#account`: tạo một tài khoản thử (đánh dấu ô đồng ý), đăng xuất rồi đăng nhập lại; cuối buổi thử "Xóa tài khoản…" với tài khoản đó.
-- [ ] `/study.html`: lịch sử tải được; dòng PDF là "Dịch theo từng block; giữ hình gốc, công thức và vị trí."; "Tra chữ Hán" mở được bảng tra.
+- [ ] `/study`: lịch sử tải được; dòng PDF là "Dịch từng đoạn ngay tại chỗ; giữ hình gốc, công thức và vị trí chữ."; "Tra chữ Hán" mở được bảng tra.
+- [ ] Mở công cụ phát triển của trình duyệt (F12 → Console) trên `/`, `/study` và `/admin`: không có dòng "Refused to … because it violates the following Content Security Policy directive".
+- [ ] Dán link trang chủ vào Zalo hoặc Messenger (sau khi đã gắn tên miền riêng): thẻ xem trước có ảnh Hoa Trí, tiêu đề "Hoa Trí — Dịch tiếng Trung sang tiếng Việt, giữ bố cục trang" và đúng tên miền.
+- [ ] (Tên miền riêng) Gõ `http://hoatri.example.vn` vào thanh địa chỉ: trang phải tự chuyển sang `https://` (mục 5.3, "Always Use HTTPS").
 - [ ] `/admin`: đăng nhập, mở "Cài đặt"; lưu khóa Gemini máy chủ nếu cần (R2 production không có bản của local).
 - [ ] (Tốn token) dịch thử 1–2 trang bằng khóa thử, chờ "PDF tiếng Việt đã được lưu vào Thư viện riêng…", rồi thử "Tải cả quyển (PDF)" và "Đọc song ngữ".
 
 ### 5.7 Khi cập nhật code về sau
 
-Thứ tự: `git pull` → `npm ci` → `npm run setup` (cập nhật `frontend/vendor` và từ điển trên máy deploy) → `npm run deploy` (liệt kê migration mới, hỏi `CÓ`, áp rồi mới deploy). Nếu `services/pdf-layout/`, `package*.json`, `frontend/pdf-box-layout.js` hoặc `frontend/math-text.js` thay đổi, build lại image trên máy chủ dịch vụ PDF: `git pull`, rồi `docker compose up -d --build` trong `deploy/pdf-layout` (mục A.5 của runbook).
+Thứ tự: `git pull` → `npm ci` → `npm run setup` (cập nhật `frontend/vendor` và từ điển trên máy deploy) → `npm run deploy` (liệt kê migration mới, hỏi `CÓ`, áp rồi mới deploy). Nếu `services/pdf-layout/`, `package*.json`, `frontend/pdf-box-layout.js` hoặc `frontend/math-text.js` thay đổi, build lại image trên máy chủ dịch vụ PDF **sau khi Worker của cùng commit đã deploy xong** (hoặc ngay lúc đó, không bao giờ trước): `git pull`, rồi `docker compose up -d --build` trong `deploy/pdf-layout` (mục A.5 của runbook). Lý do ở mục 5.2.
 
 ### 5.8 CI
 
@@ -441,7 +461,7 @@ Với đăng nhập Google, ba lỗi `terms_required`, `registration_closed`, `a
 | Thông báo | Nguyên nhân | Cách sửa |
 |---|---|---|
 | "Chưa cấu hình dịch vụ PDF giữ bố cục." hoặc dòng trạng thái "Dịch vụ PDF giữ bố cục chưa được cấu hình." | Worker thiếu `PDF_LAYOUT_SERVICE_URL` và/hoặc `PDF_LAYOUT_SERVICE_TOKEN`. Ở local thường do `npm run dev` chạy trước khi `dev:pdf-layout` ghi token | Chạy `npm run dev:pdf-layout`, rồi khởi động lại `npm run dev`. Production: đặt cả hai secret |
-| "Dịch vụ PDF giữ bố cục chưa sẵn sàng." | Worker gọi `/api/my/study/pdf-layout/config` hoặc `/font` lỗi: mở trang khi chưa đăng nhập, dịch vụ tắt, sai URL/cổng, token ở Worker khác token dịch vụ, vi phạm quy tắc HTTPS, thiếu tệp font | Đăng nhập ở `/#account` rồi tải lại `/study.html`; bật dịch vụ, kiểm `/health` có token; token phải giống hệt (sửa `.dev.vars` thì khởi động lại `npm run dev`); macOS đặt `PDF_FONT_PATH`; Linux cài `fonts-dejavu-core` |
+| "Dịch vụ PDF giữ bố cục chưa sẵn sàng." | Worker gọi `/api/my/study/pdf-layout/config` hoặc `/font` lỗi: mở trang khi chưa đăng nhập, dịch vụ tắt, sai URL/cổng, token ở Worker khác token dịch vụ, vi phạm quy tắc HTTPS, thiếu tệp font | Đăng nhập ở `/#account` rồi tải lại `/study`; bật dịch vụ, kiểm `/health` có token; token phải giống hệt (sửa `.dev.vars` thì khởi động lại `npm run dev`); macOS đặt `PDF_FONT_PATH`; Linux cài `fonts-dejavu-core` |
 | "Không kết nối được dịch vụ PDF giữ bố cục. Hãy kiểm tra dịch vụ (npm run dev:pdf-layout) rồi thử lại." (local) / "Dịch vụ PDF đang tạm ngừng. Hãy thử lại sau ít phút…" (production) | Lỗi mạng/TLS: dịch vụ không chạy, đang tự khởi động lại, sai cổng, chứng chỉ không hợp lệ | Bật dịch vụ; cổng trong `.dev.vars` phải khớp; production: `docker compose ps`, chứng chỉ hợp lệ ở cổng 443 |
 | "Dịch vụ PDF cần HTTPS." | URL `http://` với host khác `127.0.0.1`, `localhost`, `pdf-layout` | Dùng `https://` |
 | "Unauthorized" | Token ở Worker và ở dịch vụ khác nhau | Đặt giống hệt; khởi động lại `wrangler dev` hoặc cập nhật secret |
@@ -579,7 +599,7 @@ Các script khác (không nằm trong `npm test`):
 - **Chưa kiểm chứng trên Cloudflare thật:** giới hạn CPU/bộ nhớ của Workers (Worker băm tệp tải lên tới 25 MB, parse/stringify JSON `/extract` tới khoảng 33 MB và giải mã base64 PDF; gói Free chỉ 10 ms CPU; mọi gói 128 MB mỗi isolate; scan nặng 20 trang có thể gây lỗi 1102, cân nhắc `"limits": {"cpu_ms": …}`), giới hạn tốc độ (đếm theo từng vị trí Cloudflare), Workers Logs, kiểm checksum của R2 và việc stream bản gốc 100 MiB (trên `wrangler dev`: đỉnh 35 MB heap). `wrangler dev` không áp đúng giới hạn của production.
 - **Dịch vụ PDF** không có hàng đợi, tối đa 2 việc cùng lúc, mỗi lần xuất mở một Chromium headless (`--no-sandbox` trong container); `/health` cũng cần token. Qua Caddy, PDF thô trên 25 MiB gửi thẳng tới dịch vụ đôi khi nhận 502 thay vì 422 (Worker đã chặn tệp trên 25 MB trước, nên người dùng không gặp).
 - **Docker image chưa được build trên máy** (Docker daemon tắt): job `pdf-image` của CI là lần build đầu, cũng là lần đầu chạy `HEALTHCHECK`, user `node` và compose + Caddy qua HTTPS. Dữ liệu OCR trong image nay giống bản Windows (@tesseract.js-data 4.0.0_best_int), nhưng phông khác (DejaVu Serif so với Times New Roman), nên độ vừa ô trên Linux có thể khác (chưa đo). Font trên Linux/Docker và trình duyệt Safari chưa thử.
-- **Trang tĩnh chưa có Content-Security-Policy** (chỉ phản hồi API có): bước kiểm tra sau deploy sẽ báo CẢNH BÁO.
+- **Content-Security-Policy của trang** (`frontend/_headers`) đã được kiểm bằng Edge trên `wrangler dev` (không vi phạm nào, kể cả OCR trên máy và xem trước PDF của admin), chưa kiểm trên Cloudflare thật và chưa thử Safari, Firefox.
 - **PyMuPDF** có giấy phép kép AGPL-3.0 hoặc thương mại (Artifex). Chạy nó thành dịch vụ mạng có thể kéo theo nghĩa vụ AGPL; chủ dự án cần xem xét. Chân trang đã có liên kết mã nguồn.
 - **Model Gemini:** `GEMINI_MODEL` mặc định `gemini-3.6-flash` trong `wrangler.jsonc`; để trống thì code dùng mặc định họ 2.5, có thể 404 với project mới, và xưởng dịch admin không tự đổi model. `GEMINI_QUALITY_MODEL` dùng cho hai việc (sửa lỗi của admin và chế độ "Đối chiếu kỹ").
 - **Một `ADMIN_TOKEN` chung**: không có tài khoản admin riêng, không có nhật ký. Đổi token thì khóa Gemini đã lưu ở "Cài đặt" không giải mã được nữa.
@@ -649,6 +669,8 @@ Các script khác (không nằm trong `npm test`):
 - **`.wrangler/`** là D1/R2 local: tài khoản, lịch sử, sách đã tải lên, khóa dashboard đã mã hóa. Thư mục này nằm trong `.gitignore`; không chép cho người khác; xóa là mất dữ liệu local.
 - **Mật khẩu người dùng** được băm bằng PBKDF2-SHA256 100.000 vòng (tài khoản tạo trước 16/10/2026: 210.000 vòng). Cookie phiên `cat_hien_session` là HttpOnly, SameSite=Lax, sống 30 ngày, có cờ Secure khi chạy https; máy chủ chỉ giữ SHA-256 của nó.
 - **Phản hồi API**: mọi phản hồi `/api/…` có header bảo mật (nosniff, X-Frame-Options, Referrer-Policy, CSP cho JSON); yêu cầu thay đổi dữ liệu từ site khác bị từ chối (`origin`); kích thước thân yêu cầu bị giới hạn trước khi đọc. Lỗi nội bộ chỉ trả mã `ray`; log là một dòng JSON không có header, nội dung hay biến môi trường, và Workers Logs bỏ query string của URL.
+- **Content-Security-Policy của trang** nằm trong `frontend/_headers` (quy tắc `/*`), áp cho mọi trang và tệp tĩnh, kể cả các trang Worker phục vụ qua `env.ASSETS` (`/`, `/study`, trang pháp lý, `/admin`). Chỉ cho phép: script từ chính site (không script nội tuyến, không `eval`; `'wasm-unsafe-eval'` cho pdf.js, Tesseract, PaddleOCR), style nội tuyến (giao diện đặt thuộc tính `style`), phông từ `/fonts` và `data:` (phông xem trước PDF), ảnh `data:`/`blob:` và ảnh đại diện `*.googleusercontent.com`, worker và iframe `blob:`; cấm plugin, `<base>`, form gửi ra site khác và bị nhúng vào trang khác. Riêng worker của PaddleOCR (`/vendor/paddle/*`) có policy riêng cho phép `'unsafe-eval'` và `connect-src data:`; dòng `! Content-Security-Policy` bỏ policy chung trước khi đặt policy này.
+- **Nới CSP cho một tính năng mới**: (1) mở tính năng trong Edge với F12 → Console, đọc dòng "Refused to … violates … directive "<tên>"" để biết directive và nguồn bị chặn; (2) thêm đúng nguồn đó vào đúng directive trong `frontend/_headers`, hẹp nhất có thể (một tên miền cụ thể, không dùng `*` hay `https:`); không bao giờ thêm `'unsafe-inline'` hay `'unsafe-eval'` vào `script-src` của `/*`: đưa script ra tệp `.js` riêng thay vì viết nội tuyến; (3) chạy lại kiểm thử CSP bằng Edge (`tmp/audit/code/csp-test.mjs`, đổi chính sách thử trong `BASE` của tệp) và `node --test backend/site-head.test.mjs backend/config.test.mjs`; (4) nếu nguồn mới nhận dữ liệu người dùng (như Google Fonts trước đây nhận IP), ghi vào `frontend/quyen-rieng-tu.html`.
 - **Xóa dữ liệu**: xóa tài khoản xóa hàng D1 và tệp R2 riêng của người đó; D1 Time Travel vẫn khôi phục được hàng đã xóa trong thời hạn lưu (tối đa 30 ngày với Workers Paid). IP dùng để đếm hạn mức đăng ký nằm trong bảng `rate_limits` khoảng một ngày.
 - Kết quả quét trước bàn giao (các commit đã push: 70a3135, cb25216 và các commit của nhánh này): không có giá trị nào của `.dev.vars`, không có tệp PDF sách hay dữ liệu dịch; `git grep -E "AIza[0-9A-Za-z_-]{35}" <commit>` không ra kết quả. Ngoài tài liệu này, chuỗi "AIza" chỉ có trong khóa giả của các test và trong mẫu dò khóa (`backend/deploy.mjs`, `.github/workflows/ci.yml`).
 

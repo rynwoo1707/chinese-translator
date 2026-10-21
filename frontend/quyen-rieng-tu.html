@@ -7,24 +7,38 @@
  <meta name="description" content="Hoa Trí lưu những dữ liệu nào, gửi cho ai, giữ bao lâu và cách bạn xóa dữ liệu của mình.">
  <meta name="theme-color" content="#faf9f3">
  <title>Hoa Trí — Quyền riêng tư</title>
- <link rel="icon" href="/favicon.svg">
+ <meta property="og:type" content="website">
+ <meta property="og:site_name" content="Hoa Trí">
+ <meta property="og:locale" content="vi_VN">
+ <meta property="og:title" content="Hoa Trí — Quyền riêng tư">
+ <meta property="og:description" content="Hoa Trí lưu những dữ liệu nào, gửi cho ai, giữ bao lâu và cách bạn xóa dữ liệu của mình.">
+ <meta name="twitter:card" content="summary_large_image">
+ <link rel="preload" href="/fonts/be-vietnam-pro-400-latin.03d1b589cf.woff2" as="font" type="font/woff2" crossorigin>
+ <link rel="stylesheet" href="/fonts/fonts.css">
+ <link rel="icon" href="/favicon.ico" sizes="32x32">
+ <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+ <link rel="apple-touch-icon" href="/icons/apple-touch-icon.png">
+ <link rel="manifest" href="/manifest.webmanifest">
  <link rel="stylesheet" href="/style.css">
  <link rel="stylesheet" href="/header.css">
 </head>
 <body class="legal-body">
- <a class="skip-link" href="#noi-dung">Bỏ qua phần đầu trang</a>
+ <a class="skip-link" href="#noi-dung">Bỏ qua, đến nội dung chính</a>
  <header class="site-masthead"><div class="site-masthead-inner">
   <a class="brand" href="/" aria-label="Về trang chủ Hoa Trí">
    <img src="/favicon.svg" alt="" width="40" height="40">
    <span><strong>Hoa Trí<span class="brand-dot">.</span></strong><small>TRUNG VĂN · VIỆT NGỮ</small></span>
   </a>
   <nav class="site-nav" aria-label="Dành cho người học">
-   <a href="/#library"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 4h6l3 2 3-2h6v15h-6l-3 2-3-2H3z M12 6v15"/></svg><span>Học liệu</span></a>
-   <a href="/study.html"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 5h12M10 3v2M6 5c0 6 4 9 8 11M14 5c0 6-4 9-10 11M14 21l4-10 4 10M16 17h4"/></svg><span>Xưởng dịch<span class="nav-label-long"> học tập</span></span></a>
+   <a href="/"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 4h6l3 2 3-2h6v15h-6l-3 2-3-2H3z M12 6v15"/></svg><span>Học liệu</span></a>
+   <a href="/study"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 5h12M10 3v2M6 5c0 6 4 9 8 11M14 5c0 6-4 9-10 11M14 21l4-10 4 10M16 17h4"/></svg><span>Xưởng dịch</span></a>
   </nav>
-  <div class="site-header-actions"><a class="header-login" href="/#account">Tài khoản</a></div>
+  <div class="site-header-actions">
+   <a class="header-request" href="/#yeu-cau"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg><span>Yêu cầu dịch</span></a>
+   <a class="header-login" href="/#account">Đăng nhập</a>
+  </div>
  </div></header>
- <main id="noi-dung" class="legal-page">
+ <main id="noi-dung" class="legal-page" tabindex="-1">
   <article class="legal-article">
    <p class="eyebrow">THÔNG TIN PHÁP LÝ</p>
    <h1>Chính sách quyền riêng tư</h1>
@@ -90,6 +104,8 @@
     <h3>Trên trình duyệt của bạn</h3>
     <ul>
      <li>Bộ nhớ cục bộ (localStorage) giữ vài lựa chọn giao diện: màu trang và cỡ chữ khi đọc (<code>readerTheme</code>, <code>readerFontSize</code>), nhạc nền (<code>hoaTriMusic</code>), bật hay tắt chạm để tra chữ Hán (<code>hoatri.hanziTap</code>).</li>
+     <li>Khi bạn dùng Dịch cả quyển, bộ nhớ cục bộ còn giữ <code>hoa-tri-runner</code>: một mã ngẫu nhiên cố định của trình duyệt này, gửi lên máy chủ kèm tiến độ dịch để mỗi quyển chỉ được một thiết bị dịch tại một thời điểm. Máy chủ chỉ giữ mã này trong lúc lượt dịch đang chạy. Mỗi quyển đang dịch có thêm một mục <code>hoa-tri-book-usage:…</code> ghi số token Gemini đã dùng mà máy chủ chưa xác nhận; mục này tự xóa khi máy chủ đã nhận.</li>
+     <li>Bộ nhớ phiên (sessionStorage) giữ tạm <code>hoa-tri-request-draft</code> khi bạn bấm “Yêu cầu dịch” lúc chưa đăng nhập: tên tài liệu, liên kết, ghi chú và lựa chọn chia sẻ bạn đã nhập (không giữ tệp), để hộp yêu cầu tự mở lại sau khi đăng nhập. Mục này bị xóa ngay khi hộp yêu cầu mở lại hoặc khi bạn rời trang đăng nhập, và mất khi đóng tab.</li>
      <li>Trình duyệt có thể lưu sẵn mô hình nhận dạng chữ (OCR) để không phải tải lại. Đây là tệp chung của ứng dụng, không chứa dữ liệu của bạn.</li>
     </ul>
    </section>
@@ -121,10 +137,10 @@
     <ul>
      <li><strong>Google Gemini (Google LLC, Hoa Kỳ).</strong> Khi bạn dịch, văn bản cần dịch và ảnh của trang hoặc đoạn cần đọc lại được gửi tới Gemini API bằng khóa của bạn, theo điều khoản của Google dành cho khóa đó. Với gói miễn phí, Google có thể dùng nội dung gửi lên và câu trả lời để cải thiện sản phẩm, và người của Google có thể đọc chúng. Đừng gửi thông tin nhạy cảm, bí mật hay thông tin cá nhân của người khác.</li>
      <li><strong>Đăng nhập bằng Google</strong> (nếu bạn chọn): Google xác thực bạn và gửi cho Hoa Trí email, tên và ảnh đại diện. Ảnh đại diện được trình duyệt tải trực tiếp từ máy chủ của Google.</li>
-     <li><strong>Google Fonts:</strong> trang tải phông chữ Be Vietnam Pro và Noto Serif từ máy chủ của Google, nên trình duyệt gửi địa chỉ IP của bạn tới Google khi tải phông.</li>
      <li><strong>Cloudflare (Cloudflare, Inc., Hoa Kỳ):</strong> chạy trang web, cơ sở dữ liệu và kho tệp của Hoa Trí. Cloudflare ghi nhật ký kỹ thuật cho các yêu cầu tới máy chủ (như thời điểm, đường dẫn đã bỏ phần tham số, mã kết quả và thông tin mạng như địa chỉ IP); nhật ký giữ tối đa 7 ngày.</li>
      <li><strong>Giọng đọc của trình duyệt:</strong> chức năng Nghe đọc dùng giọng đọc có sẵn trên thiết bị. Với một số giọng đọc trực tuyến (ví dụ giọng Google trên Chrome), trình duyệt có thể gửi đoạn văn đang đọc tới nhà cung cấp giọng đọc.</li>
     </ul>
+    <p>Phông chữ của trang (Be Vietnam Pro, Noto Serif) do chính máy chủ Hoa Trí cung cấp, nên việc tải phông không gửi yêu cầu nào tới Google.</p>
     <p>Dịch vụ giữ bố cục PDF do chính bên vận hành chạy (xem mục 6). Để tách chữ, dịch vụ nhận tệp PDF bạn tải lên (cả tệp, tối đa 25 MB, kèm danh sách trang cần tách); khi Dịch cả quyển, dịch vụ chỉ nhận từng phần tối đa 20 trang được cắt sẵn trên thiết bị của bạn; khi cập nhật bố cục, dịch vụ nhận lại các trang đã tách trước đó. Để dựng bản PDF tiếng Việt, dịch vụ nhận ảnh trang, vị trí và chữ của các đoạn đã tách cùng bản dịch. Dịch vụ xử lý trong bộ nhớ và không giữ lại tệp.</p>
    </section>
 
@@ -184,5 +200,6 @@
  </main>
  <footer class="site-footer" data-site-footer><div class="site-footer-inner"><p class="site-footer-brand"><strong>Hoa Trí</strong> © 2026</p><nav class="site-footer-links" aria-label="Thông tin về Hoa Trí"><a href="/dieu-khoan">Điều khoản sử dụng</a><a href="/quyen-rieng-tu">Quyền riêng tư</a><a href="https://github.com/rynwoo1707/chinese-translator">Mã nguồn</a></nav></div></footer>
  <script type="module" src="/site-footer.js"></script>
+ <script type="module" src="/site-header.js"></script>
 </body>
 </html>

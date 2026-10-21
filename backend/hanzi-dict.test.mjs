@@ -178,7 +178,8 @@ test('a tab that outlives a deploy reloads the manifest once and switches to the
  const fetch=async(path,init={})=>{
   log.push(`${path} ${init.cache||''}`.trim());
   const body=path==='/vendor/dict/manifest.json'?JSON.stringify(live.manifest):path.startsWith(live.manifest.base)?live.files.get(path.slice(live.manifest.base.length)):undefined;
-  // Old files are gone after a deploy; the SPA fallback answers them with index.html.
+  // Old files are gone after a deploy; an older deployment's SPA fallback answers them with index.html and status 200
+  // (the current 404 page is HTML too, with status 404).
   if(body===undefined)return {ok:true,status:200,headers:new Headers({'content-type':'text/html'}),json:async()=>{throw new SyntaxError('Unexpected token <');}};
   return {ok:true,status:200,headers:new Headers({'content-type':'application/json'}),json:async()=>JSON.parse(body)};
  };

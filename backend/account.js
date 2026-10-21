@@ -1,9 +1,10 @@
 // Deleting an account: the student from the account page (DELETE /api/me), or an admin (DELETE /api/users/:id), who
-// can also lock and unlock one (PATCH /api/users/:id {disabled}). Everything private goes: history, study books,
-// originals and translations, requests and their files, sessions. Books published to the shared library stay, without
-// the owner's name.
+// can also lock and unlock one (PATCH /api/users/:id {disabled}) and create a password reset link for it
+// (POST /api/users/:id/password-reset). Everything private goes: history, study books, originals and translations,
+// requests and their files, sessions, password reset links. Books published to the shared library stay, without the
+// owner's name.
 import {json,crossOrigin,originRefused,logEvent} from './http.js';
-import {currentReader,checkPassword,clearSessionCookie,signedInWithin} from './reader-auth.js';
+import {currentReader,checkPassword,clearSessionCookie,signedInWithin,createPasswordReset} from './reader-auth.js';
 import {rateLimit} from './rate-limit.js';
 import {removeKeys,removePrefix} from './study-history.js';
 
@@ -61,6 +62,7 @@ export async function deleteAccount(env,userId){
    guarded("DELETE FROM stories WHERE owner_user_id=?1 AND visibility='private'"),
    guarded('UPDATE stories SET owner_user_id=NULL WHERE owner_user_id=?1'),
    guarded('DELETE FROM reader_sessions WHERE user_id=?1'),
+   guarded('DELETE FROM reader_password_resets WHERE user_id=?1'),
    guarded('DELETE FROM reader_credentials WHERE user_id=?1'),
    // Daily counts and leases keyed by the account id; the per-IP registration count stays, it is not about this account.
    guarded("DELETE FROM rate_limits WHERE key IN ('upload:'||?1,'pdf-extract:'||?1,'pdf-render:'||?1,'pdf-source:'||?1)"),
@@ -95,6 +97,17 @@ export async function accountRoute(request,env,url,path){
 
 // Called after the admin check.
 export async function adminAccountRoute(request,env,path){
+ // A student who forgot a password gets a one-time link from an admin or teacher: no e-mail is sent.
+ const reset=path.match(/^\/api\/users\/([^/]+)\/password-reset$/u);
+ if(reset){
+  if(request.method!=='POST')return json({error:'Phương thức không được hỗ trợ.'},405);
+  const link=await createPasswordReset(env,reset[1]);
+  if(link.refused==='missing')return json({error:'Không tìm thấy tài khoản.'},404);
+  if(link.refused==='google')return json({error:'Tài khoản này đăng nhập bằng Google nên không có mật khẩu để đặt lại.',code:'no_password'},409);
+  if(link.refused==='disabled')return json({error:'Tài khoản này đang bị tạm khóa. Hãy mở khóa trước khi tạo liên kết đặt lại mật khẩu.',code:'account_disabled'},409);
+  // The token is in the fragment, which browsers never send to a server or in a Referer.
+  return json({resetUrl:`/#dat-lai-mat-khau?token=${link.token}`,expiresAt:link.expiresAt},201);
+ }
  const match=path.match(/^\/api\/users\/([^/]+)$/u);if(!match)return null;
  const id=match[1];
  if(request.method==='DELETE'){
@@ -105,10 +118,11 @@ export async function adminAccountRoute(request,env,path){
  }
  if(request.method==='PATCH'){
   const body=await request.json();if(typeof body?.disabled!=='boolean')return json({error:'Hãy chọn khóa hoặc mở khóa tài khoản.'},400);
-  // Locking also ends the account's sessions; currentReader refuses a locked account in any case.
+  // Locking also ends the account's sessions and its unused password reset links, everything that could sign it in
+  // except the password; currentReader refuses a locked account in any case.
   const results=await env.DB.batch([
    env.DB.prepare('UPDATE reader_users SET disabled_at=CASE WHEN ?2 THEN COALESCE(disabled_at,CURRENT_TIMESTAMP) ELSE NULL END,updated_at=CURRENT_TIMESTAMP WHERE id=?1').bind(id,body.disabled?1:0),
-   ...(body.disabled?[env.DB.prepare('DELETE FROM reader_sessions WHERE user_id=?').bind(id)]:[])
+   ...(body.disabled?[env.DB.prepare('DELETE FROM reader_sessions WHERE user_id=?').bind(id),env.DB.prepare('DELETE FROM reader_password_resets WHERE user_id=?').bind(id)]:[])
   ]);
   if(!results[0]?.meta?.changes)return json({error:'Không tìm thấy tài khoản.'},404);
   return json({ok:true,disabled:body.disabled});

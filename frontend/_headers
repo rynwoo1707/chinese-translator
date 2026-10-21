@@ -1,9 +1,26 @@
+# Pages and files of frontend/, also when the Worker serves a page through env.ASSETS (/, /study, legal pages, /admin).
+# API answers carry their own headers (backend/http.js).
+# The Content-Security-Policy was checked with every page and feature in Edge (tmp/audit/code/csp-test.mjs): library,
+# reader and bilingual reading, Chinese character lookup, account, study workspace with a PDF and local OCR, admin.
+# 'wasm-unsafe-eval': pdf.js, Tesseract and PaddleOCR run WebAssembly. 'unsafe-inline' styles: the pages set style=""
+# attributes. data:/blob: images, workers and frames: rendered pages, OCR workers, the admin's PDF preview.
+# googleusercontent.com: Google account avatars. Fonts are self-hosted (/fonts), so no Google font host is allowed. Relaxing it for a new feature: ONBOARDING.md, section 9.
 /*
   X-Content-Type-Options: nosniff
   Referrer-Policy: no-referrer
   X-Frame-Options: DENY
   Permissions-Policy: camera=(), microphone=(), geolocation=()
   Cross-Origin-Opener-Policy: same-origin
+  Content-Security-Policy: default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; font-src 'self' data:; img-src 'self' data: blob: https://*.googleusercontent.com; worker-src 'self' blob:; frame-src 'self' blob:; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'
+# PaddleOCR's worker builds its model code at run time (unsafe-eval) and reads data: URLs. A worker follows the policy
+# of its own script, so this applies inside that worker only; the last three directives matter only if the file is
+# opened as a page.
+/vendor/paddle/*
+  ! Content-Security-Policy
+  Content-Security-Policy: default-src 'self'; script-src 'self' 'wasm-unsafe-eval' 'unsafe-eval'; connect-src 'self' data:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'
+# Font files carry a hash of their content in the name, so they never change; fonts.css keeps its URL and is revalidated.
+/fonts/*.woff2
+  Cache-Control: public, max-age=31536000, immutable
 # Dictionary data (npm run prepare:dict): each build gets a new content-hashed folder, so its files never change.
 # /vendor/dict/manifest.json stays outside this rule and is revalidated on every load.
 /vendor/dict/v/*
