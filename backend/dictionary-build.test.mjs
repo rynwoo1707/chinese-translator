@@ -227,3 +227,19 @@ test('prepare-dictionary writes a version folder, then the manifest, and knows w
   assert.equal(await readFile(join(folder,'v',second.id,'LICENSE.txt'),'utf8'),second.files.get('LICENSE.txt'));
  }finally{await rm(folder,{recursive:true,force:true});}
 });
+
+// The GitHub account behind CVDICT and hanviet-pinyin-wordlist is gone: a fresh clone builds the dictionary from the
+// copies in backend/dictionary-sources/, which must stay byte-identical to the pinned versions.
+test('prepare-dictionary: sources whose upstream is gone come from the repo, checked by size and SHA-256, never downloaded',async()=>{
+ const local=SOURCES.filter(source=>source.local);
+ assert.deepEqual(local.map(source=>source.key).sort(),['cvdict','hanviet','hanvietLicense']);
+ const empty=await mkdtemp(join(tmpdir(),'hoatri-dict-'));
+ try{
+  for(const source of local){
+   const bytes=await getSource(source,{cache:empty,log:()=>assert.fail(`${source.name} was downloaded`)});
+   assert.equal(bytes.length,source.bytes,source.name);assert.equal(createHash('sha256').update(bytes).digest('hex'),source.sha256,source.name);
+  }
+  assert.deepEqual(await readdir(empty),[],'nothing written to the cache');
+  await assert.rejects(getSource(local[0],{cache:empty,repo:empty}),/Thiếu backend\/dictionary-sources\/CVDICT\.u8 trong repo/u);
+ }finally{await rm(empty,{recursive:true,force:true});}
+});

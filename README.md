@@ -19,7 +19,7 @@ Web app dịch sách và tài liệu tiếng Trung sang tiếng Việt bằng Ge
    git clone -b handoff/2026-10-16 https://github.com/rynwoo1707/chinese-translator.git C:\src\chinese-translator
    ```
 2. Mở thư mục `C:\src\chinese-translator` và bấm đúp **`start.cmd`**.
-   - Lần đầu: nếu máy chưa có Node.js hoặc Python, nó hỏi rồi tự cài (bằng winget). Sau đó nó cài thư viện, chạy `npm run setup` (vài phút, cần Internet, tải thêm khoảng 29 MB dữ liệu từ điển) và tự mở trình duyệt.
+   - Lần đầu: nếu máy chưa có Node.js hoặc Python, nó hỏi rồi tự cài (bằng winget). Sau đó nó cài thư viện, chạy `npm run setup` (vài phút, cần Internet, tải thêm khoảng 18 MB dữ liệu từ điển) và tự mở trình duyệt.
    - Các lần sau: bấm đúp `start.cmd` là chạy, kèm cập nhật code mới nhất và áp migration mới vào cơ sở dữ liệu local.
 3. Trong trình duyệt: "Tạo tài khoản" (đánh dấu ô đồng ý điều khoản) → "Xưởng dịch học tập" → nhập "Tên nội dung", dán khóa Gemini API của bạn (tạo ở https://aistudio.google.com/apikey), chọn PDF → "Bắt đầu dịch →".
 

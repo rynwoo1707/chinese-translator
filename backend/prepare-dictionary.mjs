@@ -1,6 +1,7 @@
 // Builds the offline Chinese lookup data in frontend/vendor/dict/ (git-ignored): `npm run prepare:dict`. Downloads the
-// pinned open sources once (about 29 MB, no API key), checks their size and SHA-256 and keeps them in
-// .runtime/dict-sources/. Re-running is a no-op while the sources and the builder code are unchanged.
+// pinned open sources once (about 18 MB, no API key), checks their size and SHA-256 and keeps them in
+// .runtime/dict-sources/. Sources whose upstream is gone ship in the repo (`local`, backend/dictionary-sources/) and are
+// checked the same way. Re-running is a no-op while the sources and the builder code are unchanged.
 // Offline: --from <folder> (or DICT_SOURCE_DIR) holding the files named in SOURCES. --print-hashes [url…] prints the
 // size and SHA-256 of the pinned URLs (or the given ones) so a maintainer can bump a pin.
 import {mkdir,readFile,writeFile,rename,rm,readdir} from 'node:fs/promises';
@@ -15,11 +16,14 @@ const root=fileURLToPath(new URL('../',import.meta.url));
 export const OUTPUT=join(root,'frontend','vendor','dict'),CACHE=join(root,'.runtime','dict-sources');
 const MB=1024*1024,DOWNLOAD_LIMIT=40*MB,UNZIP_LIMIT=32*MB;
 // Pinned by commit (CC-CEDICT from Debian's packaging repository, because MDBG's export changes daily) or by release.
+// `url` stays as the record of where a source came from (it is written into the dictionary's manifest). The GitHub
+// account behind CVDICT and hanviet-pinyin-wordlist was removed (found 2026-10-21): those three files are read from
+// `local`, byte-identical copies kept in the repo.
 export const SOURCES=[
  {key:'cedict',file:'cedict_ts.u8',name:'CC-CEDICT',version:'2026-09-06',license:'CC BY-SA 4.0',url:'https://salsa.debian.org/debian/cc-cedict/-/raw/906c4c2138b1ab9257e5bfc7f10c38bb1a318484/cedict_ts.u8',bytes:9842665,sha256:'76e7e169e7609f51abcd15b89579a627cd330b994818cd9b6d97677955794866'},
- {key:'cvdict',file:'CVDICT.u8',name:'CVDICT',version:'1.0.1',license:'CC BY-SA 4.0',url:'https://raw.githubusercontent.com/ph0ngp/CVDICT/c379d909e308343a247e51619f7839a2060a271c/CVDICT.u8',bytes:10803314,sha256:'4dde4b204193efa9c192d7f7daeab1bb579c8ccd7c41ed90d1b6caee22ba0948'},
- {key:'hanviet',file:'hanviet.csv',name:'hanviet-pinyin-wordlist',version:'b9923df',license:'MIT',url:'https://raw.githubusercontent.com/ph0ngp/hanviet-pinyin-wordlist/b9923df92c8b55f013001390e37cddd35e986dc1/hanviet.csv',bytes:195371,sha256:'dd90d59db1265a47317477c9f741baeff7cb4dfed58d9a0c2be5f69b9ed14d66'},
- {key:'hanvietLicense',file:'hanviet-LICENSE.txt',name:'hanviet-pinyin-wordlist LICENSE',version:'b9923df',license:'MIT',url:'https://raw.githubusercontent.com/ph0ngp/hanviet-pinyin-wordlist/b9923df92c8b55f013001390e37cddd35e986dc1/LICENSE',bytes:1061,sha256:'4c88b09e549ab516a6a7acb5b2091fb664dba39dd73e3530199c59783a819d25'},
+ {key:'cvdict',file:'CVDICT.u8',name:'CVDICT',version:'1.0.1',license:'CC BY-SA 4.0',url:'https://raw.githubusercontent.com/ph0ngp/CVDICT/c379d909e308343a247e51619f7839a2060a271c/CVDICT.u8',local:'backend/dictionary-sources/CVDICT.u8',bytes:10803314,sha256:'4dde4b204193efa9c192d7f7daeab1bb579c8ccd7c41ed90d1b6caee22ba0948'},
+ {key:'hanviet',file:'hanviet.csv',name:'hanviet-pinyin-wordlist',version:'b9923df',license:'MIT',url:'https://raw.githubusercontent.com/ph0ngp/hanviet-pinyin-wordlist/b9923df92c8b55f013001390e37cddd35e986dc1/hanviet.csv',local:'backend/dictionary-sources/hanviet.csv',bytes:195371,sha256:'dd90d59db1265a47317477c9f741baeff7cb4dfed58d9a0c2be5f69b9ed14d66'},
+ {key:'hanvietLicense',file:'hanviet-LICENSE.txt',name:'hanviet-pinyin-wordlist LICENSE',version:'b9923df',license:'MIT',url:'https://raw.githubusercontent.com/ph0ngp/hanviet-pinyin-wordlist/b9923df92c8b55f013001390e37cddd35e986dc1/LICENSE',local:'backend/dictionary-sources/hanviet-LICENSE.txt',bytes:1061,sha256:'4c88b09e549ab516a6a7acb5b2091fb664dba39dd73e3530199c59783a819d25'},
  {key:'unihan',file:'Unihan.zip',name:'Unihan',version:'18.0.0',license:'Unicode License v3',url:'https://www.unicode.org/Public/18.0.0/ucd/Unihan.zip',bytes:8340649,sha256:'4c93ea9c1f636451729a840978f1667a53886af37ba854fdcce109721c63d43e'},
  {key:'radicals',file:'CJKRadicals.txt',name:'CJKRadicals',version:'18.0.0',license:'Unicode License v3',url:'https://www.unicode.org/Public/18.0.0/ucd/CJKRadicals.txt',bytes:5491,sha256:'689e2e5852699e7115823dc0b6d3e615eb767c7f477b615678f4f989d1f06105'}
 ];
@@ -58,11 +62,12 @@ async function download(url,limit=DOWNLOAD_LIMIT){
  return new Uint8Array(Buffer.concat(chunks));
 }
 const readIfPresent=path=>readFile(path).then(buffer=>new Uint8Array(buffer),()=>null);
-// --from folder first, then the verified cache, then the network. --from means offline: a file missing from both the
-// folder and the cache is reported, not downloaded.
-export async function getSource(source,{from='',cache=CACHE,log=console.log}={}){
+// --from folder first, then the copy in the repo (`local`), then the verified cache, then the network. --from means
+// offline: a file missing from the folder, the repo and the cache is reported, not downloaded.
+export async function getSource(source,{from='',cache=CACHE,log=console.log,repo=root}={}){
  const offline=from?await readIfPresent(join(from,source.file)):null;
  if(offline)return verifySource(source,offline);
+ if(source.local){const kept=await readIfPresent(join(repo,source.local));if(!kept)throw new Error(`Thiếu ${source.local} trong repo: lấy lại bằng git (git checkout -- ${source.local}).`);return verifySource(source,kept);}
  const cached=join(cache,source.sha256,source.file),saved=await readIfPresent(cached);
  if(saved){try{return verifySource(source,saved);}catch{await rm(cached,{force:true});}}
  if(from)throw new Error(`Thiếu ${source.file} trong ${from}.`);
@@ -111,7 +116,7 @@ export async function writeDictionary({id,manifest,files},directory=OUTPUT){
 }
 
 async function printHashes(urls){
- for(const url of urls.length?urls:SOURCES.map(source=>source.url)){const bytes=await download(url,100*MB);console.log(`${bytes.length} ${sha256(bytes)} ${url}`);}
+ for(const url of urls.length?urls:SOURCES.filter(source=>!source.local).map(source=>source.url)){const bytes=await download(url,100*MB);console.log(`${bytes.length} ${sha256(bytes)} ${url}`);}
 }
 async function main(args){
  if(args.includes('--print-hashes'))return printHashes(args.filter(arg=>/^https?:/u.test(arg)));

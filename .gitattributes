@@ -6,6 +6,10 @@
 *.pdf binary
 *.tar binary
 *.wasm binary
+# Dictionary sources kept byte for byte (their SHA-256 is checked): git never rewrites them.
+backend/dictionary-sources/*.u8 -text
+backend/dictionary-sources/*.csv -text
+backend/dictionary-sources/*.txt -text
 # Windows batch files need CRLF: cmd.exe misreads labels in LF-only files.
 *.cmd text eol=crlf
 *.bat text eol=crlf

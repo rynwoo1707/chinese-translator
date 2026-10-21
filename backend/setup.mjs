@@ -126,7 +126,7 @@ else attempt('Chưa tạo được cơ sở dữ liệu local. Nếu wrangler b�
 
 // Last, because it is optional and the slowest download, and no other step needs it. Warning only: without the data the
 // lookup panel says so and translation works as before. prepare-dictionary.mjs skips itself when already up to date.
-step(8,'Từ điển Pinyin & Hán Việt cho tra cứu chữ Hán (tải khoảng 29 MB một lần, không dùng Gemini)');
+step(8,'Từ điển Pinyin & Hán Việt cho tra cứu chữ Hán (tải khoảng 18 MB một lần, không dùng Gemini)');
 try{node('backend/prepare-dictionary.mjs');}catch{warnings.push('Chưa tạo được từ điển tra cứu chữ Hán (xem lỗi ở bước 8). Nút "Tra chữ Hán" sẽ báo chưa có dữ liệu; phần dịch vẫn dùng được. Khi có mạng, chạy "npm run prepare:dict".');}
 
 for(const warning of warnings)console.warn(`\nCẢNH BÁO: ${warning}`);
