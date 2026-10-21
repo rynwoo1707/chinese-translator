@@ -12,6 +12,8 @@ dist
 tmp
 output
 frontend/vendor
+backend/paddle-models
+backend/dictionary-sources
 *.pdf
 **/__pycache__
 samples

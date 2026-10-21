@@ -30,7 +30,14 @@ export async function tessdataIsClean(dir=RUNTIME_TESSDATA){
 
 const samePath=(a,b)=>process.platform==='win32'?a.toLowerCase()===b.toLowerCase():a===b;
 if(process.argv[1]&&samePath(fileURLToPath(import.meta.url),resolve(process.argv[1]))){
- const option=name=>{const i=process.argv.indexOf(name);return i>0?process.argv[i+1]:undefined;};
- const result=await prepareTessdata({from:option('--from')||null,to:option('--to')?resolve(option('--to')):RUNTIME_TESSDATA});
- console.log(`PDF OCR language data prepared (${LANGUAGES.join(' + ')}) in ${result.to}; removed config lines: ${Object.entries(result.removed).map(([lang,keys])=>`${lang}=${keys.length}`).join(', ')}.`);
+ const option=name=>{const i=process.argv.indexOf(name);return i>0?process.argv[i+1]:undefined;},from=option('--from')||null;
+ try{
+  const result=await prepareTessdata({from,to:option('--to')?resolve(option('--to')):RUNTIME_TESSDATA});
+  console.log(`PDF OCR language data prepared (${LANGUAGES.join(' + ')}) in ${result.to}; removed config lines: ${Object.entries(result.removed).map(([lang,keys])=>`${lang}=${keys.length}`).join(', ')}.`);
+ }catch(error){
+  if(error.code!=='ENOENT')throw error;
+  // The default source is the copy setup step 2 makes from node_modules; name the missing file instead of a stack trace.
+  console.error(`LỖI: thiếu ${error.path}.${from?'':' Bước 2 của cài đặt chép dữ liệu này vào frontend/vendor/tessdata: chạy "npm run setup" (Windows: bấm đúp start.cmd) rồi chạy lại.'}`);
+  process.exitCode=1;
+ }
 }

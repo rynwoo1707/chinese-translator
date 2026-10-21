@@ -2,6 +2,7 @@
 import {readFile,appendFile} from 'node:fs/promises';
 import {randomBytes} from 'node:crypto';
 import {spawnSync} from 'node:child_process';
+import {relative,sep} from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {prepareTessdata,tessdataIsClean} from './prepare-ocr.mjs';
 import {PYTHON_SHORTCUT_MESSAGE} from './engine.mjs';
@@ -12,8 +13,12 @@ if(url.hostname!=='127.0.0.1'&&url.hostname!=='localhost')throw new Error('Đã 
 const token=value('PDF_LAYOUT_SERVICE_TOKEN')||randomBytes(32).toString('hex'),add=[];
 if(!existingUrl)add.push(`PDF_LAYOUT_SERVICE_URL=${url.origin}`);if(!value('PDF_LAYOUT_SERVICE_TOKEN'))add.push(`PDF_LAYOUT_SERVICE_TOKEN=${token}`);
 if(add.length)await appendFile(file,`\n# Local PDF layout service\n${add.join('\n')}\n`);
-// OCR data from an older checkout still carries the noisy config lines; refresh it before serving.
-if(!process.env.TESSDATA_PREFIX&&!await tessdataIsClean()){const prepared=await prepareTessdata();console.log(`Đã chuẩn bị dữ liệu OCR (chi_sim + eng) tại ${prepared.to}.`);}
+// OCR data from an older checkout still carries the noisy config lines; refresh it before serving. Only scanned pages need
+// it, so without its source (frontend/vendor/tessdata, copied by setup step 2) the service still starts and says so.
+if(!process.env.TESSDATA_PREFIX&&!await tessdataIsClean()){
+ try{const prepared=await prepareTessdata();console.log(`Đã chuẩn bị dữ liệu OCR (chi_sim + eng) tại ${prepared.to}.`);}
+ catch(error){const cause=error.code==='ENOENT'&&error.path?`thiếu ${relative(fileURLToPath(new URL('../../',import.meta.url)),error.path).split(sep).join('/')}`:error.message;console.warn(`CẢNH BÁO: chưa chuẩn bị được dữ liệu OCR cho PDF dạng scan (${cause}), nên trang scan sẽ báo lỗi OCR; trang PDF có chữ vẫn dịch giữ bố cục được. Chạy "npm run setup" rồi khởi động lại lệnh này.`);}
+}
 // Machine-specific paths written by `npm run setup`; a value set in the shell still wins.
 for(const key of ['PDF_PYTHON','CHROMIUM_EXECUTABLE_PATH','PDF_FONT_PATH'])if(!process.env[key]&&value(key))process.env[key]=value(key);
 // Python only starts on the first PDF, so a missing PyMuPDF would otherwise surface only after "Bắt đầu dịch".

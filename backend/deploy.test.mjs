@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {mkdirSync,mkdtempSync,readFileSync,rmSync,writeFileSync} from 'node:fs';
+import {createHash} from 'node:crypto';
 import {tmpdir} from 'node:os';
 import {basename,dirname,join} from 'node:path';
 import {appliedMigrationNames,collisionMessage,collisions,configProblems,confirmed,main,parseDeployOutput,parseJsonOutput,parseJsonc,parseSecretsText,pendingMigrations,placeholderFiles,PLACEHOLDER,postDeployChecks,secretProblems,validateSecretsFile,VENDOR_FILES} from './deploy.mjs';
@@ -23,7 +24,13 @@ function project({cfg=config(),migrations=['0001_initial.sql','0002_more.sql'],p
  for(const name of migrations)write(join(root,'database/migrations',name),'SELECT 1;');
  for(const [name,text] of Object.entries(pages))write(join(root,'frontend',name),text);
  for(const file of ['node_modules/wrangler/bin/wrangler.js',...VENDOR_FILES])write(join(root,file),'');
+ paddleModels(root);
  return root;
+}
+// A miniature backend/paddle-models (two 1 KiB tars and their manifest): deploy checks it with the real checkPaddleModels.
+function paddleModels(root){
+ const models=['det.tar','rec.tar'].map((file,index)=>{const bytes=Buffer.alloc(1024,index+1);bytes.write('ustar',257,'latin1');write(join(root,'backend/paddle-models',file),bytes);return {name:file,file,bytes:bytes.length,sha256:createHash('sha256').update(bytes).digest('hex')};});
+ write(join(root,'backend/paddle-models/manifest.json'),`${JSON.stringify({sdk:'@paddleocr/paddleocr-js@0.4.2',models},null,2)}\n`);
 }
 function secretsFile(text=`# production\nADMIN_TOKEN=${ADMIN}\nPDF_LAYOUT_SERVICE_URL=${PDF_URL}\nexport PDF_LAYOUT_SERVICE_TOKEN="${PDF_TOKEN}"\n`,name='hoa-tri.secrets.env'){
  return write(join(tempDir('hoa-tri-secrets-'),name),text);
@@ -272,6 +279,7 @@ test('A full deploy: tests with paid APIs blocked, migrations, tagged deploy, li
  assert.equal(run.code,0,run.text);
  const names=run.cloud.names().filter(name=>!name.startsWith('git '));
  assert.deepEqual(names.map(name=>name.split(' --')[0].replace(/ (DB|muc-viet-files)$/u,'')),['wrangler whoami','wrangler r2 bucket info','wrangler secret list','wrangler deployments status','node backend/vendor.mjs','node /opt/npm/bin/npm-cli.js test','wrangler deploy','wrangler d1 execute','wrangler d1 time-travel info','wrangler d1 migrations apply','wrangler deploy']);
+ assert.ok(names.includes('node backend/vendor.mjs --require-paddle'),'production fails instead of shipping without PaddleOCR');
  const tests=run.cloud.calls.find(call=>call.name.endsWith('npm-cli.js test'));
  assert.match(tests.options.env.NODE_OPTIONS,/^--import=file:\/\/.*backend\/test-support\/no-paid-api\.mjs$/u);
  const deployed=run.cloud.calls.at(-1).args.slice(1);
@@ -283,6 +291,24 @@ test('A full deploy: tests with paid APIs blocked, migrations, tagged deploy, li
  assert.equal(failed.code,1);assert.ok(!failed.cloud.names().some(name=>name.startsWith('wrangler deploy --strict')));assert.match(failed.text,/time-travel restore DB --bookmark=/u);
  const unhealthy=await deploy(project(),['--yes','--skip-tests'],{site:fakeSite({routes:{'/api/me':()=>new Response('oops',{status:500})}})});
  assert.equal(unhealthy.code,1);assert.match(unhealthy.text,/1 kiểm tra sau deploy chưa đạt/u);
+});
+
+// Locally PaddleOCR is optional; production must ship it, so damaged models in the repo stop the deploy.
+test('Deploy ships PaddleOCR: damaged models in the repo stop it before vendor, which runs with --require-paddle',async()=>{
+ const good=await deploy(project(),['--check','--skip-tests']);
+ assert.equal(good.code,0,good.text);assert.ok(good.cloud.names().includes('node backend/vendor.mjs --require-paddle'),good.cloud.names().join('\n'));
+ const cases=[
+  [root=>writeFileSync(join(root,'backend/paddle-models/rec.tar'),Buffer.alloc(100)),/rec\.tar có 100 byte thay vì 1024: tệp bị cắt hoặc bị thay/u],
+  [root=>writeFileSync(join(root,'backend/paddle-models/det.tar'),'version https://git-lfs.github.com/spec/v1\noid sha256:781056046c9ed77a15c94681605db6a0f62317c2e9cce6931c71da2478d4bc30\nsize 4843520\n'),/det\.tar chỉ là con trỏ Git LFS/u],
+  [root=>rmSync(join(root,'backend/paddle-models'),{recursive:true}),/Thiếu backend\/paddle-models\/manifest\.json/u]
+ ];
+ for(const [damage,pattern] of cases){
+  const root=project();damage(root);
+  const run=await deploy(root,['--check','--skip-tests']);
+  assert.equal(run.code,1,run.text);assert.match(run.text,pattern);
+  assert.match(run.text,/LỖI: Mô hình PaddleOCR chưa dùng được: .* Lấy lại bằng: git checkout -- backend\/paddle-models rồi chạy lại\./u);
+  assert.ok(!run.cloud.names().some(name=>/^(node backend\/vendor\.mjs|wrangler deploy )/u.test(name)),pattern.source);
+ }
 });
 
 test('The optional lookup dictionary: a warning before deploy when it was never built, a live check when it was',async()=>{

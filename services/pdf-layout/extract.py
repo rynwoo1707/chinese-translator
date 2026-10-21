@@ -2859,7 +2859,7 @@ def extract(payload):
             except (ValueError, MemoryError):
                 raise
             except OcrUnavailable as error:
-                raise ValueError(f"Trang {index + 1} là scan nhưng không chạy được OCR Tesseract ({error}). Hãy chạy npm run prepare:pdf-ocr hoặc đặt TESSDATA_PREFIX tới thư mục có chi_sim và eng.") from error
+                raise ValueError(f"Trang {index + 1} là scan nhưng không chạy được OCR Tesseract ({error}). Hãy chạy npm run setup (Windows: bấm đúp start.cmd) hoặc đặt TESSDATA_PREFIX tới thư mục có chi_sim và eng.") from error
             except Exception as error:
                 # Only Tesseract failures get the installation advice; anything else is a problem with this page.
                 detail = (str(error) or type(error).__name__).strip().splitlines()[0][:160]
@@ -2991,11 +2991,14 @@ def user_message(error):
         return "Không đủ bộ nhớ để xử lý các trang đã chọn. Hãy chọn ít trang hơn cho mỗi lượt."
     if isinstance(error, json.JSONDecodeError):
         return "Dữ liệu gửi tới dịch vụ PDF không hợp lệ."
-    detail = (str(error) or type(error).__name__).strip().splitlines()[0][:200]
+    first = (str(error) or type(error).__name__).strip().splitlines()[0]
+    detail = first[:200]
     if isinstance(error, getattr(fitz, "FileDataError", ())) or re.search(r"(?i)failed to open|cannot open|no objects found|format error|syntax error", detail):
         return "Không đọc được PDF: tệp bị hỏng hoặc không đúng định dạng PDF."
-    if isinstance(error, ValueError) and detail and not detail.isascii():
-        return detail
+    # Our own Vietnamese messages end with the remedy, after a folder path that can be long: keep up to the 400
+    # characters the Worker shows (backend/pdf-layout.js) instead of cutting the advice off.
+    if isinstance(error, ValueError) and first and not first.isascii():
+        return first[:400]
     return f"Dịch vụ PDF gặp lỗi khi xử lý ({type(error).__name__}: {detail})."
 
 

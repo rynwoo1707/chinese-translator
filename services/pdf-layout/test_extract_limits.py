@@ -131,7 +131,7 @@ class ScanFailures(unittest.TestCase):
             extract.extract(payload(self.doc, "1"))
         message = extract.user_message(caught.exception)
         self.assertIn("Trang 1: không xử lý được trang scan (RuntimeError: code=2: cannot render pixmap)", message)
-        self.assertNotIn("prepare:pdf-ocr", message)
+        self.assertNotIn("npm run setup", message)
 
     def test_missing_language_data_is_named_instead_of_finding_no_chinese_text(self):
         source = fitz.open()
@@ -140,7 +140,10 @@ class ScanFailures(unittest.TestCase):
         page = scan.new_page(width=400, height=300)
         page.insert_image(page.rect, pixmap=source[0].get_pixmap(dpi=200))
         saved = os.environ.get("TESSDATA_PREFIX")
-        with tempfile.TemporaryDirectory() as empty:
+        with tempfile.TemporaryDirectory() as root:
+            # A long folder name, as in "C:\Users\<full name>\Downloads\...": the advice must still reach the student.
+            empty = os.path.join(root, "thu-muc-du-an-co-ten-dai-" + "x" * 90)
+            os.makedirs(empty)
             with open(os.path.join(empty, "eng.traineddata"), "wb") as handle:
                 handle.write(b"only eng is here")
             os.environ["TESSDATA_PREFIX"] = empty
@@ -152,10 +155,11 @@ class ScanFailures(unittest.TestCase):
                     os.environ.pop("TESSDATA_PREFIX", None)
                 else:
                     os.environ["TESSDATA_PREFIX"] = saved
-        message = str(caught.exception)
+        message = extract.user_message(caught.exception)
         self.assertIn("không chạy được OCR Tesseract (thiếu chi_sim.traineddata trong", message)
         self.assertNotIn("eng.traineddata", message)
-        self.assertIn("npm run prepare:pdf-ocr", message)
+        # The remedy comes after the folder path and must survive the length cap of the student's message.
+        self.assertIn("npm run setup", message)
 
 
 class Output(unittest.TestCase):

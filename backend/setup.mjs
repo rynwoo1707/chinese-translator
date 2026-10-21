@@ -1,15 +1,18 @@
 // One-time local setup for a fresh clone: `npm run setup` (after `npm ci`). Safe to re-run: finished steps are skipped.
-// Nothing is installed globally: models and vendor files go to frontend/vendor/, PyMuPDF and OCR data to .runtime/,
-// local secrets and machine paths to .dev.vars, the local D1 database to .wrangler/ (all git-ignored).
+// Nothing is installed globally: vendor files and the PaddleOCR models kept in backend/paddle-models/ go to
+// frontend/vendor/, PyMuPDF and OCR data to .runtime/, local secrets and machine paths to .dev.vars, the local D1
+// database to .wrangler/ (all git-ignored). Only a LỖI exits with code 1; a missing optional part (PaddleOCR in the
+// browser, PDF export, the lookup dictionary) is a CẢNH BÁO and never stops the other steps or the app.
 import {spawnSync} from 'node:child_process';
 import {existsSync,readFileSync,writeFileSync,readdirSync} from 'node:fs';
 import {randomBytes} from 'node:crypto';
 import {fileURLToPath} from 'node:url';
 import {join} from 'node:path';
 import {createInterface} from 'node:readline';
+import {checkPaddleModels,RESTORE_HINT,TESSERACT_FALLBACK} from './paddle-assets.mjs';
 
 const root=fileURLToPath(new URL('../',import.meta.url));process.chdir(root);
-const STEPS=8,windows=process.platform==='win32',warnings=[],problems=[];
+const STEPS=8,windows=process.platform==='win32',warnings=[],problems=[],skipped=[];
 const step=(n,text)=>console.log(`\n[${n}/${STEPS}] ${text}`);
 function run(command,args,{hint='',...options}={}){
  const result=spawnSync(command,args,{stdio:'inherit',windowsHide:true,...options});
@@ -22,21 +25,27 @@ function attempt(consequence,action){try{action();return true;}catch(error){prob
 const valueIn=(text,key)=>[...text.matchAll(new RegExp(`^${key}=([^\\r\\n]*)`,'gmu'))].at(-1)?.[1].trim().replace(/^(['"])(.*)\1$/u,'$2')||'';
 const saved=existsSync('.dev.vars')?readFileSync('.dev.vars','utf8'):null;
 
+// The launcher points users at the "LỖI:" lines of setup, so these two stops print one too instead of a stack trace.
+const abort=message=>{console.error(`\nLỖI: ${message}`);process.exit(1);};
 const [major,minor]=process.versions.node.split('.').map(Number);
-if(major<22||(major===22&&minor<13))throw new Error(`Cần Node.js 22.13 trở lên (đang dùng ${process.version}).`);
-if(!existsSync('node_modules/wrangler'))throw new Error('Chưa cài thư viện. Chạy "npm ci" trước, rồi chạy lại "npm run setup".');
+if(major<22||(major===22&&minor<13))abort(`Cần Node.js 22.13 trở lên (đang dùng ${process.version}). Cài bản LTS mới ở https://nodejs.org rồi chạy lại.`);
+if(!existsSync('node_modules/wrangler'))abort('Chưa cài thư viện. Chạy "npm ci" trước, rồi chạy lại "npm run setup".');
 // Local state files such as <root>\.wrangler\state\v3\observability\miniflare-wobs-trace-store\<64 hex>.sqlite-wal add
 // up to 136 characters, and workerd cannot open a path past the 260-character Windows limit: D1 then only reports
 // "internal error; reference = …".
 const rootLength=root.replace(/[\\/]+$/u,'').length,longPath=windows&&rootLength+136>259;
 if(longPath)problems.push(`Đường dẫn thư mục dự án quá dài cho Windows (${rootLength} ký tự, cần tối đa 123): cơ sở dữ liệu local sẽ báo "internal error". Chuyển (hoặc clone lại) dự án vào thư mục ngắn, ví dụ C:\\src\\chinese-translator, rồi chạy lại "npm run setup".`);
 
-step(1,'Mô hình PaddleOCR cho OCR trong trình duyệt (tải khoảng 21 MB một lần)');
-const MODEL_HINT='Không tải được mô hình PaddleOCR (cần vào được paddle-model-ecology.bj.bcebos.com). Có thể chép det.tar, rec.tar, manifest.json từ máy khác vào frontend/vendor/paddle/models/ rồi chạy lại.';
-const models=['det.tar','rec.tar','manifest.json'].every(file=>existsSync(`frontend/vendor/paddle/models/${file}`))?(console.log('Đã có, bỏ qua.'),true):attempt(MODEL_HINT,()=>node('backend/prepare-paddle-models.mjs'));
+// Offline: the models ship in the repo. Optional, so a problem is only a warning: the browser then reads scans with Tesseract.
+step(1,'Mô hình PaddleOCR cho OCR trong trình duyệt (có sẵn trong repo, kiểm tra checksum)');
+const paddle=checkPaddleModels(root);
+if(paddle.ok)console.log('Đủ và đúng checksum (backend/paddle-models).');
+else{console.log(`Không dùng được: ${paddle.problem}`);warnings.push(`${paddle.problem} ${TESSERACT_FALLBACK} ${RESTORE_HINT}`);}
 
+// Always runs: the app cannot start without frontend/vendor/pdf.mjs, and vendor.mjs adds PaddleOCR only when it can.
 step(2,'Thư viện giao diện (frontend/vendor)');
-const vendor=models?attempt('Chưa chép được thư viện giao diện vào frontend/vendor.',()=>{node('backend/vendor.mjs');console.log('Xong.');}):(console.log('Bỏ qua vì thiếu mô hình PaddleOCR (bước 1).'),false);
+const vendor=attempt('Chưa chép được thư viện giao diện vào frontend/vendor (xem lỗi ở bước 2): thiếu frontend/vendor/pdf.mjs thì app không khởi động được. Chạy "npm ci" rồi chạy lại "npm run setup".',()=>{node('backend/vendor.mjs');console.log('Xong.');});
+if(vendor&&paddle.ok&&!existsSync('frontend/vendor/paddle/worker.js'))warnings.push(`Chưa cài được PaddleOCR cho trình duyệt (xem CẢNH BÁO ở bước 2). ${TESSERACT_FALLBACK} Chạy lại "npm ci" rồi "npm run setup".`);
 
 step(3,'Python 3.10+ và PyMuPDF cho dịch vụ PDF giữ bố cục');
 // Python installed without "Add python.exe to PATH", or by winget during this run, is still found in its usual folders.
@@ -72,14 +81,21 @@ else attempt('Chưa cài được PyMuPDF nên chế độ "Giữ bố cục PDF
  console.log(`Dùng ${python.executable}`);
  const pin=readFileSync('services/pdf-layout/requirements.txt','utf8').match(/^PyMuPDF==([\w.]+)/imu)?.[1];
  const installed=pin&&existsSync('.runtime/pdf-python')&&readdirSync('.runtime/pdf-python').some(name=>name.toLowerCase()===`pymupdf-${pin}.dist-info`);
- if(installed)console.log(`PyMuPDF ${pin} đã có trong .runtime/pdf-python, bỏ qua.`);
- else run(python.command,[...python.args,'-m','pip','install','--upgrade','--disable-pip-version-check','--target','.runtime/pdf-python','-r','services/pdf-layout/requirements.txt'],{hint:'Nếu báo thiếu pip: chạy "python -m ensurepip --upgrade" (Linux: cài gói python3-pip) rồi chạy lại.'});
- run(python.command,[...python.args,'-c','import pymupdf;print("PyMuPDF",pymupdf.VersionBind,"OK")'],{env:{...process.env,PYTHONPATH:join(root,'.runtime','pdf-python')}});
+ const env={...process.env,PYTHONPATH:join(root,'.runtime','pdf-python')},probe=[...python.args,'-c','import pymupdf;print("PyMuPDF",pymupdf.VersionBind,"OK")'];
+ // A copy that no longer imports (files removed by an antivirus, another Python) is installed again once, instead of
+ // repeating the same LỖI on every run.
+ const works=installed&&spawnSync(python.command,probe,{env,encoding:'utf8',windowsHide:true}).status===0;
+ if(works)console.log(`PyMuPDF ${pin} đã có trong .runtime/pdf-python, bỏ qua.`);
+ else{
+  if(installed)console.log(`PyMuPDF ${pin} trong .runtime/pdf-python không nạp được: cài lại.`);
+  run(python.command,[...python.args,'-m','pip','install','--upgrade','--disable-pip-version-check','--target','.runtime/pdf-python','-r','services/pdf-layout/requirements.txt'],{hint:'Nếu báo thiếu pip: chạy "python -m ensurepip --upgrade" (Linux: cài gói python3-pip) rồi chạy lại.'});
+ }
+ run(python.command,probe,{env});
 });
 
 step(4,'Dữ liệu OCR tiếng Trung + Anh cho dịch vụ PDF (.runtime/tessdata)');
-if(vendor)attempt('Chưa tạo được dữ liệu OCR cho dịch vụ PDF.',()=>node('services/pdf-layout/prepare-ocr.mjs'));
-else console.log('Bỏ qua vì frontend/vendor chưa sẵn sàng (bước 2).');
+if(['chi_sim','eng'].every(lang=>existsSync(`frontend/vendor/tessdata/${lang}.traineddata.gz`)))attempt('Chưa tạo được dữ liệu OCR cho dịch vụ PDF.',()=>node('services/pdf-layout/prepare-ocr.mjs'));
+else{console.log('Bỏ qua vì thiếu frontend/vendor/tessdata (bước 2).');skipped.push(4);problems.push('Chưa tạo được dữ liệu OCR cho dịch vụ PDF: bước 2 chưa chép frontend/vendor/tessdata. Sửa LỖI của bước 2 rồi chạy lại "npm run setup".');}
 
 step(5,'Trình duyệt và phông chữ để xuất PDF');
 // The service finds the AUTO paths by itself (services/pdf-layout/engine.mjs); other choices are written to .dev.vars,
@@ -121,7 +137,7 @@ if(vars!==saved)writeFileSync('.dev.vars',vars);
 
 step(7,'Cơ sở dữ liệu D1 cục bộ (.wrangler)');
 // stdin is not a terminal here, so wrangler applies the pending migrations without asking.
-if(longPath)console.log('Bỏ qua vì đường dẫn thư mục dự án quá dài (xem LỖI bên dưới).');
+if(longPath){console.log('Bỏ qua vì đường dẫn thư mục dự án quá dài (xem LỖI bên dưới).');skipped.push(7);}
 else attempt('Chưa tạo được cơ sở dữ liệu local. Nếu wrangler báo "internal error; reference = …": chuyển dự án vào thư mục có đường dẫn ngắn hơn rồi chạy lại.',()=>run(process.execPath,['node_modules/wrangler/bin/wrangler.js','d1','migrations','apply','DB','--local'],{stdio:['ignore','inherit','inherit']}));
 
 // Last, because it is optional and the slowest download, and no other step needs it. Warning only: without the data the
@@ -133,11 +149,11 @@ for(const warning of warnings)console.warn(`\nCẢNH BÁO: ${warning}`);
 for(const problem of problems)console.error(`\nLỖI: ${problem}`);
 if(problems.length)process.exitCode=1;
 let layoutPort='8091';try{layoutPort=new URL(current('PDF_LAYOUT_SERVICE_URL')).port||layoutPort;}catch{}
-const npm=windows?'npm.cmd':'npm';
+const npm=windows?'npm.cmd':'npm',done=`Cài đặt xong.${warnings.length?' Có CẢNH BÁO ở trên.':''}`;
 // start.cmd starts both services itself right after setup.
-if(process.argv.includes('--launcher'))console.log(problems.length?'\nĐã làm xong các bước còn lại.':'\nCài đặt xong.');
+if(process.argv.includes('--launcher'))console.log(problems.length?'\nCài đặt còn LỖI (xem ở trên).':`\n${done}`);
 else console.log(`
-${problems.length?'Đã làm xong các bước còn lại; sửa LỖI ở trên rồi chạy lại "npm run setup".':'Cài đặt xong.'} Chạy app (2 cửa sổ terminal, đều ở thư mục dự án):
+${problems.length?`${skipped.length?`Bước ${skipped.join(' và ')} bị bỏ qua`:'Đã làm xong các bước còn lại'}; sửa LỖI ở trên rồi chạy lại "npm run setup".`:done} Chạy app (2 cửa sổ terminal, đều ở thư mục dự án):
   1) ${npm} run dev:pdf-layout   (dịch vụ PDF giữ bố cục, cổng ${layoutPort})
   2) ${npm} run dev              (web, mở địa chỉ wrangler in ra, thường là http://127.0.0.1:8787)
 Sau đó: tạo tài khoản ở /#account, mở /study, nhập "Tên nội dung", dán khóa Gemini API của bạn và chọn tệp để dịch.

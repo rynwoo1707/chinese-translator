@@ -19,8 +19,9 @@ Web app dịch sách và tài liệu tiếng Trung sang tiếng Việt bằng Ge
    git clone -b handoff/2026-10-16 https://github.com/rynwoo1707/chinese-translator.git C:\src\chinese-translator
    ```
 2. Mở thư mục `C:\src\chinese-translator` và bấm đúp **`start.cmd`**.
-   - Lần đầu: nếu máy chưa có Node.js hoặc Python, nó hỏi rồi tự cài (bằng winget). Sau đó nó cài thư viện, chạy `npm run setup` (vài phút, cần Internet, tải thêm khoảng 18 MB dữ liệu từ điển) và tự mở trình duyệt.
+   - Lần đầu: nếu máy chưa có Node.js hoặc Python, nó hỏi rồi tự cài (bằng winget). Sau đó nó cài thư viện, chạy `npm run setup` (vài phút, cần Internet, tải thêm khoảng 18 MB dữ liệu từ điển; mô hình OCR PaddleOCR có sẵn trong repo) và tự mở trình duyệt.
    - Các lần sau: bấm đúp `start.cmd` là chạy, kèm cập nhật code mới nhất và áp migration mới vào cơ sở dữ liệu local.
+   - Dòng **CẢNH BÁO** là phần không bắt buộc chưa dùng được (ví dụ OCR trong trình duyệt dùng Tesseract thay cho PaddleOCR, hay chế độ "Giữ bố cục PDF" khi dịch vụ PDF dừng): app vẫn chạy. Dòng **LỖI** ghi rõ thiếu gì và cách sửa ([ONBOARDING](ONBOARDING.md) mục 6.3). Hoa Trí đang mở ở một cửa sổ khác thì `start.cmd` báo rồi dừng: dùng cửa sổ đó.
 3. Trong trình duyệt: "Tạo tài khoản" (đánh dấu ô đồng ý điều khoản) → "Xưởng dịch học tập" → nhập "Tên nội dung", dán khóa Gemini API của bạn (tạo ở https://aistudio.google.com/apikey), chọn PDF → "Bắt đầu dịch →".
 
 Giữ cửa sổ `start.cmd` mở trong lúc dùng; đóng cửa sổ hoặc bấm Ctrl+C để tắt.

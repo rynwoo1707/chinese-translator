@@ -8,9 +8,13 @@ console.log(JSON.stringify({origin,status:response.status,model:status.model,pdf
 if(process.argv.includes('--models')){
  const dashboard=await fetch(origin+'/api/settings/gemini-models',{headers:{Authorization:`Bearer ${setting('ADMIN_TOKEN')}`},signal:AbortSignal.timeout(30000)}),available=await dashboard.json();
  console.log(JSON.stringify({dashboardCatalogStatus:dashboard.status,models:(available.models||[]).map(m=>m.id),error:available.error}));
- const key=setting('GEMINI_API_KEY');if(!key){console.log('No environment key available for metadata check.');process.exit(0);}
- const catalog=await fetch('https://generativelanguage.googleapis.com/v1beta/models?pageSize=1000',{headers:{'x-goog-api-key':key},signal:AbortSignal.timeout(15000)}),result=await catalog.json();
- console.log(JSON.stringify({catalogStatus:catalog.status,models:(result.models||[]).filter(m=>m.supportedGenerationMethods?.includes('generateContent')&&/^models\/gemini-[\d.]+-flash(?:-lite)?$/u.test(m.name)).map(m=>m.name)}));
+ // No process.exit() here: on Node 24 for Windows, exiting right after fetch() can abort with a libuv assertion.
+ const key=setting('GEMINI_API_KEY');
+ if(!key)console.log('No environment key available for metadata check.');
+ else{
+  const catalog=await fetch('https://generativelanguage.googleapis.com/v1beta/models?pageSize=1000',{headers:{'x-goog-api-key':key},signal:AbortSignal.timeout(15000)}),result=await catalog.json();
+  console.log(JSON.stringify({catalogStatus:catalog.status,models:(result.models||[]).filter(m=>m.supportedGenerationMethods?.includes('generateContent')&&/^models\/gemini-[\d.]+-flash(?:-lite)?$/u.test(m.name)).map(m=>m.name)}));
+ }
 }
 if(process.argv.includes('--translate')){
  const key=setting('GEMINI_API_KEY');if(!key)throw new Error('Không có khóa môi trường để kiểm tra lượt dịch nhỏ.');

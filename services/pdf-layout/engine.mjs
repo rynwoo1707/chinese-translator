@@ -70,11 +70,15 @@ export async function fontCss(){
  const path=process.env.PDF_FONT_PATH||(process.platform==='win32'?'C:/Windows/Fonts/times.ttf':'/usr/share/fonts/truetype/dejavu/DejaVuSerif.ttf');
  const font=await readFile(path);return `@font-face{font-family:HoaTriPDF;src:url(data:font/ttf;base64,${font.toString('base64')}) format('truetype');font-weight:400;font-display:block}`;
 }
+// Edge on Windows (seen with 155, October 2026) restarts itself under its compatibility layer and the started process
+// exits with code 0, which Puppeteer reports as "Failed to launch the browser process" while the real browser keeps
+// running in the background. Playwright passes the same switch for Edge; Chrome and Chromium ignore it.
+export const browserArgs=()=>['--edge-skip-compat-layer-relaunch',...(process.env.PDF_CHROMIUM_NO_SANDBOX==='1'?['--no-sandbox']:[])];
 // allowOverflow only serves previews (tools/samples render --preview-overflow): every page is drawn and the report
 // still flags the boxes that do not fit. The service never passes it, so an export with overflow keeps failing.
 export async function renderDocument(document,translations,{title='Hoa Trí - Bản dịch tiếng Việt',allowOverflow=false}={}){
  validateLayoutDocument(document);const translated=validateBlockTranslations(document.pages.flatMap(p=>p.blocks),translations),css=await fontCss();
- const browser=await puppeteer.launch({executablePath:chromiumPath(),headless:true,args:process.env.PDF_CHROMIUM_NO_SANDBOX==='1'?['--no-sandbox']:[]});
+ const browser=await puppeteer.launch({executablePath:chromiumPath(),headless:true,args:browserArgs()});
  try{
   const page=await browser.newPage();await page.setRequestInterception(true);page.on('request',req=>req.url().startsWith('data:')||req.url()==='about:blank'?req.continue():req.abort());
   const rendered=[],reports=[];

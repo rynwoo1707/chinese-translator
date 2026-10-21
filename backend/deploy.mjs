@@ -1,7 +1,7 @@
 // Guarded production deploy: `npm run deploy`, and `npm run deploy:check` for the same checks without any change.
 //  1. On this machine: Node, wrangler.jsonc, unfilled placeholders in public pages, clean git tree, the secrets file.
 //  2. Cloudflare, read only: login, R2 bucket, secret names, the version that is live now.
-//  3. frontend/vendor, npm test (paid APIs blocked), wrangler deploy --dry-run.
+//  3. frontend/vendor with PaddleOCR (models from backend/paddle-models), npm test (paid APIs blocked), wrangler deploy --dry-run.
 //  4. Pending D1 migrations: listed with a Time Travel bookmark, applied only after typing "CÓ" (or --yes).
 //  5. wrangler deploy --strict, tagged with the commit (/api/health reports the tag).
 //  6. Checks against the live URL, the manual checklist and the rollback commands.
@@ -14,6 +14,7 @@ import {basename,isAbsolute,join,relative,resolve,sep} from 'node:path';
 import {createInterface} from 'node:readline';
 import {fileURLToPath,pathToFileURL} from 'node:url';
 import {parseArgs} from 'node:util';
+import {checkPaddleModels,RESTORE_HINT} from './paddle-assets.mjs';
 
 export const ROOT=fileURLToPath(new URL('../',import.meta.url));
 const NPX=process.platform==='win32'?'npx.cmd':'npx';
@@ -353,8 +354,10 @@ export async function main({argv=process.argv.slice(2),env=process.env,root=ROOT
  }
 
  step(opts.skipTests?'Thư viện giao diện và bản build thử (bỏ qua npm test)':'Thư viện giao diện, npm test, bản build thử');
- if(!['det.tar','rec.tar'].every(file=>existsSync(join(root,'frontend/vendor/paddle/models',file))))return stop('Thiếu mô hình PaddleOCR (frontend/vendor/paddle/models): chạy npm run prepare:ocr rồi chạy lại.');
- const vendor=await run(node,['backend/vendor.mjs'],{cwd:root,env});
+ // Production ships PaddleOCR: the models in the repo must be intact, and vendor.mjs fails instead of only warning.
+ const paddle=checkPaddleModels(root);
+ if(!paddle.ok)return stop(`Mô hình PaddleOCR chưa dùng được: ${paddle.problem} ${RESTORE_HINT} rồi chạy lại.`);
+ const vendor=await run(node,['backend/vendor.mjs','--require-paddle'],{cwd:root,env});
  if(vendor.code!==0)return stop(`Không chép được thư viện vào frontend/vendor: ${lastLines(output(vendor),2)}`);
  const missingVendor=VENDOR_FILES.filter(file=>!existsSync(join(root,file)));
  if(missingVendor.length)return stop(`Thiếu tệp sau khi chạy backend/vendor.mjs: ${missingVendor.join(', ')}`);

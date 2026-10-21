@@ -178,7 +178,10 @@ Script chạy theo thứ tự sau và dừng ở bước đầu tiên không đ�
    - Các trang công khai không còn chỗ `[[CHƯA ĐIỀN`.
    - Tệp secret hợp lệ.
 2. **Cloudflare, chỉ đọc:** đã đăng nhập (máy có nhiều account thì đặt `CLOUDFLARE_ACCOUNT_ID`), có bucket R2, đủ secret (`ADMIN_TOKEN` bắt buộc; cặp PDF và cặp Google phải đi cùng nhau), và phiên bản đang chạy để quay lại nếu cần.
-3. **Build:** `frontend/vendor` (cần mô hình PaddleOCR từ `npm run prepare:ocr`), `npm test` (chặn mọi lệnh gọi Gemini, Google, Cloudflare), rồi `wrangler deploy --dry-run`.
+3. **Build:**
+   - Kiểm mô hình PaddleOCR có sẵn trong repo (`backend/paddle-models/`). Thiếu hoặc hỏng thì dừng: "Mô hình PaddleOCR chưa dùng được: … Lấy lại bằng: git checkout -- backend/paddle-models rồi chạy lại."
+   - Chép `frontend/vendor` bằng `backend/vendor.mjs --require-paddle`: production bắt buộc có PaddleOCR, nên lỗi ở đây là dừng (trên máy dev thì chỉ là cảnh báo).
+   - `npm test` (chặn mọi lệnh gọi Gemini, Google, Cloudflare), rồi `wrangler deploy --dry-run`.
 4. **Migration D1:** liệt kê các migration chờ, in lệnh khôi phục Time Travel, rồi hỏi `Gõ CÓ để tiếp tục:`. Nếu D1 có migration lạ (code cũ hơn production), script dừng.
 5. **Deploy:** `wrangler deploy --strict`, gắn tag là mã commit.
 6. **Kiểm tra bản mới:**
@@ -216,7 +219,7 @@ Remove-Item Env:HOATRI_ADMIN_TOKEN
 
 - **test** (Ubuntu 24.04, Node 24, Python 3.12):
   - chặn commit nhầm `.dev.vars`, `.env`, khóa Google, khóa riêng tư, `samples/`, `.wrangler/`;
-  - `npm ci`, mô hình PaddleOCR (có cache), `prepare:vendor`, PyMuPDF và dữ liệu OCR;
+  - `npm ci`, `prepare:vendor -- --require-paddle` (mô hình PaddleOCR lấy từ `backend/paddle-models/`, không tải mạng; thiếu PaddleOCR thì job đỏ), PyMuPDF và dữ liệu OCR;
   - `npm test` với `backend/test-support/no-paid-api.mjs` nạp trước;
     - Test máy PDF dùng Chromium của máy chạy CI.
     - Hai test bố cục chỉ dành cho Edge (`book-ui.test.mjs`) được bỏ qua.
@@ -277,5 +280,6 @@ Chưa kiểm chứng:
   - `HEALTHCHECK` và user `node` trong container;
   - compose + Caddy qua HTTPS.
 - Test máy PDF và hai test Edge chưa chạy trên Linux. Test máy PDF đã đạt trên Windows với phông DejaVu Serif.
+- Bước `prepare:vendor -- --require-paddle` của CI (thay cho bước tải mô hình PaddleOCR có cache) chưa chạy trên GitHub. Chế độ bắt buộc này có test trong `npm test` (`backend/paddle-assets.test.mjs`: thiếu mô hình thì báo lỗi thay vì chỉ cảnh báo).
 - Cấp chứng chỉ thật và chạy trên máy chủ thật.
 - Deploy thật lên Cloudflare: D1, R2, secret, giới hạn của Workers Paid.

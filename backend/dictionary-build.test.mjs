@@ -6,7 +6,7 @@ import {join} from 'node:path';
 import {createHash} from 'node:crypto';
 import {zipSync,strToU8} from 'fflate';
 import {parseCedict,parseHanviet,parseUnihan,parseRadicals,mergeVietnamese,hanVietOf,entryHanViet,senseFlags,orderSenses,buildDictionary,dictionaryKey,licenseText,UNICODE_LICENSE} from './dictionary-build.js';
-import {verifySource,expectedKey,isUpToDate,writeDictionary,unihanTexts,getSource,SOURCES} from './prepare-dictionary.mjs';
+import {verifySource,expectedKey,isUpToDate,writeDictionary,unihanTexts,getSource,SOURCES,RETRY_DELAYS} from './prepare-dictionary.mjs';
 import {entryBucket,entryFile,indexBucket,indexFile,FLAG_VI_ONLY,FLAG_VARIANT,FLAG_SURNAME,INDEX_BUCKETS,ENTRY_BUCKETS} from '../frontend/hanzi-dict.js';
 
 const header=(name,extra='')=>`# ${name}\n# Referenced works:\n# CEDICT - Copyright (C) 1997, 1998 Paul Andrew Denisowski\n#! format=ts\n#! charset=UTF-8\n${extra}`;
@@ -242,4 +242,33 @@ test('prepare-dictionary: sources whose upstream is gone come from the repo, che
   assert.deepEqual(await readdir(empty),[],'nothing written to the cache');
   await assert.rejects(getSource(local[0],{cache:empty,repo:empty}),/Thiếu backend\/dictionary-sources\/CVDICT\.u8 trong repo/u);
  }finally{await rm(empty,{recursive:true,force:true});}
+});
+
+// A flaky network gets two more tries (2 s, then 6 s later); what would fail the same way again does not.
+test('prepare-dictionary: a download is tried 3 times on network errors, timeouts, HTTP 429 and 5xx, never on 404 or a wrong checksum',async()=>{
+ const cache=await mkdtemp(join(tmpdir(),'hoatri-dict-')),body='abc',sha256=createHash('sha256').update(body).digest('hex');
+ const attempt=async(file,answers)=>{
+  const calls=[],waits=[],lines=[],fetch=async url=>{calls.push(url);return answers[calls.length-1]();};
+  const outcome=await getSource({name:'Test',file,url:`https://example.test/${file}`,bytes:3,sha256},{cache,fetch,sleep:async ms=>{waits.push(ms);},log:line=>lines.push(line)}).then(bytes=>({bytes}),error=>({error}));
+  return {...outcome,calls:calls.length,waits,lines};
+ };
+ const offline=()=>{throw Object.assign(new TypeError('fetch failed'),{cause:{code:'ECONNRESET'}});};
+ const timeout=()=>{throw new DOMException('The operation was aborted due to timeout','TimeoutError');};
+ const cut=()=>new Response(new ReadableStream({start(controller){controller.enqueue(new TextEncoder().encode('a'));controller.error(new TypeError('terminated'));}}));
+ const status=code=>()=>new Response('busy',{status:code}),ok=()=>new Response(body);
+ try{
+  const flaky=await attempt('flaky.txt',[offline,cut,ok]);
+  assert.deepEqual(flaky.bytes,new TextEncoder().encode(body));assert.equal(flaky.calls,3);assert.deepEqual(flaky.waits,RETRY_DELAYS);
+  assert.deepEqual(flaky.lines.slice(1).map(line=>/\((\w+)\): thử lại sau (\d) giây \(lần (\d)\/3\)/u.exec(line)?.slice(1).join(' ')),['ECONNRESET 2 2','TypeError 6 3'],flaky.lines.join('\n'));
+  assert.equal(await readFile(join(cache,sha256,'flaky.txt'),'utf8'),body,'kept in the cache once verified');
+  const late=await attempt('late.txt',[timeout,status(429),ok]);
+  assert.ok(late.bytes,late.error?.message);assert.equal(late.calls,3);assert.match(late.lines[1],/\(TimeoutError\)/u);assert.match(late.lines[2],/\(HTTP 429\)/u);
+  const down=await attempt('down.txt',[status(503),status(502),status(500),ok]);
+  assert.match(down.error?.message,/^Không tải được https:\/\/example\.test\/down\.txt sau 3 lần thử \(HTTP 500\)\. Kiểm tra mạng/u);assert.equal(down.calls,3);assert.deepEqual(down.waits,RETRY_DELAYS);
+  const gone=await attempt('gone.txt',[status(404),ok]);
+  assert.match(gone.error?.message,/^HTTP 404 khi tải https:\/\/example\.test\/gone\.txt/u);assert.equal(gone.calls,1);assert.deepEqual(gone.waits,[]);
+  const altered=await attempt('altered.txt',[()=>new Response('abd'),ok]);
+  assert.match(altered.error?.message,/Nguồn Test: checksum khác/u);assert.equal(altered.calls,1);assert.deepEqual(altered.waits,[]);
+  assert.deepEqual((await readdir(join(cache,sha256))).sort(),['flaky.txt','late.txt'],'only verified files are cached, and no temporary file is left');
+ }finally{await rm(cache,{recursive:true,force:true});}
 });

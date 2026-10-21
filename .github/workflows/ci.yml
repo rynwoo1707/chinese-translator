@@ -53,18 +53,8 @@ jobs:
 
       - run: npm ci
 
-      # The PaddleOCR models come from Baidu BOS with pinned SHA-256s; the cache spares that download on most runs.
-      - name: Cache PaddleOCR models
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: frontend/vendor/paddle/models
-          key: paddle-${{ hashFiles('backend/prepare-paddle-models.mjs') }}
-
-      - name: PaddleOCR models
-        timeout-minutes: 10
-        run: test -f frontend/vendor/paddle/models/det.tar -a -f frontend/vendor/paddle/models/rec.tar || npm run prepare:ocr
-
-      - run: npm run prepare:vendor
+      # Locally PaddleOCR is optional (warning only); here the bundle and the models from backend/paddle-models must build.
+      - run: npm run prepare:vendor -- --require-paddle
 
       - name: PyMuPDF and OCR data for the Python-backed tests
         run: |

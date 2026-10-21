@@ -746,20 +746,21 @@ function coverInput(){return `<label style="margin-top:18px">Ảnh bìa tài li�
 function bindCoverPreview(){let previewUrl;const dialog=$('#modal');dialog.addEventListener('close',()=>{if(previewUrl)URL.revokeObjectURL(previewUrl);},{once:true});on('#cover-input','change',e=>{if(previewUrl)URL.revokeObjectURL(previewUrl);const image=$('#cover-preview');image.classList.add('hide');image.removeAttribute('src');const file=e.target.files[0];if(!file)return;if(file.size>5*1024*1024||!['image/jpeg','image/png','image/webp'].includes(file.type)){e.target.value='';throw new Error('Chọn ảnh JPG, PNG hoặc WebP tối đa 5 MB.');}previewUrl=URL.createObjectURL(file);image.src=previewUrl;image.classList.remove('hide');});}
 function bindCoverButtons(){document.querySelectorAll('[data-cover]').forEach(b=>b.onclick=()=>{state.draftText=$('#source-input')?.value??state.draftText;const sid=b.dataset.cover;modal(`<h2>Ảnh bìa tài liệu</h2>${coverInput()}`,async form=>{if(!form.get('cover')?.size)throw new Error('Hãy chọn ảnh bìa.');await api(`/stories/${sid}/cover`,{method:'POST',body:form});await refresh();render();toast('Đã lưu ảnh bìa.');});bindCoverPreview();});}
 async function uploadJob(e,prepareOnly){const sid=$('#story-select').value;if(!sid)throw new Error('Hãy tạo hoặc chọn hồ sơ tài liệu trước.');const f=new FormData(),sourceFile=state.file,pdfAnalysis=state.pdfAnalysis;f.set('story_id',sid);if(state.tab==='file'){if(!sourceFile)throw new Error('Hãy chọn tài liệu.');if(sourceFile.name.toLowerCase().endsWith('.pdf')&&!pdfAnalysis)throw new Error('Hãy đợi phân tích PDF hoàn tất.');f.set('file',sourceFile);if(pdfAnalysis?.mode==='text'){f.set('parsed_text',pdfAnalysis.text);f.set('pdf_pages',String(pdfAnalysis.totalPages));}if(['scan','hybrid'].includes(pdfAnalysis?.mode)){f.set('pdf_mode','scan');f.set('pdf_pages',String(pdfAnalysis.totalPages));}}else f.set('text',$('#source-input').value);const genre=$('#genre').value;e.currentTarget.disabled=true;try{if(genre!==state.stories.find(s=>s.id===sid)?.genre){await api(`/stories/${sid}`,{method:'PATCH',body:{genre}});const story=state.stories.find(s=>s.id===sid);if(story)story.genre=genre;}const j=await api('/jobs',{method:'POST',body:f});state.selected=j.id;if(['scan','hybrid'].includes(pdfAnalysis?.mode)){
-  const {uploadPreparedPdf}=await import('./pdf-client.js');let localOcr=null,localOcrPages=0;
+  const {uploadPreparedPdf}=await import('./pdf-client.js');let localOcr=null,localOcrPages=0,fallback='',told=false;
   // Same on-device OCR (0 token) used by the student workspace: skip Gemini for pages a local pass
   // can already read confidently. Math/formula-heavy pages stay low-confidence and still go to Gemini.
+  // When Tesseract reads in place of PaddleOCR, the progress line says why once, then names Tesseract on each page.
   try{
    await uploadPreparedPdf(sourceFile,pdfAnalysis,async(item,page,total)=>{
     const pageForm=new FormData();pageForm.set('page',String(page));pageForm.set('total',String(total));
     if(item.kind==='text'){pageForm.set('text',item.text);await api(`/jobs/${j.id}/pdf-page`,{method:'POST',body:pageForm});return;}
     if(!localOcr){const [engine,policy]=await Promise.all([import('./local-ocr.js'),import('./ocr-policy.js')]);localOcr={...engine,...policy};}
-    const assessment=await localOcr.recognizeChinesePage(item.blob);
+    const assessment=await localOcr.recognizeChinesePage(item.blob);fallback||=assessment.fallbackReason||'';
     if(localOcr.shouldUseGeminiOcr('hybrid',assessment))pageForm.set('image',item.blob,`page-${page}.${item.blob.type==='image/webp'?'webp':'jpg'}`);
     else{pageForm.set('text',assessment.text);localOcrPages++;}
     await api(`/jobs/${j.id}/pdf-page`,{method:'POST',body:pageForm});
-   },(page,total,kind)=>toast(`Đang chuẩn bị PDF · ${page}/${total} trang · ${kind==='scan'?'kiểm tra OCR cục bộ':'lớp chữ'}`));
-   if(localOcrPages)toast(`Đã nhận dạng cục bộ ${localOcrPages} trang (0 token Gemini); các trang còn lại sẽ OCR bằng Gemini khi dịch.`);
+   },(page,total,kind)=>{const notice=kind==='scan'&&fallback&&!told?localOcr.fallbackNotice(fallback):'';told||=Boolean(notice);toast(`Đang chuẩn bị PDF · ${page}/${total} trang · ${kind!=='scan'?'lớp chữ':notice?`kiểm tra OCR cục bộ. ${notice}`:`kiểm tra OCR cục bộ${fallback?' bằng Tesseract':''}`}`);});
+   if(localOcrPages)toast(`Đã nhận dạng cục bộ ${localOcrPages} trang${fallback?' bằng Tesseract':''} (0 token Gemini); các trang còn lại sẽ OCR bằng Gemini khi dịch.`);
   }finally{if(localOcr)await localOcr.terminateLocalOcr().catch(()=>{});}
  }state.file=null;state.pdfAnalysis=null;await refresh();go('review');if(prepareOnly)await prepareJob(j.id);else if(state.status.aiConfigured)await runJob(j.id);else toast('Đã lưu tài liệu. Cấu hình khóa Gemini trong máy chủ để bắt đầu dịch.');}finally{if($('#start-translate'))$('#start-translate').disabled=false;}}
 

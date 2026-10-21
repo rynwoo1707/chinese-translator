@@ -657,14 +657,11 @@ async function prepare(){if(!selectedFile)return false;busy(true);let localOcr=n
     keepPageImage(page,item.previewBlob);
     if(item.kind==='text'){preparedPages.set(page,{text:item.text,layout:item.layout,engine:'pdf-text',needsGemini:false});await keepPageFigures(page,item.layout);return;}
     if(!localOcr)localOcr=await import('./local-ocr.js');
-    if(!existing?.assessment&&!await allowOcrDownload(localOcr))throw Object.assign(new Error(`Chưa nhận dạng các trang scan vì bạn chọn để sau. Khi có Wi-Fi, bấm Bắt đầu dịch để tải bộ nhận dạng chữ (khoảng ${localOcr.DOWNLOAD_MB} MB, một lần) rồi dịch tiếp.`),{code:'ocr_declined'});
+    if(!existing?.assessment)await allowOcrDownload(localOcr);
     status(`Đang nhận dạng chữ trên thiết bị · trang ${page}/${total} · không tốn token…`);
-    const assessment=existing?.assessment||await localOcr.recognizeChinesePage(item.blob,message=>{
-     if(message.status==='loading model')status(`Đang tải bộ nhận dạng chữ lần đầu (khoảng ${localOcr.DOWNLOAD_MB} MB) · tài liệu không rời khỏi thiết bị…`);
-     if(message.status==='recognizing text')status(`Đang nhận dạng chữ trên thiết bị · trang ${page}/${total} · 0 token`);
-     if(message.status==='fallback')status('PaddleOCR chưa chạy được · chuyển sang Tesseract trên thiết bị…');
-    });
-    if(assessment.fallbackReason)ocrWarnings.push(`PaddleOCR chưa sẵn sàng; đã dùng Tesseract cục bộ (${assessment.fallbackReason}).`);
+    const assessment=existing?.assessment||await localOcr.recognizeChinesePage(item.blob,message=>{const line=ocrStatus(localOcr,message,page,total);if(line)status(line);});
+    // Said once in each document read while PaddleOCR is unavailable.
+    const notice=assessment.fallbackReason?localOcr.fallbackNotice(assessment.fallbackReason):'';if(notice&&!ocrWarnings.includes(notice))ocrWarnings.push(notice);
     const fallback=shouldUseGeminiOcr('hybrid',assessment);
     if(fallback&&optionalKey()){
      ocrWarnings.push(`Trang ${page}: nhận dạng chữ trên thiết bị chỉ đạt ${assessment.confidence}% nên đã dùng Gemini cho riêng trang này.`);
@@ -685,17 +682,30 @@ async function prepare(){if(!selectedFile)return false;busy(true);let localOcr=n
   updateCount();status('Đã chuẩn bị nguyên tác.');return Boolean($('#source').value.trim());
  }catch(error){rejectKey(error);fail(error);return false;}finally{if(localOcr)await localOcr.terminateLocalOcr().catch(()=>{});busy(false);stopRequested=false;}}
 
-// On Save-Data or a slow connection the first local OCR asks before downloading its engine; the answer holds for this tab.
-// Without navigator.connection (Safari, Firefox) nothing is asked, as before. Dừng counts as "Để sau".
+// The progress line while the device reads a scan. A first download says its size: PaddleOCR's at once, Tesseract's with
+// the share done; an engine this browser already keeps only starts, so nothing is said about downloading.
+function ocrStatus(localOcr,message,page,total){
+ if(message.status==='loading model')return message.cached?'Đang khởi động bộ nhận dạng chữ…':`Đang tải bộ nhận dạng chữ lần đầu (khoảng ${localOcr.OCR_DOWNLOAD.paddle.mb} MB) · tài liệu không rời khỏi thiết bị…`;
+ if(message.engine==='tesseract'&&'download' in message)return message.cached?'Đang khởi động bộ nhận dạng chữ…':`Đang tải Tesseract (khoảng ${localOcr.OCR_DOWNLOAD.tesseract.mb} MB lần đầu)… ${Math.round(message.download*100)}%`;
+ if(message.status==='recognizing text')return `Đang nhận dạng chữ trên thiết bị · trang ${page}/${total} · 0 token`;
+ if(message.status==='fallback')return 'Nhận dạng chữ bằng Tesseract trên thiết bị, thay cho PaddleOCR…';
+ return '';
+}
+// On Save-Data or a slow connection the first local OCR asks before downloading its engine, with the size of the one this
+// install uses (PaddleOCR, or Tesseract without it); the answer holds for this tab, and an engine the browser already
+// keeps is not asked about. Without navigator.connection (Safari, Firefox) nothing is asked, as before. Dừng counts as
+// "Để sau": the preparation stops, saying how much is to be downloaded later.
 let ocrDownloadAllowed=false,ocrChoice=null;
 async function allowOcrDownload(localOcr){
- if(ocrDownloadAllowed)return true;
+ if(ocrDownloadAllowed)return;
  const connection=navigator.connection,slow=Boolean(connection?.saveData)||/^(?:slow-2g|2g|3g)$/u.test(connection?.effectiveType||'');
- if(!slow||await localOcr.localOcrCached())return ocrDownloadAllowed=true;
- $('#ocr-download-text').textContent=`Tài liệu có trang scan. Hoa Trí nhận dạng chữ ngay trên thiết bị (không tốn token), nhưng lần đầu cần tải khoảng ${localOcr.DOWNLOAD_MB} MB${connection.saveData?' trong khi trình duyệt đang bật chế độ tiết kiệm dữ liệu':' qua một kết nối đang chậm'}. Những lần sau trình duyệt dùng lại bản đã tải.`;
+ const download=slow?await localOcr.ocrDownload():{cached:true};
+ if(download.cached){ocrDownloadAllowed=true;return;}
+ $('#ocr-download-title strong').textContent=`Tải bộ nhận dạng chữ về máy (khoảng ${download.mb} MB)?`;
+ $('#ocr-download-text').textContent=`Tài liệu có trang scan. Hoa Trí nhận dạng chữ ngay trên thiết bị (không tốn token), nhưng lần đầu cần tải khoảng ${download.mb} MB${connection.saveData?' trong khi trình duyệt đang bật chế độ tiết kiệm dữ liệu':' qua một kết nối đang chậm'}. Những lần sau trình duyệt dùng lại bản đã tải.`;
  $('#ocr-download').hidden=false;status('Đang chờ bạn chọn có tải bộ nhận dạng chữ hay không…');$('#ocr-download-yes').focus();
  const allowed=await new Promise(resolve=>{ocrChoice=resolve;});ocrChoice=null;$('#ocr-download').hidden=true;$('#progress').focus();
- return ocrDownloadAllowed=allowed;
+ if(!(ocrDownloadAllowed=allowed))throw Object.assign(new Error(`Chưa nhận dạng các trang scan vì bạn chọn để sau. Khi có Wi-Fi, bấm Bắt đầu dịch để tải bộ nhận dạng chữ (khoảng ${download.mb} MB, một lần) rồi dịch tiếp.`),{code:'ocr_declined'});
 }
 function hasUsableKey(){return !!(sessionKey||$('#api-key').value.trim());}
 function needsPreparation(){

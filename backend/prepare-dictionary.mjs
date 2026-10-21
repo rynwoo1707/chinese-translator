@@ -15,6 +15,8 @@ import {INDEX_BUCKETS,ENTRY_BUCKETS} from '../frontend/hanzi-dict.js';
 const root=fileURLToPath(new URL('../',import.meta.url));
 export const OUTPUT=join(root,'frontend','vendor','dict'),CACHE=join(root,'.runtime','dict-sources');
 const MB=1024*1024,DOWNLOAD_LIMIT=40*MB,UNZIP_LIMIT=32*MB;
+// Pauses before the 2nd and 3rd try of a download that failed on the way: a network error, a timeout, HTTP 429 or 5xx.
+export const RETRY_DELAYS=[2000,6000];
 // Pinned by commit (CC-CEDICT from Debian's packaging repository, because MDBG's export changes daily) or by release.
 // `url` stays as the record of where a source came from (it is written into the dictionary's manifest). The GitHub
 // account behind CVDICT and hanviet-pinyin-wordlist was removed (found 2026-10-21): those three files are read from
@@ -51,20 +53,42 @@ export async function isUpToDate(directory=OUTPUT,key){
  }catch{return false;}
 }
 
-async function download(url,limit=DOWNLOAD_LIMIT){
+const wait=ms=>new Promise(done=>setTimeout(done,ms));
+const reasonOf=error=>error?.cause?.code||error?.name||error?.message;
+// One try. A failure marked `retry` may pass a moment later; a 404 or an oversized file (and, in getSource, a checksum
+// mismatch) would only fail the same way again.
+async function fetchOnce(url,{limit,fetch}){
+ const transient=(reason,cause)=>Object.assign(new Error(reason,{cause}),{retry:true});
  let response;
  try{response=await fetch(url,{signal:AbortSignal.timeout(180_000),headers:{'User-Agent':'hoa-tri-prepare-dictionary'}});}
- catch(error){throw new Error(`Không tải được ${url} (${error?.cause?.code||error?.name||error?.message}). Kiểm tra mạng, hoặc tải các tệp nguồn ở máy khác vào một thư mục rồi chạy "npm run prepare:dict -- --from <thư mục>".`);}
+ catch(error){throw transient(reasonOf(error),error);}
+ if(response.status===429||response.status>=500){await response.body?.cancel().catch(()=>{});throw transient(`HTTP ${response.status}`);}
  if(!response.ok)throw new Error(`HTTP ${response.status} khi tải ${url}`);
  if(Number(response.headers.get('content-length'))>limit)throw new Error(`${url} lớn hơn ${megabytes(limit)}.`);
  const chunks=[];let size=0;
- for await(const chunk of response.body){size+=chunk.length;if(size>limit)throw new Error(`${url} lớn hơn ${megabytes(limit)}.`);chunks.push(chunk);}
+ // A connection cut or a timeout in the middle of the body is a network error too.
+ try{for await(const chunk of response.body){size+=chunk.length;if(size>limit)break;chunks.push(chunk);}}
+ catch(error){throw transient(reasonOf(error),error);}
+ if(size>limit)throw new Error(`${url} lớn hơn ${megabytes(limit)}.`);
  return new Uint8Array(Buffer.concat(chunks));
+}
+async function download(url,{limit=DOWNLOAD_LIMIT,fetch=globalThis.fetch,sleep=wait,log=console.log}={}){
+ for(let attempt=1;;attempt++){
+  try{return await fetchOnce(url,{limit,fetch});}
+  catch(error){
+   if(!error.retry)throw error;
+   if(attempt>RETRY_DELAYS.length)throw new Error(`Không tải được ${url} sau ${attempt} lần thử (${error.message}). Kiểm tra mạng, hoặc tải các tệp nguồn ở máy khác vào một thư mục rồi chạy "npm run prepare:dict -- --from <thư mục>".`);
+   const delay=RETRY_DELAYS[attempt-1];
+   log(`Chưa tải được ${url} (${error.message}): thử lại sau ${delay/1000} giây (lần ${attempt+1}/${RETRY_DELAYS.length+1})…`);
+   await sleep(delay);
+  }
+ }
 }
 const readIfPresent=path=>readFile(path).then(buffer=>new Uint8Array(buffer),()=>null);
 // --from folder first, then the copy in the repo (`local`), then the verified cache, then the network. --from means
-// offline: a file missing from the folder, the repo and the cache is reported, not downloaded.
-export async function getSource(source,{from='',cache=CACHE,log=console.log,repo=root}={}){
+// offline: a file missing from the folder, the repo and the cache is reported, not downloaded. `fetch` and `sleep` are
+// replaceable so tests can play a flaky network without one.
+export async function getSource(source,{from='',cache=CACHE,log=console.log,repo=root,fetch=globalThis.fetch,sleep=wait}={}){
  const offline=from?await readIfPresent(join(from,source.file)):null;
  if(offline)return verifySource(source,offline);
  if(source.local){const kept=await readIfPresent(join(repo,source.local));if(!kept)throw new Error(`Thiếu ${source.local} trong repo: lấy lại bằng git (git checkout -- ${source.local}).`);return verifySource(source,kept);}
@@ -72,7 +96,7 @@ export async function getSource(source,{from='',cache=CACHE,log=console.log,repo
  if(saved){try{return verifySource(source,saved);}catch{await rm(cached,{force:true});}}
  if(from)throw new Error(`Thiếu ${source.file} trong ${from}.`);
  log(`Đang tải ${source.name} (${megabytes(source.bytes)})…`);
- const bytes=verifySource(source,await download(source.url));
+ const bytes=verifySource(source,await download(source.url,{fetch,sleep,log}));
  await mkdir(join(cache,source.sha256),{recursive:true});await writeFile(`${cached}.tmp`,bytes);await rename(`${cached}.tmp`,cached);
  return bytes;
 }
@@ -116,7 +140,7 @@ export async function writeDictionary({id,manifest,files},directory=OUTPUT){
 }
 
 async function printHashes(urls){
- for(const url of urls.length?urls:SOURCES.filter(source=>!source.local).map(source=>source.url)){const bytes=await download(url,100*MB);console.log(`${bytes.length} ${sha256(bytes)} ${url}`);}
+ for(const url of urls.length?urls:SOURCES.filter(source=>!source.local).map(source=>source.url)){const bytes=await download(url,{limit:100*MB});console.log(`${bytes.length} ${sha256(bytes)} ${url}`);}
 }
 async function main(args){
  if(args.includes('--print-hashes'))return printHashes(args.filter(arg=>/^https?:/u.test(arg)));
