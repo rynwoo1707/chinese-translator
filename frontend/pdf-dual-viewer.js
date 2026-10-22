@@ -72,11 +72,31 @@ export class PdfDualViewer{
   const wrapper=document.createElement('div');wrapper.innerHTML=pageMarkup({...entry,extractionVersion:pageVersion(entry,this.document)},this.translations);const paper=wrapper.firstElementChild;for(const node of paper.querySelectorAll('[data-block-id]'))node.classList.toggle('is-overflow',this.flagged.has(node.dataset.blockId));this.translated.append(this.scaledFrame(paper,entry.width,entry.height));await document.fonts.ready;await Promise.all([...paper.querySelectorAll('img')].map(img=>img.decode().catch(()=>{})));if(version!==this.version)return;
   // Same steps as the PDF exporter, so the preview shows the layout that will be exported.
   await prepareLayout(paper);if(version!==this.version)return;
-  const report=fitTextBoxes(paper),overflow=report.filter(b=>b.overflow),small=report.filter(b=>b.shrunk&&!b.overflow),flagged=entry.blocks.flatMap((b,i)=>this.flagged.has(b.id)?[`Đoạn ${i+1}`]:[]);
-  if(flagged.length)this.root.querySelector('[data-pdf-notice]').textContent=`Khi xuất PDF, ${flagged.join(', ')} của trang này dài hơn khung chữ (viền đỏ). Hãy viết ngắn lại trong “Chỉnh bản dịch từng đoạn”, bấm “Lưu đoạn đã sửa” rồi xuất lại.`;
+  // In a sentence a block is "Trang 2 · đoạn 1", as everywhere else; "Đoạn k" is the editor's own list.
+  const report=fitTextBoxes(paper),overflow=report.filter(b=>b.overflow),small=report.filter(b=>b.shrunk&&!b.overflow),flagged=entry.blocks.flatMap((b,i)=>this.flagged.has(b.id)?[`Trang ${entry.number} · đoạn ${i+1}`]:[]);
+  if(flagged.length)this.root.querySelector('[data-pdf-notice]').textContent=`Khi xuất PDF, bản dịch của ${flagged.length>1?`${flagged.slice(0,-1).join(', ')} và ${flagged.at(-1)}`:flagged[0]} dài hơn khung chữ (viền đỏ). Hãy viết ngắn lại trong “Chỉnh bản dịch từng đoạn”, bấm “Lưu đoạn đã sửa” rồi xuất lại.`;
   else if(overflow.length)this.root.querySelector('[data-pdf-notice]').textContent=`Có ${overflow.length} đoạn dịch dài hơn khung chữ trên trang. Hãy rút gọn các đoạn đó trước khi xuất PDF.`;
   else if(!this.fontReady)this.root.querySelector('[data-pdf-notice]').textContent='Chưa tải được phông chữ xem trước nên chữ ở bản xem trước có thể khác PDF xuất ra một chút. Kiểm tra mạng rồi chuyển trang để thử lại.';
   else if(small.length)this.root.querySelector('[data-pdf-notice]').textContent=`Có ${small.length} đoạn phải thu nhỏ chữ dưới 85% cỡ gốc vì bản dịch dài hơn chỗ trống. Có thể rút gọn đoạn dịch để chữ dễ đọc hơn.`;
+ }
+ // The blocks, on every page, whose translation is longer than its box even at the smallest size: each page is drawn
+ // out of sight with the preview font and measured as the exporter measures it (prepareLayout, fitTextBoxes). For a
+ // finished part whose export was refused, opened again where the service's own answer is not known (study.js).
+ async overflowBlocks(){
+  const source=this.document;if(!source)return [];
+  if(!this.fontReady){try{await this.loadFont();this.fontReady=true;}catch{}}
+  // Laid out in the page's body, not in the viewer, which may be hidden (nothing is measured inside display:none).
+  const holder=document.createElement('div'),found=[];holder.setAttribute('aria-hidden','true');holder.style.cssText='position:absolute;left:-100000px;top:0;visibility:hidden;pointer-events:none';document.body.append(holder);
+  try{
+   for(const entry of source.pages){
+    if(this.document!==source)return [];if(!entry.blocks.some(b=>hasBlockTranslation(this.translations,b.id)))continue;
+    // Laid out at once, so the preview font starts loading before fonts.ready is awaited.
+    holder.innerHTML=pageMarkup({...entry,extractionVersion:pageVersion(entry,source)},this.translations);const paper=holder.firstElementChild;paper.getBoundingClientRect();
+    await document.fonts.ready;await Promise.all([...paper.querySelectorAll('img')].map(img=>img.decode().catch(()=>{})));await prepareLayout(paper);
+    for(const item of fitTextBoxes(paper))if(item.overflow)found.push(item.id);
+   }
+  }finally{holder.remove();}
+  return found;
  }
  async setExportedPdf(url){
   const response=await fetch(url,{credentials:'same-origin'});if(!response.ok)throw new Error('Không tải được PDF đã xuất.');const pdfjs=await import('/vendor/pdf.mjs');pdfjs.GlobalWorkerOptions.workerSrc='/vendor/pdf.worker.mjs';if(this.pdf)await this.pdf.loadingTask.destroy();this.pdf=await pdfjs.getDocument({data:new Uint8Array(await response.arrayBuffer())}).promise;await this.show(this.index);

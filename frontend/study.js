@@ -43,6 +43,10 @@ let modelCatalogFingerprint='',modelCatalogPurpose='',checkedModelMode='';
 // button offers to wait for that run (Chờ rồi dịch tiếp).
 let bookMode=false,bookJob=null,bookJobs=[],bookSource=null,bookSurvey=null,bookRun=null,bookWorking=null,bookChunkId='',bookContext='',bookStatusText='',bookNotes=[],bookHashTask=null,coverTask=Promise.resolve(),lastSavedHistory=null,bookPagesEdited=false,bookBusy=false;
 let wake=null,runnerId='',reportStore=null;
+// Exports the PDF service refused in this tab (pdf_overflow or another refusal), by history id: the blocks it named,
+// so opening that part again here marks them at once. The lasting record is the part itself: its session stays
+// unexported and its chapter text/plain until an export succeeds (missingPdf), on any device.
+const exportProblems=new Map();
 // One run id per browser: after a reload this browser goes on with its own run at once, while another device waits until
 // that run stops reporting. Tokens not yet reported are kept here too. Without localStorage both last as long as the page.
 // Both need whole-book.js, so they are made the first time a book job is shown or run.
@@ -68,9 +72,21 @@ const OCR_NOTE='Đoạn này nhận dạng từ ảnh (OCR) và chưa được �
 // the machine OCR text; it counts as read, so no run pays for its image again.
 const OCR_KEPT_NOTE='Gemini chưa đọc lại được đoạn này nên đoạn này giữ chữ nhận dạng máy (OCR); chữ có thể sai, hãy đối chiếu với trang gốc.';
 const ocrHandled=block=>block.ocrCorrected===true||Boolean(block.ocrKept);
-// True once the edited block is saved (the viewer then drops the block's "longer than its box" mark).
+// The editor shows a block's formulas as [Công thức n] and puts each back as its token on saving (pdf-dual-viewer.js):
+// a box deleted or written twice is said in the editor's own words, never with the token the server's check names.
+function formulaProblem(block,translation){
+ const page=pdfLayoutDocument.pages.find(entry=>entry.blocks.includes(block)),label=page?`Đoạn ${page.blocks.indexOf(block)+1}`:'Đoạn này';
+ for(const [i,inline] of (block.inlines||[]).entries()){
+  const box=`[Công thức ${i+1}]`,count=translation.split(inline.token).length+translation.split(box).length-2;
+  if(!count)return `${label}: bản sửa làm mất ${box}; hãy giữ nguyên ô này.`;
+  if(count>1)return `${label}: bản sửa có ${box} hơn một lần; hãy giữ đúng một ô này.`;
+ }
+ return '';
+}
+// True once the edited block is saved (the viewer then drops the block's "longer than its box" mark). A part exported
+// before has no PDF again until it is exported anew: the save turns its chapter back into text.
 async function editLayoutBlock(id,translation){
- if(running)return false;busy(true);try{const {validateBlockTranslations}=await boxLayout(),blocks=pdfLayoutDocument.pages.flatMap(p=>p.blocks),index=blocks.findIndex(b=>b.id===id);validateBlockTranslations([blocks[index]],[{id,translation}]);translationParts[index]=translation.normalize('NFC');pdfExportUrl='';translationState.pdfLayout.exported=false;syncPdfText();await dualViewer.invalidatePdf();await dualViewer.update(pdfTranslations());if(!await saveHistory())throw new Error('Chưa lưu được đoạn đã sửa. Hãy thử lại.');$('#download-pdf').disabled=translationState.done!==blocks.length;status('Đã lưu đoạn sửa. Bấm Xuất PDF tiếng Việt để dàn trang lại.');return true;}catch(error){fail(error);return false;}finally{busy(false);}
+ if(running)return false;busy(true);try{const {validateBlockTranslations}=await boxLayout(),blocks=pdfLayoutDocument.pages.flatMap(p=>p.blocks),index=blocks.findIndex(b=>b.id===id),problem=formulaProblem(blocks[index],translation),exported=Boolean(translationState.pdfLayout.exported);if(problem)throw new Error(problem);validateBlockTranslations([blocks[index]],[{id,translation}]);translationParts[index]=translation.normalize('NFC');pdfExportUrl='';translationState.pdfLayout.exported=false;syncPdfText();await dualViewer.invalidatePdf();await dualViewer.update(pdfTranslations());if(!await saveHistory())throw new Error('Chưa lưu được đoạn đã sửa. Hãy thử lại.');const refused=exportProblems.get(activeHistoryId);if(refused)refused.blocks=refused.blocks.filter(blockId=>blockId!==id);if(exported)partHasPdf(activeHistoryId,false);$('#download-pdf').disabled=translationState.done!==blocks.length;status('Đã lưu đoạn sửa. Bấm Xuất PDF tiếng Việt để dàn trang lại.');return true;}catch(error){fail(error);return false;}finally{busy(false);}
 }
 // The preview font (~800 KB) is fetched the first time the viewer draws a translated page, never at start-up, so picking a
 // file never waits for it. The browser keeps it a day and then revalidates it (ETag); a failure is tried again later.
@@ -83,7 +99,7 @@ let viewerTask=null;
 function loadViewer(){
  viewerTask??=import('./pdf-dual-viewer.js').then(({PdfDualViewer})=>{
   const viewer=new PdfDualViewer($('#pdf-dual-viewer'),{loadFont:previewFont});
-  viewer.onSourceBlock=(block,page,region)=>openHanziPanel({text:block.text||block.source,title:`Nguyên tác · Trang ${page.number} · Đoạn ${page.blocks.indexOf(block)+1}`,note:!page.ocr?'':block.ocrKept?OCR_KEPT_NOTE:!block.ocrCorrected?OCR_NOTE:'',returnFocus:region});
+  viewer.onSourceBlock=(block,page,region)=>openHanziPanel({text:block.text||block.source,title:`Nguyên tác · Trang ${page.number} · đoạn ${page.blocks.indexOf(block)+1}`,note:!page.ocr?'':block.ocrKept?OCR_KEPT_NOTE:!block.ocrCorrected?OCR_NOTE:'',returnFocus:region});
   viewer.onEdit=editLayoutBlock;return viewer;
  }).catch(error=>{viewerTask=null;throw error;});
  return viewerTask;
@@ -130,6 +146,8 @@ function signInLink(text='Đăng nhập lại'){const link=document.createElemen
 // Error text from services is bounded upstream; this cap keeps the progress box readable whatever arrives.
 // An expired session also gets the way back: a link to sign in.
 function fail(error){const message=String(error?.message||error).trim();status(message.length>500?`${message.slice(0,499)}…`:message,'error');if(signedOut(error))$('#progress').append(' ',signInLink());}
+// The warnings box holds one note per line, each ended by a line break.
+const noteLines=notes=>Array.isArray(notes)&&notes.length?`${notes.join('\n')}\n`:'';
 function workflow(step){document.querySelectorAll('.workflow li').forEach((item,index)=>{item.classList.toggle('active',index===step-1);item.classList.toggle('done',index<step-1);});}
 // onResponse(response): called with a successful answer before its body is returned (the history reads its paging header).
 async function api(path,{onResponse=null,...options}={}){
@@ -250,7 +268,7 @@ function renderHistory(){
   card.className='history-card'+(item.id===activeHistoryId?' is-active':'');open.type='button';open.className='history-card-main';open.dataset.historyOpen=item.id;open.disabled=running;
   title.textContent=item.title||'Bản dịch chưa đặt tên';title.title=title.textContent;open.append(title);
   if(item.filename){const filename=document.createElement('small');filename.className='history-source';filename.textContent=item.filename;filename.title=item.filename;open.append(filename);}
-  progress.textContent=historyStatus(item);const updated=historyDate(item.updated_at);date.textContent=updated?'Cập nhật '+new Intl.DateTimeFormat('vi-VN',{dateStyle:'short',timeStyle:'short'}).format(updated):'Ngày cập nhật chưa xác định';if(updated)date.dateTime=updated.toISOString();open.append(progress,date);
+  progress.textContent=`${historyStatus(item)}${missingPdf(item)?' · chưa có PDF tiếng Việt':''}`;const updated=historyDate(item.updated_at);date.textContent=updated?'Cập nhật '+new Intl.DateTimeFormat('vi-VN',{dateStyle:'short',timeStyle:'short'}).format(updated):'Ngày cập nhật chưa xác định';if(updated)date.dateTime=updated.toISOString();open.append(progress,date);
   const book=studyBooks.find(entry=>entry.id===item.library_story_id),part=book?book.parts.findIndex(entry=>entry.id===item.library_chapter_id):-1;
   if(book&&book.parts.length>1&&part>=0){const tag=document.createElement('small');tag.className='history-book';tag.textContent=`Sách “${book.title}” · phần ${part+1}/${book.parts.length}`;tag.title=tag.textContent;open.append(tag);}
   card.append(open);
@@ -262,8 +280,12 @@ function renderHistory(){
  }
  if(historyNext)root.append(historyMoreBlock());
 }
-async function loadHistory(){const [page,books]=await Promise.all([historyPage(),api('books').catch(()=>studyBooks),loadBookJobs()]);historyItems=page.rows||[];historyNext=page.next;historyMore=null;setStudyBooks(books);}
-async function loadBooks(){setStudyBooks(await api('books'));}
+// The books are asked for again after a save that made a book part and after an export (the part's chapter becomes a
+// PDF); only the newest answer is used, so an older one arriving late never brings back a part's earlier state.
+let booksAsked=0;
+async function fetchBooks(){const asked=++booksAsked,rows=await api('books');return asked===booksAsked?rows:null;}
+async function loadHistory(){const [page,books]=await Promise.all([historyPage(),fetchBooks().catch(()=>null),loadBookJobs()]);historyItems=page.rows||[];historyNext=page.next;historyMore=null;setStudyBooks(books||studyBooks);}
+async function loadBooks(){const rows=await fetchBooks();if(rows)setStudyBooks(rows);}
 // Only the list (its newest page again), for a run about to look for its parts in it; a failure leaves the list as it
 // was (the run asks the server for each part by its id anyway), except an expired session.
 async function refreshHistoryList(){try{const page=await historyPage();if(page.rows){historyItems=page.rows;historyNext=page.next;historyMore=null;renderHistory();}}catch(error){if(signedOut(error))throw error;}}
@@ -436,13 +458,47 @@ async function syncBookCover(storyId){
 }
 // Books with several parts, and every whole-book run with its progress: the parts a run saved (one per chunk) are listed
 // in its row, where they open or are deleted, instead of one history card each.
+// A run's list of parts opens by itself when a part of it is first seen lacking its PDF; otherwise the student's own
+// choice (open or closed) is kept. missingShown: the parts the lists were opened for.
+const missingShown=new Set();
 function renderStudyBooks(){
  const section=$('#study-books'),root=$('#study-books-list');if(!section||!root)return;
  const jobOf=book=>bookJobs.find(job=>job.storyId===book.id),books=studyBooks.filter(book=>book.parts.length>1||jobOf(book)),loose=bookJobs.filter(job=>!job.storyId||!studyBooks.some(book=>book.id===job.storyId));
  const opened=new Set([...root.querySelectorAll('details.book-job-parts[open]')].map(details=>details.dataset.job)),groups=jobSessions();
+ for(const job of bookJobs)for(const item of (groups.get(job.id)||[]).filter(missingPdf))if(!missingShown.has(item.id)){missingShown.add(item.id);opened.add(job.id);}
  section.hidden=!books.length&&!loose.length;root.replaceChildren();
  for(const job of loose)root.append(studyBookRow(null,job,opened,groups));
  for(const book of books)root.append(studyBookRow(book,jobOf(book),opened,groups));
+}
+// ---- A finished part without its Vietnamese PDF ----
+// The export of a kept-layout part can be refused (translations longer than their boxes even at the smallest size, or
+// another refusal of the PDF service). The part keeps a text chapter (GET books: parts[].mime 'text/plain', with the
+// pages of its layout) and its session stays unexported until an export succeeds, on any device and after a reload;
+// "Tải cả quyển (PDF)" then holds those pages as printed. Before the books list has the part, this tab's own refusal
+// says it. The session a run of this tab is working on is finished a moment before its export: it is said to lack its
+// PDF only once that export was refused.
+const partOf=item=>studyBooks.find(book=>book.id===item?.library_story_id)?.parts.find(part=>part.id===item.library_chapter_id)||null;
+function missingPdf(item){
+ if(item?.status!=='complete'||runActive&&item.id===activeHistoryId&&!exportProblems.has(item.id))return false;const part=partOf(item);
+ return part?Array.isArray(part.pages)&&part.pages.length>0&&part.mime!=='application/pdf':exportProblems.has(item.id);
+}
+// An export just made (or a saved edit that undid one) changes the part's chapter: said here at once, then read again.
+function partHasPdf(id,pdf){
+ const item=historyItems.find(entry=>entry.id===id),part=partOf(item);if(!item?.library_chapter_id)return;
+ if(part){part.mime=pdf?'application/pdf':'text/plain';renderHistory();}
+ loadBooks().catch(()=>{});
+}
+const partName=item=>item.page_start?pageLabel(item.page_start,item.page_end||item.page_start).replace(/^t/u,'T'):item.title||'Phần chưa đặt tên';
+const missingPdfParts=job=>wholeBook&&job?(jobSessions().get(job.id)||[]).filter(missingPdf).sort((a,b)=>(a.page_start||0)-(b.page_start||0)):[];
+function missingPdfPages(job){
+ const pages=new Set();
+ for(const item of missingPdfParts(job)){const listed=partOf(item)?.pages,start=item.page_start,end=item.page_end||start;for(const page of Array.isArray(listed)?listed:start?Array.from({length:end-start+1},(_,i)=>start+i):[])pages.add(page);}
+ return pages;
+}
+// What a finished run still lacks, or '' when every part has its Vietnamese PDF.
+function missingPdfNote(job){
+ const missing=missingPdfParts(job);if(!missing.length)return '';const names=missing.map(partName),list=names.length>1?`${names.slice(0,-1).join(', ')} và ${names.at(-1)}`:names[0];
+ return `${list} chưa có PDF tiếng Việt, nên “Tải cả quyển (PDF)” còn giữ các trang đó như bản gốc. Mở ${missing.length>1?'từng phần đó':'phần đó'} trong Sách của tôi (Lịch sử dịch) để xem cần sửa gì, rồi bấm Xuất PDF tiếng Việt; không tốn token.`;
 }
 function studyBookRow(book,job,opened,groups){
  const row=document.createElement('article'),text=document.createElement('div'),title=document.createElement('strong'),actions=document.createElement('div');
@@ -461,8 +517,8 @@ function studyBookRow(book,job,opened,groups){
 function jobPartList(job,parts,expanded){
  const details=document.createElement('details'),summary=document.createElement('summary'),list=document.createElement('ul');details.className='book-job-parts';details.dataset.job=job.id;details.open=expanded;summary.textContent=`Các phần đã lưu (${parts.length})`;
  for(const item of parts){
-  const entry=document.createElement('li'),open=document.createElement('button'),remove=document.createElement('button'),label=item.page_start?pageLabel(item.page_start,item.page_end||item.page_start).replace(/^t/u,'T'):item.title||'Phần chưa đặt tên';
-  open.type='button';open.dataset.historyOpen=item.id;open.disabled=running;open.textContent=`${label} · ${item.status==='complete'?'Hoàn tất':item.status==='translating'?'Dịch dở':'Chưa dịch'}`;
+  const entry=document.createElement('li'),open=document.createElement('button'),remove=document.createElement('button'),label=partName(item);
+  open.type='button';open.dataset.historyOpen=item.id;open.disabled=running;open.textContent=`${label} · ${item.status==='complete'?'Hoàn tất':item.status==='translating'?'Dịch dở':'Chưa dịch'}${missingPdf(item)?' · chưa có PDF tiếng Việt':''}`;
   remove.type='button';remove.className='history-delete';remove.dataset.historyDelete=item.id;remove.disabled=running;remove.textContent='Xóa';remove.setAttribute('aria-label',`Xóa phần ${label}`);
   entry.append(open,remove);list.append(entry);
  }
@@ -471,8 +527,8 @@ function jobPartList(job,parts,expanded){
 function jobStatusLabel(job){
  if(bookRun&&bookJob?.id===job.id)return 'Đang dịch';
  if(wholeBook.heldElsewhere(job,bookRunner()))return 'Đang dịch ở thiết bị khác';
- if(job.status==='done')return job.pageStates.includes('.')?'Còn trang chưa dịch':'Hoàn tất';
- if(job.status==='paused')return ({quota_day:'Tạm dừng · hết hạn mức ngày',quota:'Tạm dừng · hết hạn mức',gemini_key:'Tạm dừng · cần khóa hợp lệ',network:'Tạm dừng · mất kết nối',gemini_unavailable:'Tạm dừng · Gemini quá tải',gemini_location:'Tạm dừng · Gemini chưa phục vụ khu vực máy chủ',limit:'Tạm dừng · hết lượt trong ngày',pdf_busy:'Tạm dừng · dịch vụ PDF bận',history_full:'Tạm dừng · lịch sử dịch đã đầy',conflict:'Tạm dừng · phần đang dịch đã lưu ở nơi khác'})[job.pauseReason]||'Tạm dừng';
+ if(job.status==='done')return job.pageStates.includes('.')?'Còn trang chưa dịch':missingPdfParts(job).length?'Còn phần chưa có PDF tiếng Việt':'Hoàn tất';
+ if(job.status==='paused')return ({quota_day:'Tạm dừng · hết hạn mức ngày',quota:'Tạm dừng · hết hạn mức',gemini_key:'Tạm dừng · cần khóa hợp lệ',network:'Tạm dừng · mất kết nối',gemini_unavailable:'Tạm dừng · Gemini quá tải',gemini_location:'Tạm dừng · Gemini chưa phục vụ khu vực máy chủ',limit:'Tạm dừng · hết lượt trong ngày',pdf_busy:'Tạm dừng · dịch vụ PDF bận',pdf_account:'Tạm dừng · đang có lượt xử lý PDF khác',history_full:'Tạm dừng · lịch sử dịch đã đầy',conflict:'Tạm dừng · phần đang dịch đã lưu ở nơi khác'})[job.pauseReason]||'Tạm dừng';
  // "running" with no run in this tab: the tab that ran it was closed; every finished chunk is kept.
  return job.status==='running'?'Dịch dở':'Chưa bắt đầu';
 }
@@ -564,7 +620,7 @@ function setUnsaved(value,error=null){
  unsaved=Boolean(value);saveError=unsaved?error:null;const warning=$('#save-warning');warning.hidden=!unsaved;warning.replaceChildren();if(!unsaved)return;
  const refusal=saveRefusal(error);
  // Signing in in another tab keeps this tab's work; the next save then goes through.
- if(signedOut(error)){const link=signInLink('đăng nhập lại ở thẻ mới');link.target='_blank';link.rel='noopener';warning.append('Chưa lưu được tiến độ: phiên đăng nhập đã hết hạn. Đừng đóng tab; ',link,', rồi bấm Bắt đầu dịch để lưu tiếp.');}
+ if(signedOut(error)){const link=signInLink('đăng nhập lại ở tab mới');link.target='_blank';link.rel='noopener';warning.append('Chưa lưu được tiến độ: phiên đăng nhập đã hết hạn. Đừng đóng tab; ',link,', rồi bấm Bắt đầu dịch để lưu tiếp.');}
  // A copy saved elsewhere since is reopened from the history; this tab's newer part cannot be saved over it. A whole-book
  // run reopens it itself when it goes on.
  else if(error?.data?.code==='history_conflict'){
@@ -589,11 +645,12 @@ async function saveHistory(){
 }
 // A run never spends tokens on work it cannot keep: when the save before the next Gemini call failed, the run stops here.
 // After the last part nothing is left to send, so that save says only that the finished translation is not saved yet.
-// A refusal keeps its code (history_full, history_conflict…), so a whole-book run pauses for what it is.
+// A refusal keeps its code (history_full, history_conflict…), so a whole-book run pauses for what it is, in the
+// server's own words: the run's pause adds what to do for the book (whole-book.js pauseMessage), not a range run's.
 async function saveBeforeSpending(finished=false){
  const saved=await saveHistory();if(!unsaved)return saved;
  const refusal=saveRefusal(saveError),kept=translationParts.some(text=>text?.trim())?' Phần đã dịch vẫn hiện trong tab này: đừng đóng tab.':'';
- const message=finished?refusal?`Đã dịch xong nhưng chưa lưu được bản dịch vào tài khoản: ${refusal} Bản dịch vẫn hiện trong tab này: đừng đóng tab; không gọi Gemini lại.`:'Đã dịch xong nhưng chưa lưu được bản dịch vào tài khoản. Bản dịch vẫn hiện trong tab này: đừng đóng tab. Kiểm tra mạng rồi bấm Bắt đầu dịch để lưu lại; không gọi Gemini lại.'
+ const message=bookRun&&refusal?refusal:finished?refusal?`Đã dịch xong nhưng chưa lưu được bản dịch vào tài khoản: ${refusal} Bản dịch vẫn hiện trong tab này: đừng đóng tab; không gọi Gemini lại.`:'Đã dịch xong nhưng chưa lưu được bản dịch vào tài khoản. Bản dịch vẫn hiện trong tab này: đừng đóng tab. Kiểm tra mạng rồi bấm Bắt đầu dịch để lưu lại; không gọi Gemini lại.'
   :refusal?`Đã dừng vì chưa lưu được tiến độ vào tài khoản, nên Hoa Trí không gửi thêm yêu cầu tới Gemini: ${refusal}${kept}`:`Đã dừng vì chưa lưu được tiến độ vào tài khoản, nên Hoa Trí không gửi thêm yêu cầu tới Gemini.${kept} Kiểm tra mạng rồi bấm Bắt đầu dịch để lưu và dịch tiếp.`;
  throw Object.assign(new Error(message),refusal?{code:'save_failed',status:saveError.status,data:saveError.data}:{code:'save_failed',status:0});
 }
@@ -622,6 +679,7 @@ async function openHistory(id){
   // Exports from an older renderer are rendered again from the saved translations: no Gemini call, no token cost.
   if(state.pdfLayout.exported&&state.pdfLayout.renderVersion>=3){pdfExportUrl=`/api/my/study/pdf-layout/assets/${state.pdfLayout.assetId}/translated`;await dualViewer.setExportedPdf(pdfExportUrl);}
   else if(state.pdfLayout.exported&&done===parts.length)status('PDF đã xuất dùng cách dàn trang cũ. Bấm Xuất PDF tiếng Việt để dàn trang lại; không cần dịch lại, không tốn token.');
+  else if(done===parts.length)await showMissingPdf(item.id,version);
  }
  }finally{busy(false);}
 }
@@ -753,7 +811,10 @@ async function offerDownload(download){
  },async()=>{Promise.resolve().then(download).catch(fail);},'Vẫn tải ở đây','Đang tải…');
 }
 
-async function selected(file){workflow(1);await layoutConfiguration;const isPdf=file?.name.toLowerCase().endsWith('.pdf'),useLayout=isPdf&&$('#pdf-layout-enabled').checked;if(isPdf)await pdfTools();if(file?.size>(useLayout?wholeBook.SOURCE_MAX_BYTES:isPdf?PDF_MAX_BYTES:OTHER_MAX_BYTES))throw new Error(useLayout?'PDF giữ bố cục tối đa 100 MB (tệp trên 25 MB được dịch bằng chế độ Dịch cả quyển).':isPdf?'PDF tối đa 250 MB khi xử lý tại trình duyệt.':'Tệp tối đa 25 MB.');const version=++selectionVersion;selectedFile=file;unbindBook();resetHistoryIdentity();bookTarget={id:'',replaceChapterId:''};bookChoiceTouched=false;selectedHash=fileSha256(file);selectedSha256='';selectedTotalPages=0;resetCover();autoRange='';pdfAnalysis=null;preparedPages=new Map();preparedRangeKey=null;clearPageImages();ocrWarnings=[];translationState=null;translationParts=[];pdfLayoutDocument=null;pdfExportUrl='';pdfLayoutRange='';await dualViewer.clear();clearPartStream();$('#source').readOnly=false;$('#source').value='';$('#translation').value='';$('#warnings').textContent='';$('#download').disabled=true;$('#download-pdf').disabled=true;$('#pdf-range-options').hidden=true;$('#page-range').value='';updateCount();$('#library-match').hidden=true;if(!file){setFileStatus('Hoặc dán một đoạn tiếng Trung bên dưới.');return;}showLibraryMatch(version);
+// A new pick starts afresh: the error of a file picked before (one that could not be opened, a photo that could not be
+// read) leaves the progress line and, on phones, the floating action bar.
+function clearStatus(){status('Chưa bắt đầu.');$('#run-bar-status').textContent='';}
+async function selected(file){workflow(1);await layoutConfiguration;const isPdf=file?.name.toLowerCase().endsWith('.pdf'),useLayout=isPdf&&$('#pdf-layout-enabled').checked;if(isPdf)await pdfTools();if(file?.size>(useLayout?wholeBook.SOURCE_MAX_BYTES:isPdf?PDF_MAX_BYTES:OTHER_MAX_BYTES))throw new Error(useLayout?'PDF giữ bố cục tối đa 100 MB (tệp trên 25 MB được dịch bằng chế độ Dịch cả quyển).':isPdf?'PDF tối đa 250 MB khi xử lý tại trình duyệt.':'Tệp tối đa 25 MB.');const version=++selectionVersion;clearStatus();selectedFile=file;unbindBook();resetHistoryIdentity();bookTarget={id:'',replaceChapterId:''};bookChoiceTouched=false;selectedHash=fileSha256(file);selectedSha256='';selectedTotalPages=0;resetCover();autoRange='';pdfAnalysis=null;preparedPages=new Map();preparedRangeKey=null;clearPageImages();ocrWarnings=[];translationState=null;translationParts=[];pdfLayoutDocument=null;pdfExportUrl='';pdfLayoutRange='';await dualViewer.clear();clearPartStream();$('#source').readOnly=false;$('#source').value='';$('#translation').value='';$('#warnings').textContent='';$('#download').disabled=true;$('#download-pdf').disabled=true;$('#pdf-range-options').hidden=true;$('#page-range').value='';updateCount();$('#library-match').hidden=true;if(!file){setFileStatus('Hoặc dán một đoạn tiếng Trung bên dưới.');return;}showLibraryMatch(version);
  if(useLayout){const {pdfPageCount}=await import('./pdf-client.js');setFileStatus('Đang kiểm tra số trang PDF…');let total;try{total=await pdfPageCount(file);}catch(error){if(version!==selectionVersion)return;throw forgetPickedFile(file,error);}if(version!==selectionVersion)return;$('#pdf-range-options').hidden=false;autoRange=$('#page-range').value=`1-${Math.min(3,total)}`;selectedTotalPages=total;const large=file.size>OTHER_MAX_BYTES;setFileStatus(large?`${total} trang · ${megabytes(file.size)} · tệp trên 25 MB được dịch bằng chế độ Dịch cả quyển.`:`${total} trang · dịch từng đoạn ngay trên trang; chọn phạm vi rồi bấm Bắt đầu dịch, hoặc chọn Dịch cả quyển.`);renderBookMode();if(large)setBookMode(true);prepareBookTarget(version,{suggest:true});coverTask=detectSelectedCover(file,version);findBookJob(version);return;}
  if(!isPdf){await prepare();return;}
  setFileStatus('Đang kiểm tra lớp chữ PDF trên trình duyệt…',{busy:true});try{const {analyzePdf}=await import('./pdf-client.js');const analysis=await analyzePdf(file,(page,total)=>{if(version===selectionVersion)setFileStatus(`Đang đọc trang ${page}/${total}…`,{busy:true});});if(version!==selectionVersion)return;pdfAnalysis=analysis;}catch(error){if(version!==selectionVersion)return;throw forgetPickedFile(file,error);}
@@ -769,7 +830,7 @@ async function selected(file){workflow(1);await layoutConfiguration;const isPdf=
 const PHOTO=/\.(?:jpe?g|png|webp)$/iu,MAX_PHOTOS=60;
 const isPhoto=file=>/^image\/(?:jpeg|png|webp)$/u.test(file?.type||'')||PHOTO.test(file?.name||'');
 async function pickFiles(files){
- if(!files.length||files.length===1&&!isPhoto(files[0]))return selected(files[0]);
+ clearStatus();if(!files.length||files.length===1&&!isPhoto(files[0]))return selected(files[0]);
  if(!files.every(isPhoto))throw new Error('Chỉ chọn nhiều tệp cùng lúc khi tất cả là ảnh chụp trang (JPG, PNG, WebP). Tài liệu khác hãy chọn từng tệp một.');
  if(files.length>MAX_PHOTOS)throw new Error(`Mỗi lần chọn tối đa ${MAX_PHOTOS} ảnh; hãy chia thành nhiều lượt.`);
  workflow(1);setFileStatus(files.length>1?`Đang ghép ${files.length} ảnh thành một PDF trên thiết bị…`:'Đang chuyển ảnh thành PDF trên thiết bị…',{busy:true});
@@ -777,9 +838,11 @@ async function pickFiles(files){
  return selected(pdf);
 }
 // Each photo is drawn upright (as the browser shows it) at most 2,400 px on its long side, which keeps a page of text
-// sharp for OCR and a PDF of 20 photos well under the 25 MB a kept-layout range takes.
+// sharp for OCR and a PDF of 20 photos well under the 25 MB a kept-layout range takes. No creation time is written, so
+// the same photos picked again give the same bytes, hence the same SHA-256: their unfinished whole-book run goes on and
+// the ranges already in a book are found, instead of being translated and paid for again.
 async function photosToPdf(files){
- const {PDFDocument}=await import('/vendor/pdf-lib.esm.min.js'),pdf=await PDFDocument.create();
+ const {PDFDocument}=await import('/vendor/pdf-lib.esm.min.js'),pdf=await PDFDocument.create({updateMetadata:false});
  for(const file of files){
   const url=URL.createObjectURL(file),image=new Image();
   try{image.src=url;await image.decode();}catch{throw new Error(`Không đọc được ảnh “${file.name}”. Hãy chọn ảnh JPG, PNG hoặc WebP.`);}finally{URL.revokeObjectURL(url);}
@@ -838,7 +901,7 @@ async function prepare(){if(!selectedFile)return false;busy(true);let localOcr=n
    },()=>{},selectedPages,{keepTextPreviews:true});
    preparedRangeKey=translationRange().text;
    $('#source').value=joinedPageText(preparedPages);
-   $('#warnings').textContent=ocrWarnings.join('\n');renderPageImages();
+   $('#warnings').textContent=noteLines(ocrWarnings);renderPageImages();
    const figureCount=[...pageImages.values()].reduce((sum,item)=>sum+item.figures.length,0);
    setFileStatus(`Đã chuẩn bị ${preparedPages.size} trang riêng biệt · ${figureCount} hình được tách từ bản gốc. Có thể mở Đối chiếu trang gốc để xem đầy đủ hình và công thức.`);
   }
@@ -892,7 +955,8 @@ async function run(){
   await ensureStudyModel('text');
   if(selectedFile&&!pdfAnalysis&&selectedFile.name.toLowerCase().endsWith('.pdf'))status('Đang chờ phân tích PDF; hệ thống sẽ tự nhận dạng chữ và dịch ngay sau đó…');
   return await runStudyTranslation({selectionTask,requireKey:key,needsPreparation,hasSource:()=>Boolean($('#source').value.trim()),hasFile:()=>Boolean(selectedFile),prepare,translate});
- }finally{starting=false;runActive=false;busy(false);if(pressed&&[document.body,$('#stop'),$('#progress')].includes(document.activeElement))$('#translate').focus({preventScroll:true});}
+ // The run's own session may now be named as lacking its PDF (missingPdf), in the history and in Sách của tôi.
+ }finally{starting=false;runActive=false;busy(false);renderHistory();if(pressed&&[document.body,$('#stop'),$('#progress')].includes(document.activeElement))$('#translate').focus({preventScroll:true});}
 }
 
 function pdfTranslations(){const blocks=pdfLayoutDocument?.pages.flatMap(p=>p.blocks)||[];return blocks.map((b,i)=>({id:b.id,translation:translationParts[i]||''})).filter(b=>b.translation.trim());}
@@ -915,7 +979,8 @@ function syncLayoutParts(){const parts=pdfLayoutDocument.pages.flatMap(p=>p.bloc
 async function adoptPdfLayout(result,{glossary={},context=''}={}){
  await dualViewer.clear();pdfLayoutDocument=result.document;pdfExportUrl='';const manualGlossary=parseStudyGlossary($('#glossary').value);
  translationState={mode:$('#mode').value,domain:$('#domain').value,done:0,context,glossary:{...glossary,...manualGlossary},manualGlossary,fixedGlossary:glossary,pdfLayout:{assetId:result.assetId,ocrPending:true}};syncLayoutParts();
- translationParts=[];clearPartStream();$('#download-pdf').disabled=true;$('#warnings').textContent=(pdfLayoutDocument.warnings||[]).join('\n');syncPdfText();
+ // One note per line, the last one ended too: a note added later starts its own line, where dropBlockNotes finds it.
+ translationParts=[];clearPartStream();$('#download-pdf').disabled=true;$('#warnings').textContent=noteLines(pdfLayoutDocument.warnings);syncPdfText();
 }
 // The slim /ocr-blocks answer (backend/pdf-layout.js ocrBlockFields) carries only the blocks just read: they are applied
 // to this tab's copy of the manifest, so no batch sends the whole manifest with its page images back. A server without
@@ -955,19 +1020,30 @@ function syncPdfText(){
 // The PDF service is shared by every student: a busy service, this account's other PDF call or a service restarting is
 // waited out with a countdown (Dừng stops waiting) before the student is told. A whole-book run has its own waits
 // (whole-book.js classifyError), so there the error goes straight back to it.
-const PDF_WAITS={pdf_service_busy:[15,'Dịch vụ PDF đang bận vì nhiều người dùng cùng lúc.'],pdf_busy:[10,'Tài khoản của bạn đang có một lượt xử lý PDF khác (ở thẻ hoặc thiết bị khác).'],pdf_unavailable:[3,'Dịch vụ PDF tạm thời chưa phản hồi.']};
+const PDF_WAITS={pdf_service_busy:[15,'Dịch vụ PDF đang bận vì nhiều người dùng cùng lúc.'],pdf_busy:[10,'Tài khoản của bạn đang có một lượt xử lý PDF khác (ở tab hoặc thiết bị khác).'],pdf_unavailable:[3,'Dịch vụ PDF tạm thời chưa phản hồi.']};
 // A selection too heavy for one job of the service: fewer pages work (backend/pdf-layout.js).
 const HEAVY_PDF=new Set(['pdf_timeout','pdf_memory','pdf_too_large','pdf_crash']);
+// While every place of the service is taken (pdf_service_busy) or this account's other PDF call holds its own
+// (pdf_busy), the file is not uploaded again just to find out: after each wait GET pdf-layout/capacity (no lease, no
+// daily count) says whether a place is free, and the request goes again only then, or at the last try. A capacity call
+// that fails (an older server, a lost connection) changes nothing: the request is sent as before.
+const PLACE_WAITS=new Set(['pdf_service_busy','pdf_busy']);
+async function pdfPlace(){
+ try{const answer=await api('pdf-layout/capacity');return typeof answer?.busy==='boolean'?answer:null;}
+ catch(error){if(signedOut(error))throw error;return null;}
+}
 async function pdfService(request,operation){
- for(let attempt=0;;attempt++){
-  try{return await request();}
-  catch(error){
-   const code=error?.data?.code,[tries,message]=PDF_WAITS[code]||[0,''];
-   if(HEAVY_PDF.has(code)&&operation==='extract'&&!/ít trang hơn/u.test(error.message))error.message=`${error.message} Hãy chọn ít trang hơn cho lượt này (ví dụ 3–5 trang) rồi bấm Bắt đầu dịch.`;
-   if(bookRun||attempt>=tries||stopRequested)throw error;
-   const seconds=Math.min(120,Math.max(5,Math.round(Number(error.data?.retryAfter??error.retryAfter)||20)));
-   if(await waitSeconds(seconds,(left,first)=>status(`${message} Tự thử lại sau ${left} giây… Bấm Dừng để thôi chờ.`,'',{quiet:!first})))throw Object.assign(new Error(`${message} Đã thôi chờ; bấm Bắt đầu dịch khi muốn thử lại.`),{code:'stopped'});
-  }
+ // held: the refusal still standing while the service says it has no free place (nothing was sent for it again);
+ // after: the seconds the service asked to wait before it is asked again.
+ for(let attempt=0,held=null,after=null;;attempt++){
+  let error=held;held=null;
+  if(!error)try{return await request();}catch(caught){error=caught;}
+  const code=error?.data?.code,[tries,message]=PDF_WAITS[code]||[0,''],stopped=()=>Object.assign(new Error(`${message} Đã thôi chờ; bấm Bắt đầu dịch khi muốn thử lại.`),{code:'stopped'});
+  if(HEAVY_PDF.has(code)&&operation==='extract'&&!/ít trang hơn/u.test(error.message))error.message=`${error.message} Hãy chọn ít trang hơn cho lượt này (ví dụ 3–5 trang) rồi bấm Bắt đầu dịch.`;
+  if(bookRun||attempt>=tries||stopRequested)throw error;
+  const seconds=Math.min(120,Math.max(5,Math.round(Number(after??error.data?.retryAfter??error.retryAfter)||20)));after=null;
+  if(await waitSeconds(seconds,(left,first)=>status(`${message} Tự thử lại sau ${left} giây… Bấm Dừng để thôi chờ.`,'',{quiet:!first})))throw stopped();
+  if(PLACE_WAITS.has(code)&&attempt+1<tries){const place=await pdfPlace();if(stopRequested)throw stopped();if(place?.busy){held=error;after=Number(place.retryAfter)||null;}}
  }
 }
 // Resolves true when Dừng was pressed during the wait.
@@ -1014,6 +1090,8 @@ const STOP_STATUS={quota_minute:429,quota_day:429,quota:429,rate_limited:429,gem
 function stopError(failure){const after=Number(failure.retryAfter),retryAfter=Number.isFinite(after)&&after>0?after:null;return Object.assign(new Error(String(failure.message||'Gemini dừng giữa chừng.')),{status:STOP_STATUS[failure.code]||400,data:{code:failure.code,...(retryAfter?{retryAfter}:{})},retryAfter});}
 const keptOriginal=(block,text)=>Boolean(text?.trim())&&/\p{Script=Han}/u.test(block.source)&&text.normalize('NFC')===block.source.normalize('NFC');
 function blockLabel(block){const page=pdfLayoutDocument.pages.find(entry=>entry.blocks.includes(block));return page?`Trang ${page.number} · đoạn ${page.blocks.indexOf(block)+1}`:block.id;}
+// "Trang 1 · đoạn 3, Trang 2 · đoạn 7": at most five named, then how many more.
+function blockNames(blocks){const labels=[...new Set(blocks.map(blockLabel))];return labels.length>5?`${labels.slice(0,5).join(', ')} và ${labels.length-5} đoạn khác`:labels.join(', ');}
 // Blocks still in Chinese in a session opened again: the warnings that named them are gone, so they are named again.
 function keptBlockNotes(){const blocks=pdfLayoutDocument?.pages.flatMap(p=>p.blocks)||[];return blocks.filter((b,i)=>keptOriginal(b,translationParts[i])).map(b=>`${blockLabel(b)}: vẫn là chữ gốc vì Gemini chưa dịch được đoạn này. Bấm Bắt đầu dịch để thử dịch lại, hoặc dịch tay trong “Chỉnh bản dịch từng đoạn”.`);}
 // The OCR notes the manifest keeps (blocks kept with their machine OCR text, Gemini's remarks on the scans), shown again
@@ -1041,7 +1119,10 @@ async function translateLayoutSession(model,{pageStop=false,retryKept=false,shou
  for(;next.length;next=pending()){
   let [batch]=blockBatches(next);
   if(shouldStop()){if(!pageStop||!page||pageOf.get(batch[0].id)!==page)break;batch=batch.filter(b=>pageOf.get(b.id)===page);}
-  const from=indexOf.get(batch[0].id)+1,to=indexOf.get(batch.at(-1).id)+1;status(from===to?`Đang dịch đoạn ${from}/${blocks.length}…`:`Đang dịch đoạn ${from}–${to}/${blocks.length}…`);
+  // Blocks one after another are a range of the session; blocks asked for again after a refusal can lie anywhere, so
+  // they are named: a range over them would count blocks that are not sent.
+  const from=indexOf.get(batch[0].id)+1,to=indexOf.get(batch.at(-1).id)+1,again=batch.every(b=>keptOriginal(b,translationParts[indexOf.get(b.id)]));
+  status(to-from+1!==batch.length?`Đang dịch ${again?`lại ${batch.length} đoạn còn chữ gốc`:`${batch.length} đoạn`} (${blockNames(batch)})…`:from===to?`Đang dịch đoạn ${from}/${blocks.length}…`:`Đang dịch đoạn ${from}–${to}/${blocks.length}…`);
   const result=await api('translate-blocks',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({apiKey:key(),model,blocks:batch.map(({id,source})=>({id,source})),domain:translationState.domain,mode:translationState.mode,context:translationState.context,glossary:translationState.glossary,partial:true})});
   // Counted before anything else: tokens are spent even on the blocks Gemini would not translate.
   addUsage(result.usage);
@@ -1073,10 +1154,17 @@ async function translateLayoutSession(model,{pageStop=false,retryKept=false,shou
 async function exportLayoutPdf(download=true,{show=true}={}){
  if(!translationState?.pdfLayout||!activeHistoryId)throw new Error('Hãy dịch và lưu đủ các đoạn trước khi xuất PDF.');
  if(!pdfExportUrl){
-  status('Đang đo chữ, điều chỉnh cỡ font và xuất PDF tiếng Việt…');let result;
+  status('Đang đo chữ, điều chỉnh cỡ font và xuất PDF tiếng Việt…');let result;const exported=activeHistoryId;
   try{result=await pdfService(()=>api('pdf-layout/render',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({assetId:translationState.pdfLayout.assetId,historyId:activeHistoryId})}),'render');}
-  catch(error){if(show&&error?.data?.code==='pdf_overflow')await showOverflow(error).catch(()=>{});throw error;}
-  pdfExportUrl=result.url;translationState.pdfLayout.exported=true;translationState.pdfLayout.renderVersion=result.renderVersion||2;if(show)await dualViewer.setExportedPdf(result.url);
+  catch(error){
+   // A refusal (not a wait, a stop or an expired session) is kept for this part: opened again here, it marks the blocks.
+   if(error?.code!=='stopped'&&!signedOut(error)&&!transient(error)){const blocks=overflowBlocks(error).map(b=>b.id);exportProblems.set(exported,{blocks,message:blocks.length?'':String(error?.message||'')});}
+   if(show&&error?.data?.code==='pdf_overflow')await showOverflow(error).catch(()=>{});throw error;
+  }
+  pdfExportUrl=result.url;translationState.pdfLayout.exported=true;translationState.pdfLayout.renderVersion=result.renderVersion||2;exportProblems.delete(exported);
+  // The part's chapter is a PDF now: Sách của tôi and the history stop saying it lacks one.
+  partHasPdf(exported,true);
+  if(show)await dualViewer.setExportedPdf(result.url);
  }
  status(show?'PDF tiếng Việt đã được lưu vào Thư viện riêng. Hai bản đang hiển thị song song.':'PDF tiếng Việt của phần này đã được lưu vào Thư viện riêng.');
  if(download){const url=pdfExportUrl,filename=downloadFilename('pdf');await offerDownload(async()=>{const response=await fetch(url,{credentials:'same-origin'});if(!response.ok)throw new Error('Không tải được PDF.');saveFile(await response.blob(),filename);});}
@@ -1085,15 +1173,29 @@ async function exportLayoutPdf(download=true,{show=true}={}){
 // the blocks; the message names them by page and "Đoạn k"): the viewer outlines every one of them and opens the editor
 // on the first, on its page, so the student shortens it, saves it and exports again.
 async function showOverflow(error){
- const known=new Set(pdfLayoutDocument?.pages.flatMap(page=>page.blocks.map(b=>b.id))||[]),ids=(Array.isArray(error?.data?.blocks)?error.data.blocks:[]).map(entry=>entry?.id).filter(id=>known.has(id));
- if(ids.length)await (await loadViewer()).flagBlocks([...new Set(ids)]);
+ const ids=overflowBlocks(error).map(b=>b.id);
+ if(ids.length)await (await loadViewer()).flagBlocks(ids);
+}
+// A finished part opened without its Vietnamese PDF (its export was refused, or never ran) says so and, as a refused
+// export does, opens the editor on each block longer than its box: the blocks the service named in this tab, otherwise
+// those the preview finds measuring every page as the exporter does (no PDF service, no token).
+async function showMissingPdf(id,version){
+ const known=exportProblems.get(id),viewer=await loadViewer();let ids=known?.blocks||[];
+ if(!known){status('Phần này đã dịch xong nhưng chưa có PDF tiếng Việt. Đang tìm đoạn dài hơn khung chữ…');ids=await viewer.overflowBlocks().catch(()=>[]);if(version!==selectionVersion)return;}
+ const blocks=pdfLayoutDocument.pages.flatMap(page=>page.blocks).filter(b=>ids.includes(b.id));
+ if(blocks.length){await viewer.flagBlocks(blocks.map(b=>b.id));status(`Phần này chưa có PDF tiếng Việt vì bản dịch của ${blockNames(blocks)} dài hơn khung chữ, kể cả khi đã thu nhỏ chữ hết mức. Viết ngắn lại ${blocks.length===1?'đoạn đó':'các đoạn đó'} trong “Chỉnh bản dịch từng đoạn” (đã mở sẵn), bấm “Lưu đoạn đã sửa” rồi bấm Xuất PDF tiếng Việt; không tốn token.`);return;}
+ status(known?.message?`Phần này chưa có PDF tiếng Việt: ${known.message} Bấm Xuất PDF tiếng Việt để thử lại; không tốn token.`:'Phần này đã dịch xong nhưng chưa có PDF tiếng Việt. Bấm Xuất PDF tiếng Việt để xuất; không tốn token.');
 }
 // The same refusal in a whole-book run, which goes on with the next chunk: a short note naming the blocks to shorten
 // ("Trang 5 · đoạn 2"), at most five of them, kept with the book's other notes.
 function overflowNote(range,error){
- const byId=new Map(pdfLayoutDocument.pages.flatMap(page=>page.blocks.map(b=>[b.id,b]))),labels=[...new Set((Array.isArray(error?.data?.blocks)?error.data.blocks:[]).map(entry=>byId.get(entry?.id)).filter(Boolean).map(blockLabel))];
- const named=labels.length>5?`${labels.slice(0,5).join(', ')} và ${labels.length-5} đoạn khác`:labels.join(', ');
- return `${range}: chưa xuất được PDF tiếng Việt vì bản dịch của ${named||'một số đoạn'} dài hơn khung chữ, kể cả khi đã thu nhỏ chữ hết mức. Mở phần này trong Lịch sử dịch, viết ngắn lại ${labels.length===1?'đoạn đó':'các đoạn đó'} trong “Chỉnh bản dịch từng đoạn”, bấm “Lưu đoạn đã sửa” rồi bấm Xuất PDF tiếng Việt; không tốn token.`;
+ const found=overflowBlocks(error);
+ return `${range}: chưa xuất được PDF tiếng Việt vì bản dịch của ${blockNames(found)||'một số đoạn'} dài hơn khung chữ, kể cả khi đã thu nhỏ chữ hết mức. Mở phần này trong Lịch sử dịch, viết ngắn lại ${found.length===1?'đoạn đó':'các đoạn đó'} trong “Chỉnh bản dịch từng đoạn”, bấm “Lưu đoạn đã sửa” rồi bấm Xuất PDF tiếng Việt; không tốn token.`;
+}
+// The blocks of the open session a 422 pdf_overflow names, each once.
+function overflowBlocks(error){
+ const byId=new Map(pdfLayoutDocument?.pages.flatMap(page=>page.blocks.map(b=>[b.id,b]))||[]);
+ return [...new Set((Array.isArray(error?.data?.blocks)?error.data.blocks:[]).map(entry=>byId.get(entry?.id)).filter(Boolean))];
 }
 
 // The terms in the field apply from the next part on; a term the student removed there leaves the session's terms too.
@@ -1181,7 +1283,7 @@ function bindBookJob(job){
  $('#content-title-hint').textContent='Tên sách của lượt dịch cả quyển; đổi tên sách trong Lịch sử dịch (Sắp xếp phần).';
  for(const [select,value] of [[$('#domain'),job.domain],[$('#mode'),job.mode]])if([...select.options].some(option=>option.value===value))select.value=value;
  const count=wholeBook.countStates(job.pageStates);
- bookStatus(count.pending||count.failed?`Quyển này đã có tiến độ: ${wholeBook.progressText(job.pageStates)}. Bấm ${count.pending?'Tiếp tục dịch cả quyển':'Thử lại các trang lỗi'}; trang đã dịch không tốn token lại.`:'Quyển này đã dịch xong. Mở Thư viện riêng để đọc hoặc tải cả quyển.');
+ bookStatus(count.pending||count.failed?`Quyển này đã có tiến độ: ${wholeBook.progressText(job.pageStates)}. Bấm ${count.pending?'Tiếp tục dịch cả quyển':'Thử lại các trang lỗi'}; trang đã dịch không tốn token lại.`:`Quyển này đã dịch xong. ${missingPdfNote(job)||'Mở Thư viện riêng để đọc hoặc tải cả quyển.'}`);
  setBookMode(true);bookFileStatus();
 }
 function bookChosenPages(total){const value=$('#book-pages').value.trim();return value?parseStudyPageRange(value,total,Infinity):null;}
@@ -1207,7 +1309,9 @@ function renderBookPanel(){
  $('#whole-book-summary').textContent=total?facts.join(' · '):'Đang đọc số trang…';
  $('#whole-book-count').textContent=states?wholeBook.progressText(states):'';$('#whole-book-note').textContent=states?wholeBook.progressNote(states):'';
  $('#whole-book-tokens').textContent=bookJob?`Quyển này đã dùng ${wholeBook.formatTokens((Number(bookJob.usage?.total)||0)+(bookRun?.usage.total||0))} token Gemini`:'';
- wholeBook.renderPageGrid($('#page-grid'),states,bookWorking);renderBookEstimate(states);
+ // Pages of a part without its Vietnamese PDF are drawn apart from the translated ones (and named in the legend).
+ const noPdf=bookJob&&!running?missingPdfPages(bookJob):new Set(),legend=$('.page-legend [data-state="nopdf"]');if(legend)legend.hidden=!noPdf.size;
+ wholeBook.renderPageGrid($('#page-grid'),states,bookWorking,noPdf);renderBookEstimate(states);
  const read=$('#book-read');read.hidden=!bookJob?.storyId;if(bookJob?.storyId)read.href=`/?read=${encodeURIComponent(bookJob.storyId)}`;
  $('#whole-book-status').textContent=bookStatusText;
 }
@@ -1368,9 +1472,11 @@ const bookSteps={
   return {storyId:lastSavedHistory?.libraryStoryId||null,glossary:{...translationState.glossary},warning};
  }
 };
+// Read with the books as the server has them now: a part whose export was refused is named, and the book is not said to
+// be ready to download until it has its PDF.
 function bookFinishedMessage(job){
  const failed=[...job.pageStates].flatMap((char,index)=>char==='f'?[index+1]:[]);
- return `Đã dịch xong cả quyển: ${wholeBook.progressText(job.pageStates).replace(/^Đã dịch /u,'')}${failed.length?`; trang ${wholeBook.pageList(failed)} chưa xử lý được nên giữ nguyên bản gốc`:''}. Mở Thư viện riêng để đọc hoặc tải cả quyển.`;
+ return `Đã dịch xong cả quyển: ${wholeBook.progressText(job.pageStates).replace(/^Đã dịch /u,'')}${failed.length?`; trang ${wholeBook.pageList(failed)} chưa xử lý được nên giữ nguyên bản gốc`:''}. ${missingPdfNote(job)||'Mở Thư viện riêng để đọc hoặc tải cả quyển.'}`;
 }
 // Whether this device may run the bound job now. Another device's run holds it while it keeps reporting: the student is
 // told so, or, having chosen to wait ("Chờ rồi dịch tiếp"), the job is watched (its progress shows here) until that run
@@ -1395,7 +1501,7 @@ async function runWholeBook(){
   if(bookJob&&!await bookRunnerFree(waiting))return;
   if(bookJob&&await wholeBook.jobLockHeld(bookJob.id))throw new Error('Quyển này đang được dịch ở một tab khác của trình duyệt. Hãy dùng tab đó, hoặc đóng nó rồi thử lại.');
   // Waited for another device that has finished the book meanwhile: nothing is left to download or translate here.
-  if(waiting&&bookJob&&!/[.f]/u.test(bookJob.pageStates)){const message=bookFinishedMessage(bookJob);bookStatus(message);status(message);return;}
+  if(waiting&&bookJob&&!/[.f]/u.test(bookJob.pageStates)){await Promise.all([refreshHistoryList(),loadBooks().catch(()=>{})]);const message=bookFinishedMessage(bookJob);bookStatus(message);status(message);return;}
   // A tab opened long ago knows only its own saves since: the run starts from the history as the server has it now.
   if(bookJob)await refreshHistoryList();
   const source=await prepareBookSource();
@@ -1417,7 +1523,7 @@ async function runWholeBook(){
   let outcome=null;
   await wholeBook.withJobLock(bookJob.id,async()=>{await wake.on();try{outcome=await run.run(bookJob,{pages:updates});}finally{await wake.off();}});
   bookJob=upsertJob(outcome.job||bookJob);
-  if(outcome.status==='done'){const message=bookFinishedMessage(bookJob);bookStatus(message);status(message);}
+  if(outcome.status==='done'){await loadBooks().catch(()=>{});const message=bookFinishedMessage(bookJob);bookStatus(message);status(message);}
   else{
    if(outcome.reason==='gemini_key'){sessionKey='';const input=$('#api-key');input.setAttribute('aria-invalid','true');input.focus();$('#key-status').textContent='Khóa vừa nhập chưa được Gemini chấp nhận.';}
    if(outcome.reason==='busy')bookBusy=true;
@@ -1504,7 +1610,7 @@ $('#clear-key').addEventListener('click',()=>{sessionKey='';$('#api-key').value=
 $('#download').addEventListener('click',()=>{const text=$('#translation').value,filename=downloadFilename('txt');offerDownload(()=>saveFile(new Blob(['\uFEFF'+text],{type:'text/plain;charset=utf-8'}),filename)).catch(fail);});
 $('#download-rich').addEventListener('click',()=>offerDownload(downloadRichHtml).catch(fail));
 // While the export waits for a busy PDF service, Dừng shows and stops the wait.
-$('#download-pdf').addEventListener('click',()=>{if(running)return;runActive=true;stopRequested=false;busy(true);exportLayoutPdf().catch(error=>error?.code==='stopped'?status(error.message):fail(error)).finally(()=>{runActive=false;stopRequested=false;busy(false);});});
+$('#download-pdf').addEventListener('click',()=>{if(running)return;runActive=true;stopRequested=false;busy(true);exportLayoutPdf().catch(error=>error?.code==='stopped'?status(error.message):fail(error)).finally(()=>{runActive=false;stopRequested=false;busy(false);renderHistory();});});
 $('#evaluate').addEventListener('click',()=>{
  const candidate=$('#translation').value.trim(),reference=$('#reference').value.trim();if(!candidate||!reference){fail(new Error('Cần có cả bản dịch của AI và bản dịch mẫu để so sánh.'));return;}
  const result=evaluateStudyTranslation(candidate,reference),number=new Intl.NumberFormat('vi-VN'),line=(tag,text)=>{const node=document.createElement(tag);node.textContent=text;return node;};
@@ -1523,7 +1629,7 @@ $('#ocr-download-no').addEventListener('click',()=>ocrChoice?.(false));
 // The history explains its own loading failure in place, with Thử lại (contract 8).
 function loadHistoryView(){
  historyError=null;$('#study-history-count').textContent='· đang tải…';$('#study-history-list').replaceChildren();
- return loadHistory().then(()=>{if(bookJobs.some(job=>job.status!=='done'&&/[.f]/u.test(job.pageStates)))$('#study-history').open=true;}).catch(error=>{historyError=error;renderHistory();$('#study-history').open=true;});
+ return loadHistory().then(()=>{if(bookJobs.some(job=>job.status!=='done'&&/[.f]/u.test(job.pageStates)||missingPdfParts(job).length))$('#study-history').open=true;}).catch(error=>{historyError=error;renderHistory();$('#study-history').open=true;});
 }
 // Signed out, the form could not be used: a card says why and links to sign in. A failed check offers Thử lại.
 function sessionCard(kind){

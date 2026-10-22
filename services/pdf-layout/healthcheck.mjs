@@ -4,9 +4,9 @@
 // PDF_HEALTH_RESTART_AFTER failed checks in a row (default 4: about a minute at the 15 s interval; 0 turns it off) the
 // check stops the service, and the restart policy (unless-stopped) starts the container again. This needs an init
 // process as PID 1 (compose init: true, docker run --init), which passes the signal on to the service.
-import {readFileSync,writeFileSync,rmSync} from 'node:fs';
+import {readFileSync,writeFileSync,rmSync,realpathSync} from 'node:fs';
 import {tmpdir} from 'node:os';
-import {join,resolve} from 'node:path';
+import {join} from 'node:path';
 import {fileURLToPath} from 'node:url';
 
 export const FAILURES_FILE=join(tmpdir(),'hoa-tri-pdf-health-failures');
@@ -23,8 +23,10 @@ export async function healthCheck({url,token,limit=restartAfter(process.env.PDF_
  return 1;
 }
 
-const samePath=(a,b)=>process.platform==='win32'?a.toLowerCase()===b.toLowerCase():a===b;
-if(process.argv[1]&&samePath(fileURLToPath(import.meta.url),resolve(process.argv[1]))){
+// Started as a program, also through a symlinked or junction folder: compared as real paths (see server.mjs).
+const realPath=path=>{const real=realpathSync(path);return process.platform==='win32'?real.toLowerCase():real;};
+const started=()=>{try{return Boolean(process.argv[1])&&realPath(process.argv[1])===realPath(fileURLToPath(import.meta.url));}catch{return false;}};
+if(started()){
  const [path='/health',tokenName='PDF_LAYOUT_SERVICE_TOKEN']=process.argv.slice(2);
  process.exitCode=await healthCheck({url:`http://127.0.0.1:${Number(process.env.PORT)||8091}${path}`,token:process.env[tokenName]||''});
 }

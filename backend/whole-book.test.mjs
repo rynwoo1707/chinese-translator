@@ -122,8 +122,9 @@ test('chunks are cut with pdf-lib from the original, page for page, and sent wit
 // one runner holds the job while it reports), an extractor that numbers pages from the chunk's offset, and the four
 // chunk steps of study.js reduced to their effect on the job. lose(body): the PATCH is applied but its answer is lost.
 const offline=()=>Object.assign(new Error('Không kết nối được máy chủ. Hãy kiểm tra mạng rồi thử lại sau vài giây.'),{status:0});
-// refuse({offset,count}): an error the PDF service answers instead of extracting that chunk, or nothing.
-function fakeAccount({total=45,cover=1,blank=[],processedLimit=Infinity,badPages=[],translateErrors=[],pageBytes=1000,lose=()=>false,down=()=>false,refuse=()=>null}={}){
+// refuse({offset,count}): an error the PDF service answers instead of extracting that chunk, or nothing. capacity(): the
+// answer of GET pdf-layout/capacity (or it throws); without it the route is unknown, as on a server older than it.
+function fakeAccount({total=45,cover=1,blank=[],processedLimit=Infinity,badPages=[],translateErrors=[],pageBytes=1000,lose=()=>false,down=()=>false,refuse=()=>null,capacity=null}={}){
  const job={id:'0b7e2a43-0000-4000-8000-000000000001',sourceSha256:'d'.repeat(64),filename:'sach.pdf',title:'Sách thử',storyId:null,totalPages:total,pageStates:book.initialPageStates(total,{cover}),chunkSize:20,status:'ready',pauseReason:null,usage:{prompt:0,output:0,thinking:0,total:0,requests:0},glossary:{史料:'sử liệu'},createdAt:'2026-10-18T10:00:00.000Z',runner:null,leaseSeconds:0};
  const calls=[],patches=[],extracts=[],state={job,translateErrors:[...translateErrors],counted:new Set(),lease:{runner:null,until:0}};
  const view=()=>{const held=state.lease.runner&&state.lease.until>Date.now();return {...state.job,runner:held?state.lease.runner:null,leaseSeconds:held?Math.ceil((state.lease.until-Date.now())/1000):0};};
@@ -149,6 +150,7 @@ function fakeAccount({total=45,cover=1,blank=[],processedLimit=Infinity,badPages
    if(!pages.some(page=>page.blocks.length))throw Object.assign(new Error('Không tìm thấy block tiếng Trung cần dịch trong các trang đã chọn.'),{status:422,data:{code:'no_text',pages:pages.map(page=>page.number)}});
    return {assetId:`asset-${first}`,document:{pages}};
   }
+  if(path==='pdf-layout/capacity'&&capacity)return capacity();
   throw new Error(`unexpected ${path}`);
  };
  let run=null;const sessions=[];
@@ -377,15 +379,17 @@ const pdfError=(status,code,message,retryAfter)=>Object.assign(new Error(message
 const serviceBusy=()=>pdfError(503,'pdf_service_busy','Dịch vụ PDF đang bận vì nhiều người dùng cùng lúc. Hãy thử lại sau khoảng 20 giây.',20);
 
 test('PDF service answers map to waiting, halving or a pause: busy is waited out long, too heavy halves the chunk',()=>{
- assert.deepEqual(book.classifyError(serviceBusy(),'extract'),{reason:'pdf_busy',backoff:true,retries:book.SERVICE_BUSY_RETRIES,wait:20,early:false,jitter:true});
+ assert.deepEqual(book.classifyError(serviceBusy(),'extract'),{reason:'pdf_busy',backoff:true,retries:book.SERVICE_BUSY_RETRIES,wait:20,early:false,jitter:true,capacity:true});
  assert.equal(book.classifyError(serviceBusy(),'export').reason,'pdf_busy');assert.equal(book.SERVICE_BUSY_RETRIES,30);
  for(const code of ['pdf_timeout','pdf_memory','pdf_too_large'])assert.deepEqual(book.classifyError(pdfError(413,code,'Tách PDF vượt thời gian cho phép. Hãy chọn ít trang hơn cho mỗi lượt.'),'extract'),{reason:'too_large',heavy:true},code);
  assert.deepEqual(book.classifyError(pdfError(413,'pdf_crash','Dịch vụ PDF dừng đột ngột…'),'extract'),{reason:'too_large'});
  assert.deepEqual(book.classifyError(pdfError(503,'pdf_unavailable','Dịch vụ PDF đang tạm ngừng.',30),'extract'),{reason:'network',backoff:true,retries:6,wait:30});
- // This account's own other PDF call (another tab) is still the short wait of a limit.
- assert.deepEqual(book.classifyError(pdfError(429,'pdf_busy','Tài khoản của bạn đang có một lượt xử lý PDF khác…',30),'extract'),{reason:'rate_limited',wait:30,retries:20});
+ // This account's own other PDF call (another tab) is the short wait of a limit, said in its own words.
+ assert.deepEqual(book.classifyError(pdfError(429,'pdf_busy','Tài khoản của bạn đang có một lượt xử lý PDF khác…',30),'extract'),{reason:'pdf_account',wait:30,retries:20,capacity:true});
  assert.match(book.waitMessage('pdf_busy',20),/Dịch vụ PDF đang bận vì nhiều người dùng cùng lúc\. Tự thử lại sau 20 giây/u);
  assert.match(book.pauseMessage('pdf_busy'),/Dịch vụ PDF vẫn bận.*Tiến độ đã lưu/u);
+ assert.equal(book.waitMessage('pdf_account',30),'Tài khoản của bạn đang có một lượt xử lý PDF khác (ở tab hoặc thiết bị khác). Tự thử lại sau 30 giây…');
+ assert.match(book.pauseMessage('pdf_account'),/^Tài khoản của bạn vẫn đang có một lượt xử lý PDF khác \(ở tab hoặc thiết bị khác\).*Tiến độ đã lưu/u);
 });
 
 test('a run waits while the PDF service is busy, in a hidden tab too, and pauses only after about half an hour',async()=>{
@@ -401,6 +405,29 @@ test('a run waits while the PDF service is busy, in a hidden tab too, and pauses
  // An export refused as busy is tried again too, instead of being skipped.
  let exportRefusals=1;const exporting=fakeAccount({total:5,cover:0});const finish=exporting.steps.finish;exporting.steps.finish=async job=>{if(exportRefusals-->0)throw serviceBusy();return finish(job);};
  assert.equal((await exporting.create({random:()=>0}).run(exporting.state.job)).status,'done');assert.deepEqual(exporting.sleeps,[20]);
+});
+
+test('while the PDF service is busy a chunk is not uploaded again to find out: the run asks GET pdf-layout/capacity and sends it once a place is free, or at the last try',async()=>{
+ const full={busy:true,free:0,slots:2,retryAfter:20},open={busy:false,free:1,slots:2,retryAfter:null};
+ // Refused once; the service then says twice that every place is taken, then that one is free: one upload more, not three.
+ let refusals=1,asked=0;const account=fakeAccount({total:5,cover:0,refuse:()=>refusals-->0?serviceBusy():null,capacity:()=>++asked<=2?full:open});
+ assert.equal((await account.create({random:()=>0}).run(account.state.job)).status,'done');
+ assert.equal(account.extracts.length,2,'the refused upload and the one sent once a place was free');assert.equal(asked,3);assert.deepEqual(account.sleeps,[20,20,20]);
+ // Always full: the chunk goes up twice in the whole wait (first and last try), never 31 times, then the run pauses.
+ const always=fakeAccount({total:5,cover:0,refuse:()=>serviceBusy(),capacity:()=>full}),paused=await always.create({random:()=>0}).run(always.state.job);
+ assert.deepEqual([paused.status,paused.reason],['paused','pdf_busy']);assert.equal(always.extracts.length,2);assert.equal(always.sleeps.length,book.SERVICE_BUSY_RETRIES);
+ // This account's other PDF call (429 pdf_busy) is waited out the same way, said in its own words.
+ let own=1;const waited=[],tab=fakeAccount({total:5,cover:0,refuse:()=>own-->0?pdfError(429,'pdf_busy','Tài khoản của bạn đang có một lượt xử lý PDF khác (ở tab hoặc thiết bị khác).',30):null,capacity:()=>open});
+ const ticking=async(seconds,{onTick,stopped})=>{onTick(seconds);tab.sleeps.push(seconds);return stopped();};
+ assert.equal((await tab.create({sleep:ticking,ui:{waiting:(reason,left)=>{if(reason)waited.push(book.waitMessage(reason,left));}}}).run(tab.state.job)).status,'done');
+ assert.deepEqual(tab.sleeps,[30]);assert.equal(tab.extracts.length,2);assert.match(waited[0]||'',/^Tài khoản của bạn đang có một lượt xử lý PDF khác \(ở tab hoặc thiết bị khác\)\. Tự thử lại sau/u);
+ // A capacity call that fails (an older server, a lost connection) sends the chunk as before.
+ let twice=2;const older=fakeAccount({total:5,cover:0,refuse:()=>twice-->0?serviceBusy():null,capacity:()=>{throw Object.assign(new Error('fake: GET pdf-layout/capacity'),{status:404});}});
+ assert.equal((await older.create({random:()=>0}).run(older.state.job)).status,'done');assert.equal(older.extracts.length,3);
+ // Dừng while the service is asked ends the wait without sending anything more.
+ let stop=false;const stopping=fakeAccount({total:5,cover:0,refuse:()=>serviceBusy(),capacity:()=>{stop=true;return full;}});
+ const stopped=await stopping.create({random:()=>0,shouldStop:()=>stop}).run(stopping.state.job);
+ assert.deepEqual([stopped.status,stopped.reason],['paused','stopped']);assert.equal(stopping.extracts.length,1);
 });
 
 test('a chunk that runs out of time or memory in the service is retried with half the pages, and later chunks keep that size',async()=>{

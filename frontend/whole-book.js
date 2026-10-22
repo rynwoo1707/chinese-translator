@@ -11,7 +11,8 @@ const NAMES=Object.fromEntries(Object.entries(PAGE_STATES).map(([name,char])=>[c
 // 20 pages is the PDF service's limit per extraction. A chunk over 16 MB would not fit the service's 32 MB budget once it
 // is base64-encoded next to its page images, so it is cut smaller before it is sent.
 export const CHUNK_PAGES=20,SOURCE_MAX_BYTES=100*1024*1024,CHUNK_MAX_BYTES=16*1024*1024;
-export const PAGE_LABELS=Object.freeze({pending:'Chưa dịch',working:'Đang dịch',done:'Đã dịch',blank:'Trang trống',cover:'Bìa',skipped:'Bỏ qua',failed:'Lỗi'});
+// nopdf: a translated page of a part whose Vietnamese PDF is missing (study.js missingPdf), drawn apart in the grid.
+export const PAGE_LABELS=Object.freeze({pending:'Chưa dịch',working:'Đang dịch',done:'Đã dịch',nopdf:'Đã dịch, chưa có PDF',blank:'Trang trống',cover:'Bìa',skipped:'Bỏ qua',failed:'Lỗi'});
 
 // ---- Page states (one character per page, as the server stores them) ----
 export function initialPageStates(total,{cover=0,pages=null}={}){
@@ -115,7 +116,8 @@ export function formatTokens(value){
 // service's (backend/pdf-layout.js): 503 pdf_service_busy with retryAfter (every place of the service is taken), 503
 // pdf_unavailable (out of reach), 413 pdf_timeout, pdf_memory, pdf_too_large or pdf_crash (this chunk is too heavy for
 // one job), 429 pdf_busy (this account's other PDF call). Saving a part (backend/study-history.js): 413 history_full or
-// too_many_parts, 409 history_conflict (another tab or device saved that part since).
+// too_many_parts, 409 history_conflict (another tab or device saved that part since). capacity: while the wait lasts,
+// GET pdf-layout/capacity is asked before the request goes again (createBookRun).
 const BACKOFF=[5,10,20,40,60,60];
 // A busy PDF service is shared by the whole site: a class running books at once can keep it full for a while, so a run
 // waits about half an hour (30 tries, at most a minute apart) before it pauses.
@@ -139,7 +141,9 @@ export function classifyError(error,step=''){
  if(code==='job_busy')return {reason:'busy'};
  // Waited out like a lost connection, never shorter than the server asks, a little spread so that the students it
  // turned away do not all come back at once; a hidden tab keeps counting down (a book runs in the background).
- if(code==='pdf_service_busy')return {reason:'pdf_busy',backoff:true,retries:SERVICE_BUSY_RETRIES,wait:Math.min(300,Math.max(5,retryAfter??20)),early:false,jitter:true};
+ if(code==='pdf_service_busy')return {reason:'pdf_busy',backoff:true,retries:SERVICE_BUSY_RETRIES,wait:Math.min(300,Math.max(5,retryAfter??20)),early:false,jitter:true,capacity:true};
+ // This account's own other PDF call (another tab or device) holds its place: waited out like a limit, asking too.
+ if(code==='pdf_busy')return {reason:'pdf_account',wait:Math.min(300,Math.max(5,retryAfter??30)),retries:20,capacity:true};
  if(code==='pdf_unavailable')return {reason:'network',backoff:true,retries:BACKOFF.length,...(retryAfter!==null?{wait:Math.min(300,retryAfter)}:{})};
  // Out of time, memory or room in one job: the chunk is tried again with half the pages, and later chunks keep the size
  // that worked (heavy). A crash is handled like a page the service refuses: halving finds that page.
@@ -193,9 +197,10 @@ export function pauseMessage(reason,error,now=Date.now()){
   case 'gemini_key':return 'Gemini không chấp nhận khóa này. Hãy dán một khóa Gemini hợp lệ rồi bấm Tiếp tục dịch cả quyển.';
   case 'rate_limited':return 'Hoa Trí đang giới hạn tốc độ. Tiến độ đã lưu; bấm Tiếp tục dịch cả quyển sau ít phút.';
   case 'pdf_busy':return 'Dịch vụ PDF vẫn bận vì nhiều người dùng cùng lúc sau nhiều lần chờ. Tiến độ đã lưu; bấm Tiếp tục dịch cả quyển sau ít phút.';
+  case 'pdf_account':return 'Tài khoản của bạn vẫn đang có một lượt xử lý PDF khác (ở tab hoặc thiết bị khác) sau nhiều lần chờ. Tiến độ đã lưu; bấm Tiếp tục dịch cả quyển khi lượt đó xong.';
   case 'gemini_location':return 'Gemini vẫn chưa phục vụ khu vực của máy chủ Hoa Trí sau nhiều lần thử. Khóa của bạn vẫn dùng được và các lần thử này không tốn token. Tiến độ đã lưu; bấm Tiếp tục dịch cả quyển sau ít phút. Nếu lỗi lặp lại, hãy báo quản trị viên.';
   case 'history_full':return `${detail||'Lịch sử dịch của tài khoản đã đầy.'} Tiến độ của quyển đã lưu; dọn bớt xong, bấm Tiếp tục dịch cả quyển.`;
-  case 'conflict':return 'Phần đang dịch vừa được lưu từ một thẻ hoặc thiết bị khác, nên thẻ này dừng để không ghi đè phần đó. Tiến độ của quyển đã lưu; bấm Tiếp tục dịch cả quyển để mở bản mới nhất và dịch tiếp.';
+  case 'conflict':return 'Phần đang dịch vừa được lưu từ một tab hoặc thiết bị khác, nên tab này dừng để không ghi đè phần đó. Tiến độ của quyển đã lưu; bấm Tiếp tục dịch cả quyển để mở bản mới nhất và dịch tiếp.';
   case 'network':return 'Mất kết nối tới máy chủ. Tiến độ đã lưu; khi mạng ổn định, bấm Tiếp tục dịch cả quyển.';
   case 'limit':return `${detail||'Đã hết lượt dùng trong ngày.'} Tiến độ đã lưu.`;
   default:return `${detail||'Có lỗi khi dịch.'} Tiến độ đã lưu; bấm Tiếp tục dịch cả quyển để thử lại.`;
@@ -207,6 +212,7 @@ export function waitMessage(reason,seconds){
   case 'quota_minute':return `Gemini đang giới hạn số yêu cầu mỗi phút của khóa này. Tự tiếp tục sau ${left}…`;
   case 'rate_limited':return `Hoa Trí đang giới hạn tốc độ để bảo vệ máy chủ. Tự tiếp tục sau ${left}…`;
   case 'pdf_busy':return `Dịch vụ PDF đang bận vì nhiều người dùng cùng lúc. Tự thử lại sau ${left}…`;
+  case 'pdf_account':return `Tài khoản của bạn đang có một lượt xử lý PDF khác (ở tab hoặc thiết bị khác). Tự thử lại sau ${left}…`;
   case 'gemini_location':return `Gemini chưa phục vụ khu vực của máy chủ vừa gửi yêu cầu; khóa của bạn vẫn dùng được. Tự thử lại sau ${left}…`;
   case 'network':return `Mất kết nối. Tự thử lại sau ${left}; nếu bạn chuyển sang ứng dụng khác, việc dịch chờ đến khi bạn quay lại tab này.`;
   case 'server':return `Máy chủ gặp lỗi tạm thời. Tự thử lại sau ${left}…`;
@@ -421,19 +427,27 @@ export function createBookRun({api,steps,source,ui={},sleep=countdown,shouldStop
  let job=null,usage=emptyUsage(),fit=maxPages,probe=maxPages,claimed=false,renewed=0;
  const notify=()=>ui.job?.(job,usage);
  const owes=()=>USAGE_KEYS.some(key=>usage[key])||reports.load(job?.id).length>0;
+ // Whether the PDF service has a free place for this account, asked while a busy service is waited out (classifyError's
+ // capacity): GET pdf-layout/capacity takes no place and counts toward no daily cap. null when it cannot say (an older
+ // server, a lost connection): the request is then sent as before. An expired session stops the run.
+ async function place(){
+  try{const answer=await api('pdf-layout/capacity');return typeof answer?.busy==='boolean'?answer:null;}
+  catch(error){if(error?.status===401)throw error;return null;}
+ }
+ // held: a refusal still standing because the service said it had no free place, so nothing was sent for it again (a
+ // chunk can be 16 MB); after: the seconds the service asked to wait before it is asked again. The last try is sent.
  async function retrying(step,task){
-  for(let failure=0;;failure++){
-   try{return await task();}
-   catch(error){
-    if(error instanceof BookPause)throw error;
-    const kind=classifyError(error,step),base=kind.backoff?Math.max(BACKOFF[Math.min(failure,BACKOFF.length-1)],kind.wait||0):kind.wait;
-    const wait=base&&kind.jitter?Math.round(base*(1+random()/4)):base;
-    if(!wait||failure>=(kind.retries||0)||shouldStop())throw error;
-    // A long wait (a quota, a lost connection) keeps the job held.
-    if(step!=='save')await renew();
-    const stopped=await sleep(wait,{onTick:left=>ui.waiting?.(kind.reason,left),stopped:shouldStop,early:kind.early??Boolean(kind.backoff)});
-    ui.waiting?.(null,0);if(stopped)throw new BookPause('stopped');
-   }
+  for(let failure=0,held=null,after=0;;failure++){
+   let error=held;held=null;
+   if(!error)try{return await task();}catch(caught){if(caught instanceof BookPause)throw caught;error=caught;}
+   const kind=classifyError(error,step),base=kind.backoff?Math.max(BACKOFF[Math.min(failure,BACKOFF.length-1)],kind.wait||0,after):kind.wait&&Math.max(kind.wait,after);after=0;
+   const wait=base&&kind.jitter?Math.round(base*(1+random()/4)):base;
+   if(!wait||failure>=(kind.retries||0)||shouldStop())throw error;
+   // A long wait (a quota, a lost connection) keeps the job held.
+   if(step!=='save')await renew();
+   const stopped=await sleep(wait,{onTick:left=>ui.waiting?.(kind.reason,left),stopped:shouldStop,early:kind.early??Boolean(kind.backoff)});
+   ui.waiting?.(null,0);if(stopped)throw new BookPause('stopped');
+   if(kind.capacity&&failure+1<kind.retries){const free=await place();if(shouldStop())throw new BookPause('stopped');if(free?.busy){held=error;after=Math.min(300,Number(free.retryAfter)||0);}}
   }
  }
  // Tokens recorded since the last report become one report with its own id, kept until the server has confirmed it:
@@ -535,13 +549,14 @@ export function createBookRun({api,steps,source,ui={},sleep=countdown,shouldStop
 }
 
 // ---- Panel pieces (browser) ----
-// Cells are reused, so a 500-page grid redraws in place after every chunk.
-export function renderPageGrid(root,states,working=null){
+// Cells are reused, so a 500-page grid redraws in place after every chunk. noPdf: translated pages of parts whose
+// Vietnamese PDF is missing.
+export function renderPageGrid(root,states,working=null,noPdf=null){
  const text=String(states||''),cells=root.children;
  while(cells.length<text.length){const cell=root.ownerDocument.createElement('span');cell.className='page-cell';root.append(cell);}
  while(cells.length>text.length)root.lastElementChild.remove();
- for(let i=0;i<text.length;i++){const name=NAMES[text[i]]||'pending',state=name==='pending'&&working?.has(i+1)?'working':name,cell=cells[i];if(cell.dataset.state!==state){cell.dataset.state=state;cell.title=`Trang ${i+1} · ${PAGE_LABELS[state]}`;}}
- const count=countStates(text),parts=[`${count.done} trang đã dịch`,`${count.pending} trang chưa dịch`];
- if(working?.size)parts.unshift(`đang dịch trang ${pageList([...working])}`);if(count.blank)parts.push(`${count.blank} trang trống`);if(count.cover)parts.push('bìa');if(count.skipped)parts.push(`${count.skipped} trang bỏ qua`);if(count.failed)parts.push(`${count.failed} trang lỗi`);
+ for(let i=0;i<text.length;i++){const name=NAMES[text[i]]||'pending',state=name==='pending'&&working?.has(i+1)?'working':name==='done'&&noPdf?.has(i+1)?'nopdf':name,cell=cells[i];if(cell.dataset.state!==state){cell.dataset.state=state;cell.title=`Trang ${i+1} · ${PAGE_LABELS[state]}`;}}
+ const count=countStates(text),missing=[...noPdf||[]].filter(page=>text[page-1]==='d').length,parts=[`${count.done} trang đã dịch`,`${count.pending} trang chưa dịch`];
+ if(working?.size)parts.unshift(`đang dịch trang ${pageList([...working])}`);if(missing)parts.push(`${missing} trang chưa có PDF tiếng Việt`);if(count.blank)parts.push(`${count.blank} trang trống`);if(count.cover)parts.push('bìa');if(count.skipped)parts.push(`${count.skipped} trang bỏ qua`);if(count.failed)parts.push(`${count.failed} trang lỗi`);
  root.setAttribute('aria-label',`Tiến độ ${count.total} trang: ${parts.join(', ')}.`);
 }

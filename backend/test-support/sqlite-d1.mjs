@@ -1,6 +1,7 @@
 // An in-memory D1 (node:sqlite with every migration and foreign keys on) and R2 for tests that run whole routes.
 // Only what the Worker uses is implemented: prepare/bind/first/all/run/batch, and get/put/head/delete/list.
 import assert from 'node:assert/strict';
+import {createHash,randomUUID} from 'node:crypto';
 import {DatabaseSync} from 'node:sqlite';
 import {readdirSync,readFileSync} from 'node:fs';
 import {fileURLToPath} from 'node:url';
@@ -28,23 +29,41 @@ export class D1Database{
  }
 }
 const bytesOf=value=>typeof value==='string'?new TextEncoder().encode(value):value instanceof ArrayBuffer?new Uint8Array(value):ArrayBuffer.isView(value)?new Uint8Array(value.buffer,value.byteOffset,value.byteLength):new Uint8Array(0);
+const hex=value=>typeof value==='string'?value.toLowerCase():Buffer.from(bytesOf(value)).toString('hex');
+// R2 as the Worker relies on it. put: httpMetadata and customMetadata kept, onlyIf.etagMatches (null when another write
+// landed), sha256 checked (R2 refuses a body whose hash differs). head and get answer the object's metadata, etag and
+// full size; get takes a range ({offset,length}, {offset} or {suffix}; R2 refuses one starting past the end) and says
+// which bytes it returned. list takes prefix, cursor, limit and include: metadata only when include names it.
 export class MemoryFiles{
  constructor(){this.values=new Map();this.now=Date.now();}
  async put(key,value,options={}){
   const bytes=value instanceof ReadableStream?new Uint8Array(await new Response(value).arrayBuffer()):value instanceof Blob?new Uint8Array(await value.arrayBuffer()):bytesOf(value);
-  this.values.set(key,{bytes:bytes.slice(),options,uploaded:new Date(this.now)});return {key,size:bytes.length};
+  const condition=options.onlyIf?.etagMatches;if(condition!==undefined&&this.values.get(key)?.etag!==String(condition).replace(/^"|"$/gu,''))return null;
+  if(options.sha256!==undefined&&hex(options.sha256)!==createHash('sha256').update(bytes).digest('hex'))throw new Error('put: The SHA-256 checksum you specified did not match what we received.');
+  const item={bytes:bytes.slice(),httpMetadata:{...options.httpMetadata},customMetadata:{...options.customMetadata},uploaded:new Date(this.now),etag:createHash('md5').update(bytes).digest('hex'),version:randomUUID()};
+  this.values.set(key,item);return this.meta(key,item);
  }
  async delete(keys){for(const key of [keys].flat())this.values.delete(key);}
- object(key,item){
-  const text=()=>new TextDecoder().decode(item.bytes);
-  return {key,size:item.bytes.length,uploaded:item.uploaded,httpMetadata:item.options?.httpMetadata||{},customMetadata:item.options?.customMetadata||{},body:new Response(item.bytes).body,
-   json:async()=>JSON.parse(text()),text:async()=>text(),arrayBuffer:async()=>item.bytes.slice().buffer};
+ meta(key,item,include=['httpMetadata','customMetadata']){
+  return {key,size:item.bytes.length,etag:item.etag,httpEtag:`"${item.etag}"`,version:item.version,uploaded:item.uploaded,checksums:{},storageClass:'Standard',
+   httpMetadata:include.includes('httpMetadata')?{...item.httpMetadata}:undefined,customMetadata:include.includes('customMetadata')?{...item.customMetadata}:undefined,
+   writeHttpMetadata(headers){for(const [name,field] of [['Content-Type','contentType'],['Content-Language','contentLanguage'],['Content-Disposition','contentDisposition'],['Content-Encoding','contentEncoding'],['Cache-Control','cacheControl']])if(item.httpMetadata[field])headers.set(name,item.httpMetadata[field]);}};
  }
- async get(key){const item=this.values.get(key);return item?this.object(key,item):null;}
- async head(key){const item=this.values.get(key);return item?{key,size:item.bytes.length,uploaded:item.uploaded}:null;}
- async list({prefix='',cursor,limit=1000}={}){
-  const keys=[...this.values.keys()].filter(key=>key.startsWith(prefix)).sort(),start=Number(cursor||0),page=keys.slice(start,start+limit);
-  return {objects:page.map(key=>({key,size:this.values.get(key).bytes.length,uploaded:this.values.get(key).uploaded})),truncated:start+limit<keys.length,cursor:String(start+limit)};
+ async get(key,options={}){
+  const item=this.values.get(key);if(!item)return null;
+  let bytes=item.bytes,range;
+  if(options?.range){
+   const {offset:start=0,length,suffix}=options.range,size=bytes.length,offset=suffix!==undefined?Math.max(0,size-suffix):start;
+   if(suffix!==undefined?suffix<=0:offset>=size&&size>0)throw new Error('get: The requested range is not satisfiable.');
+   bytes=bytes.subarray(offset,length!==undefined?Math.min(size,offset+length):size);range={offset,length:bytes.length};
+  }
+  const copy=bytes.slice(),text=()=>new TextDecoder().decode(copy);
+  return {...this.meta(key,item),...(range?{range}:{}),body:new Response(copy).body,json:async()=>JSON.parse(text()),text:async()=>text(),arrayBuffer:async()=>copy.slice().buffer,blob:async()=>new Blob([copy])};
+ }
+ async head(key){const item=this.values.get(key);return item?this.meta(key,item):null;}
+ async list({prefix='',cursor,limit=1000,include=[]}={}){
+  const keys=[...this.values.keys()].filter(key=>key.startsWith(prefix)).sort(),start=Number(cursor||0),page=keys.slice(start,start+limit),truncated=start+limit<keys.length;
+  return {objects:page.map(key=>this.meta(key,this.values.get(key),include)),truncated,...(truncated?{cursor:String(start+limit)}:{}),delimitedPrefixes:[]};
  }
  keys(prefix=''){return [...this.values.keys()].filter(key=>key.startsWith(prefix)).sort();}
 }

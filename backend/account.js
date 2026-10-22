@@ -54,7 +54,7 @@ export async function deleteAccount(env,userId){
   // The wrong-password counts kept for the account itself (reader-auth.js): its signed-in checks and its email (a
   // Google-only account's too: passwords typed for it are counted as for any email). Those of a network, or of an email
   // with a network or a browser, are hashed with what they count and drain within a day.
-  const email=(await rows('SELECT COALESCE(c.email_normalized,LOWER(TRIM(u.email))) AS email FROM reader_users u LEFT JOIN reader_credentials c ON c.user_id=u.id WHERE u.id=?1'))[0]?.email,failures=await Promise.all([`password:${userId}`,`login-email:${email||userId}`].map(failureKey));
+  const email=(await rows('SELECT COALESCE(c.email_normalized,LOWER(TRIM(u.email))) AS email FROM reader_users u LEFT JOIN reader_credentials c ON c.user_id=u.id WHERE u.id=?1'))[0]?.email,failures=await Promise.all([`password:${userId}`,`login-email:${email||userId}`].map(name=>failureKey(env,name)));
   // One transaction, each statement guarded: if a run took a lease since the check above, nothing changes. Rows are
   // removed child first, so the result does not depend on foreign keys being enforced.
   const guarded=(sql,...more)=>db.prepare(`${sql} AND NOT ${BUSY}`).bind(userId,now,...more);

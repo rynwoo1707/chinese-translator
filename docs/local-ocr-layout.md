@@ -4,7 +4,7 @@
 
 ## Quy trình
 
-Từ bản 22/10/2026, ảnh chụp trang (JPG, PNG, WebP, chọn một hoặc nhiều ảnh) được ghép thành một PDF ngay trong trình duyệt bằng pdf-lib (mỗi ảnh một trang, cạnh dài tối đa 2.400 điểm ảnh) rồi đi đúng các bước dưới đây, hoặc đường giữ bố cục nếu ô đó được tích.
+Từ bản 22/10/2026, ảnh chụp trang (JPG, PNG, WebP, chọn một hoặc nhiều ảnh) được ghép thành một PDF ngay trong trình duyệt bằng pdf-lib (mỗi ảnh một trang, cạnh dài tối đa 2.400 điểm ảnh) rồi đi đúng các bước dưới đây, hoặc đường giữ bố cục nếu ô đó được tích. Từ lượt sửa thứ ba (23/10/2026), PDF này được tạo với `PDFDocument.create({updateMetadata:false})`, không ghi ngày tạo hay ngày sửa, nên chọn lại đúng các ảnh đó trên cùng trình duyệt cho ra đúng các byte cũ, tức cùng SHA-256: Xưởng dịch nhận ra lượt "Dịch cả quyển" đang dở và các phần đã có trong sách, không dịch lại. Trình duyệt hay thiết bị khác có thể nén ảnh (canvas JPEG) khác đi, khi đó tệp vẫn khác.
 
 1. PDF.js lấy lớp chữ trước. Trang có lớp chữ đủ dùng không OCR.
 2. Trang scan được render tối đa khoảng 1600 px, giữ bản màu cho hình học và dùng bản xám nén cho OCR.

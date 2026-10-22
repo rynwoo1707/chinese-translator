@@ -83,7 +83,7 @@ async function pickScan(page,pdf,name){
 const tesseractRequested=page=>page.waitForRequest(request=>new URL(request.url()).pathname==='/vendor/tesseract.esm.min.js',{timeout:30000});
 const runFinished=page=>page.waitForFunction(()=>/^Hoàn tất/u.test(document.querySelector('#progress').textContent),null,{timeout:120000});
 
-describe('Xưởng dịch states in Edge',{concurrency:true},()=>{
+describe('Xưởng dịch states in Edge',{concurrency:4},()=>{
 test('Signed out: a sign-in card replaces the form, and the PDF service is not asked (no 401)',{skip},async()=>{
  const {context,page,requests,errors}=await openStudy({api:path=>path==='/api/me'?{authenticated:false}:undefined});
  try{
@@ -152,7 +152,10 @@ test('Saves that keep failing stop the run before the next Gemini call; Dừng s
   assert.equal(await page.evaluate(()=>getComputedStyle(document.querySelector('#stop')).display),'none');
   await page.fill('#content-title','Thử lưu');await page.fill('#api-key',KEY);
   await page.fill('#source',Array.from({length:3},(_,i)=>`第${i+1}段。`+'学而时习之不亦说乎'.repeat(600)).join('\n\n'));
-  // On a phone the action floats at the bottom once there is a source, full width.
+  // On a phone the action floats at the bottom once there is a source, full width. The page's entrance animation (a
+  // transform on the panels, study.css study-in) holds it inside its panel while it runs: on a busy machine it may
+  // not have ended yet.
+  await page.evaluate(()=>Promise.all(document.getAnimations().filter(animation=>animation.animationName==='study-in').map(animation=>animation.finished)));
   assert.deepEqual(await page.evaluate(()=>{const bar=document.querySelector('#run-bar'),box=bar.getBoundingClientRect();return [getComputedStyle(bar).position,Math.round(box.bottom),Math.round(document.querySelector('#translate').getBoundingClientRect().width)];}),['fixed',844,358]);
   // The first save fails (three tries): nothing is sent to Gemini.
   await page.click('#translate');

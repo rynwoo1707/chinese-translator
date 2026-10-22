@@ -100,7 +100,7 @@
     <ul>
      <li>Để chặn việc tạo tài khoản hàng loạt, Hoa Trí đếm số tài khoản được tạo từ mỗi địa chỉ IP trong ngày. Bản ghi chứa địa chỉ IP được xóa ở lượt đếm đầu tiên của ngày mới (giờ Việt Nam), thường chỉ sau khoảng một ngày.</li>
      <li>Số lượt gửi yêu cầu dịch, tách PDF, xuất PDF tiếng Việt, tải tệp PDF gốc lên và lưu bản dịch mới của mỗi tài khoản trong ngày, để áp dụng hạn mức.</li>
-     <li>Số lần nhập sai mật khẩu, đếm theo email, theo địa chỉ IP, theo trình duyệt và theo tài khoản: máy chủ chỉ lưu mã băm SHA-256 của thứ được đếm kèm số lần sai, và xóa bản ghi khoảng một ngày sau lần sai cuối.</li>
+     <li>Số lần nhập sai mật khẩu, đếm theo email, theo địa chỉ IP, theo trình duyệt và theo tài khoản: máy chủ chỉ lưu mã HMAC-SHA-256 (tạo bằng khóa bí mật của máy chủ) của thứ được đếm kèm số lần sai, nên người đọc được cơ sở dữ liệu cũng không suy ngược ra email hay địa chỉ IP, và xóa bản ghi khoảng một ngày sau lần sai cuối.</li>
      <li>Số lần đăng nhập và thao tác trong từng phút, đếm tạm theo email, địa chỉ IP hoặc tài khoản trên hạ tầng Cloudflare, không lưu lại sau đó.</li>
     </ul>
     <h3>Báo lỗi của trang</h3>
@@ -113,7 +113,7 @@
      <li>Bộ nhớ cục bộ (localStorage) giữ vài lựa chọn giao diện: màu trang và cỡ chữ khi đọc (<code>readerTheme</code>, <code>readerFontSize</code>), nhạc nền (<code>hoaTriMusic</code>), bật hay tắt chạm để tra chữ Hán (<code>hoatri.hanziTap</code>).</li>
      <li>Khi bạn dùng Dịch cả quyển, bộ nhớ cục bộ còn giữ <code>hoa-tri-runner</code>: một mã ngẫu nhiên cố định của trình duyệt này, gửi lên máy chủ kèm tiến độ dịch để mỗi quyển chỉ được một thiết bị dịch tại một thời điểm. Máy chủ chỉ giữ mã này trong lúc lượt dịch đang chạy. Mỗi quyển đang dịch có thêm một mục <code>hoa-tri-book-usage:…</code> ghi số token Gemini đã dùng mà máy chủ chưa xác nhận; mục này tự xóa khi máy chủ đã nhận.</li>
      <li>Bộ nhớ phiên (sessionStorage) giữ tạm <code>hoa-tri-request-draft</code> khi bạn bấm “Yêu cầu dịch” lúc chưa đăng nhập: tên tài liệu, liên kết, ghi chú và lựa chọn chia sẻ bạn đã nhập (không giữ tệp), để hộp yêu cầu tự mở lại sau khi đăng nhập. Mục này bị xóa ngay khi hộp yêu cầu mở lại hoặc khi bạn rời trang đăng nhập, và mất khi đóng tab.</li>
-     <li>Bộ nhớ phiên còn giữ <code>hoa-tri-reader-place</code>: tài liệu, phần và chỗ bạn đang đọc, để tải lại trang (hoặc khi điện thoại tự tải lại thẻ) thì mở đúng chỗ đó. Mục này mất khi đóng tab.</li>
+     <li>Bộ nhớ phiên còn giữ <code>hoa-tri-reader-place</code>: tài liệu, phần và chỗ bạn đang đọc, để tải lại trang (hoặc khi điện thoại tự tải lại tab) thì mở đúng chỗ đó. Mục này mất khi đóng tab.</li>
      <li>Trình duyệt có thể lưu sẵn mô hình nhận dạng chữ (OCR) để không phải tải lại. Đây là tệp chung của ứng dụng, không chứa dữ liệu của bạn.</li>
     </ul>
    </section>

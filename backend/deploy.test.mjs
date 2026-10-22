@@ -1,9 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {mkdirSync,mkdtempSync,readFileSync,rmSync,writeFileSync} from 'node:fs';
+import {spawnSync} from 'node:child_process';
+import {lstatSync,mkdirSync,mkdtempSync,readFileSync,rmdirSync,rmSync,symlinkSync,unlinkSync,writeFileSync} from 'node:fs';
 import {createHash} from 'node:crypto';
 import {tmpdir} from 'node:os';
 import {basename,dirname,join} from 'node:path';
+import {fileURLToPath} from 'node:url';
 import {appliedMigrationNames,collisionMessage,collisions,configProblems,confirmed,dictionaryProblem,main,parseDeployOutput,parseJsonOutput,parseJsonc,parseSecretsText,pendingMigrations,placeholderFiles,PLACEHOLDER,postDeployChecks,secretProblems,securityTxtProblems,sourceUrl,validateSecretsFile,VENDOR_FILES} from './deploy.mjs';
 
 // Every Cloudflare, git and npm call goes through a fake runner and a fake fetch: these tests never reach the network.
@@ -292,6 +294,9 @@ test('Post-deploy checks ask the PDF service through the new Worker: reachable, 
  const old=await checks({...live,version:{layout:LAYOUT,service:'3333333333333333'},font:'DejaVuSerif.ttf'});
  assert.deepEqual(old.filter(r=>r.level==='error'),[]);
  assert.deepEqual(old.filter(r=>r.level==='warn').map(r=>r.text),['Dịch vụ PDF đang chạy bản 3333333333333333, mã nguồn này là bản 2222222222222222: cập nhật dịch vụ PDF trên máy chủ (deploy/pdf-layout/README.md mục A.5).','Dịch vụ PDF xuất bằng phông DejaVuSerif.ttf, không phải Liberation Serif như image chuẩn: chữ Việt có thể nhỏ hơn bản đã thử. Build lại image (deploy/pdf-layout/README.md mục A.5).']);
+ // A service names its font only when the file is there (null otherwise, as the Worker passes it on): exports would fail.
+ const fontless=await checks({...live,font:null});
+ assert.deepEqual(fontless.filter(r=>r.level==='warn').map(r=>r.text),['Dịch vụ PDF không báo phông chữ xuất PDF: image thiếu tệp phông (mọi lần xuất PDF tiếng Việt sẽ lỗi) hoặc là bản cũ. Build lại image (deploy/pdf-layout/README.md mục A.5).']);
  // Different layout checks on the two sides can refuse every scanned page: that is a failed deploy check.
  const mismatch=await checks({...live,status:'mismatch',version:{layout:'4444444444444444',service:SERVICE},layoutMatch:false});
  assert.match(mismatch.find(r=>r.level==='error').text,/mã bố cục 4444444444444444, còn Worker vừa deploy dùng 1111111111111111.*README\.md mục A\.5/u);
@@ -302,6 +307,15 @@ test('Post-deploy checks ask the PDF service through the new Worker: reachable, 
  const off=fakeSite({routes:{'/api/health':()=>Response.json({ok:true,service:'hoa-tri',version:SHA,database:'ok',pdfLayout:'off'})}});
  await postDeployChecks(base,{fetch:off.fetch,sha:SHA,sleep});assert.equal(off.requests.filter(r=>r.pathname==='/api/health').length,1);
  assert.deepEqual((await postDeployChecks(base,{fetch:site.fetch,sha:SHA,sleep})).filter(r=>r.level!=='ok'),[]);
+});
+
+test('npm run deploy also runs when deploy.mjs is started through a symlinked or junction folder',t=>{
+ // A link to this backend folder, as a release layout (/srv/app/current) or a Windows junction makes one; removed as a link
+ // only, never through it.
+ const dir=mkdtempSync(join(tmpdir(),'hoa-tri-deploy-link-')),link=join(dir,'backend');symlinkSync(fileURLToPath(new URL('./',import.meta.url)),link,'junction');
+ t.after(()=>{try{unlinkSync(link);}catch{try{rmdirSync(link);}catch{}}let gone=false;try{lstatSync(link);}catch{gone=true;}if(gone)rmSync(dir,{recursive:true,force:true});});
+ const run=spawnSync(process.execPath,[join(link,'deploy.mjs'),'--help'],{cwd:dir,encoding:'utf8',windowsHide:true});
+ assert.equal(run.status,0,run.stderr);assert.match(run.stdout,/^Cách dùng:\n {2}npm run deploy:check /u,'it ran: the usage is printed');
 });
 
 test('Deploy gives the Worker the hash of the shared PDF layout checks, so its health check can compare it with the service',async()=>{

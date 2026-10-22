@@ -95,43 +95,64 @@ async function optionalBody(request){const text=await request.text();return text
 
 // Wrong passwords (table auth_failures, migration 0022), counted where they come from: [name,rule] pairs. A count
 // drains one failure per `leak`, so it holds about `limit` failures in a burst and, past that, about one per `leak`:
-// waiting never resets it at once. At `limit` it locks for a minute, and each further failure doubles the wait, up to an
-// hour; a drained count starts from nothing, so nothing locks for good. Keys are hashed: no email or address in clear.
-// Like the other limits these fail open (rate-limit.js): without the table, or on a storage error, nothing is blocked.
-// A burst of parallel requests can pass the check before the first failure is counted; the per-minute bindings bound it.
+// waiting never resets it at once. The failure that brings it to `limit` locks for a minute, and each further failure
+// doubles the wait, up to an hour; a drained count starts from nothing, so nothing locks for good. Like the other limits
+// these fail open (rate-limit.js): without the table, or on a storage error, nothing is blocked. A burst of parallel
+// requests can pass the check before the first failure is counted; the per-minute bindings bound it.
 const MINUTE=60*1000,DAY=24*60*MINUTE,FIRST_WAIT=MINUTE,LONGEST_WAIT=60*MINUTE;
 // ACCOUNT: one email from one network, one browser the account signed in from, a signed-in account confirming its
 // password. EMAIL: one email from every network. NETWORK: one network (a school shares one) for every email.
 const ACCOUNT={limit:10,leak:15*MINUTE,scope:'failures'},EMAIL={limit:50,leak:10*MINUTE,scope:'failures'},NETWORK={limit:100,leak:30*1000,scope:'network'};
-export const failureKey=name=>hashToken(`auth-failure:${name}`);
+// What is counted (an email, an address) is kept only as an HMAC keyed by the server's ADMIN_TOKEN, which every
+// deployment has (deploy.mjs): someone who reads the database or a backup can neither recover an address by trying all
+// of them nor confirm an email. A new ADMIN_TOKEN only starts the counts afresh. Without one (tests) the key is fixed.
+let failureSecret=null;
+export async function failureKey(env,name){
+ const secret=`auth-failures|${env?.ADMIN_TOKEN||''}`;let entry=failureSecret;
+ if(entry?.secret!==secret)failureSecret=entry={secret,key:await crypto.subtle.importKey('raw',enc.encode(secret),{name:'HMAC',hash:'SHA-256'},false,['sign'])};
+ return [...new Uint8Array(await crypto.subtle.sign('HMAC',entry.key,enc.encode(name)))].map(x=>x.toString(16).padStart(2,'0')).join('');
+}
 const failureError=error=>logEvent('auth_failure_error',{name:error?.name,message:String(error?.message||'').slice(0,200)});
 const placeholders=count=>Array.from({length:count},(_,i)=>`?${i+1}`).join(',');
+// Rows nobody failed with for a day go, as the privacy page says: whenever a count changes or is cleared, and, so that
+// they go even when nobody types a password again, when a page checks who is signed in (GET /api/me) at most every
+// PURGE_EVERY for each database binding of this Worker instance. A lock still running keeps its row.
+const PURGE_EVERY=10*MINUTE,purgedAt=new WeakMap();
+async function purgeFailures(env,now=Date.now()){
+ const db=env?.DB;if(typeof db?.prepare!=='function')return;
+ purgedAt.set(db,now);
+ try{await db.prepare('DELETE FROM auth_failures WHERE updated_at<?1 AND locked_until<?2').bind(now-DAY,now).run();}catch(error){failureError(error);}
+}
+const purgeDue=env=>typeof env?.DB?.prepare==='function'&&Date.now()-(purgedAt.get(env.DB)??-Infinity)>=PURGE_EVERY;
 // The longest lock among counts as {seconds,scope}, or null.
 async function lockedFor(env,counts,now=Date.now()){
  if(typeof env?.DB?.prepare!=='function'||!counts.length)return null;
  try{
-  const keys=await Promise.all(counts.map(([name])=>failureKey(name)));
+  const keys=await Promise.all(counts.map(([name])=>failureKey(env,name)));
   const row=await env.DB.prepare(`SELECT key,locked_until FROM auth_failures WHERE key IN (${placeholders(keys.length)}) AND locked_until>?${keys.length+1} ORDER BY locked_until DESC LIMIT 1`).bind(...keys,now).first();
   const rule=row&&counts[keys.indexOf(row.key)]?.[1];
   return rule?{seconds:Math.max(1,Math.ceil((Number(row.locked_until)-now)/1000)),scope:rule.scope}:null;
  }catch(error){failureError(error);return null;}
 }
+// The failures a count still holds: one leaves it only once a whole `leak` has passed, so ten wrong passwords typed
+// within the leak are ten, whatever time they take (the level itself drains continuously and would read 9.98).
+const heldFailures=level=>Math.ceil(level-1e-9);
 async function countFailure(env,counts,now=Date.now()){
  if(typeof env?.DB?.prepare!=='function')return;
  try{
   for(const [name,rule] of counts){
-   const key=await failureKey(name);
-   const level=Number((await env.DB.prepare('INSERT INTO auth_failures(key,level,updated_at,locked_until) VALUES(?1,1,?2,0) ON CONFLICT(key) DO UPDATE SET level=MAX(0,auth_failures.level-MAX(0,?2-auth_failures.updated_at)*1.0/?3)+1,updated_at=MAX(auth_failures.updated_at,?2) RETURNING level').bind(key,now,rule.leak).first())?.level)||0;
-   if(level>=rule.limit)await env.DB.prepare('UPDATE auth_failures SET locked_until=MAX(locked_until,?2) WHERE key=?1').bind(key,now+Math.min(LONGEST_WAIT,FIRST_WAIT*2**Math.min(Math.round(level-rule.limit),12))).run();
-   // A count starting from nothing also clears the rows nobody used for a day.
-   if(level===1)await env.DB.prepare('DELETE FROM auth_failures WHERE updated_at<?1 AND locked_until<?2').bind(now-DAY,now).run();
+   const key=await failureKey(env,name);
+   const held=heldFailures(Number((await env.DB.prepare('INSERT INTO auth_failures(key,level,updated_at,locked_until) VALUES(?1,1,?2,0) ON CONFLICT(key) DO UPDATE SET level=MAX(0,auth_failures.level-MAX(0,?2-auth_failures.updated_at)*1.0/?3)+1,updated_at=MAX(auth_failures.updated_at,?2) RETURNING level').bind(key,now,rule.leak).first())?.level)||0);
+   if(held>=rule.limit)await env.DB.prepare('UPDATE auth_failures SET locked_until=MAX(locked_until,?2) WHERE key=?1').bind(key,now+Math.min(LONGEST_WAIT,FIRST_WAIT*2**Math.min(held-rule.limit,12))).run();
   }
  }catch(error){failureError(error);}
+ await purgeFailures(env,now);
 }
 async function clearFailures(env,names){
  if(typeof env?.DB?.prepare!=='function'||!names.length)return;
- try{const keys=await Promise.all(names.map(failureKey));await env.DB.prepare(`DELETE FROM auth_failures WHERE key IN (${placeholders(keys.length)})`).bind(...keys).run();}
+ try{const keys=await Promise.all(names.map(name=>failureKey(env,name)));await env.DB.prepare(`DELETE FROM auth_failures WHERE key IN (${placeholders(keys.length)})`).bind(...keys).run();}
  catch(error){failureError(error);}
+ await purgeFailures(env);
 }
 const waitText=seconds=>seconds<3600?`${Math.max(1,Math.ceil(seconds/60))} phút`:'1 giờ';
 // The 429 for a lock from lockedFor: scope 'failures' (this account) or 'network' (every account on this network).
@@ -281,12 +302,14 @@ async function resetTokenHash(request,env,token){
 //   (Google-only account) or password_changed (changed meanwhile), 400 for a weak new password (as at registration) or
 //   password_unchanged.
 // - POST /api/auth/password-reset/check {token}: 200 {ok:true,expiresAt} without using the link up; /open trades it,
-//   /password-reset sets the password (see each route). Refusals: 400 reset_link_invalid, 403 account_disabled.
+//   /password-reset sets the password (see each route): 200 {ok:true}, signed in, with this browser's device mark and
+//   the account's wrong-password counts cleared. Refusals: 400 reset_link_invalid, 403 account_disabled.
 // - GET /api/auth/google/start and /callback: redirects only; a failure goes to /#account?loi=<GOOGLE_FAILURE_CODES>
 //   (&sau=… keeps where the student was going), except a callback reached after the Google settings were removed.
 export async function authRoute(request,env,url,path){
  if(path==='/api/me'&&request.method==='GET'){
   const user=await currentReader(request,env),{mode,domains}=registrationPolicy(env),shared={googleConfigured:googleConfigured(env),registration:{mode,domains},termsVersion:TERMS_VERSION};
+  if(purgeDue(env))await purgeFailures(env);
   return json(user?{authenticated:true,...shared,user}:{authenticated:false,...shared});
  }
  if(path==='/api/auth/register'&&request.method==='POST'){
@@ -410,7 +433,11 @@ export async function authRoute(request,env,url,path){
    db.prepare(`DELETE FROM reader_sessions WHERE user_id=?2 AND token_hash<>?1 AND ${claimed}`).bind(session.hash,link.user_id)
   ]);
   if(!results[0]?.meta?.changes)return resetRefused(await resetLink(env,tokenHash));
-  return json({ok:true},200,{'Set-Cookie':session.cookie});
+  // A reset link is the remedy the lock's answer names: the wrong passwords counted for the account (from this network,
+  // from every network, and in its signed-in checks) are cleared, and this browser gets a mark of the new password, as
+  // a password change gives one, so guesses elsewhere do not lock it out again.
+  await clearFailures(env,[`login:${link.email_normalized}|${clientIp(request)}`,`login-email:${link.email_normalized}`,`password:${link.user_id}`]);
+  return signedIn(json({ok:true}),session.cookie,await deviceCookie(request,link.email_normalized,credential,url));
  }
  if(path==='/api/auth/google/start'&&request.method==='GET'){
   const returnTo=safeReturn(url.searchParams.get('return_to'));

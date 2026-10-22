@@ -24,8 +24,9 @@ COPY frontend/math-text.js ./frontend/math-text.js
 # tesseract-ocr-* packages ship different models, so OCR in production would not be the OCR that was tested.
 RUN mkdir /tmp/tessdata && for lang in chi_sim eng; do gzip -dc "node_modules/@tesseract.js-data/$lang/4.0.0_best_int/$lang.traineddata.gz" > "/tmp/tessdata/$lang.traineddata"; done && node services/pdf-layout/prepare-ocr.mjs --from /tmp/tessdata --to /opt/tessdata && rm -rf /tmp/tessdata
 ENV PDF_PYTHON=/opt/pdf-venv/bin/python CHROMIUM_EXECUTABLE_PATH=/usr/bin/chromium PDF_LAYOUT_HOST=0.0.0.0 PDF_CHROMIUM_NO_SANDBOX=1 TESSDATA_PREFIX=/opt/tessdata
-# The build stops here if exports would not use Liberation Serif (a base image without fonts-liberation2).
-RUN node -e "import('./services/pdf-layout/engine.mjs').then(({fontPath})=>{const path=fontPath();console.log('PDF font: '+path);if(!path.endsWith('/LiberationSerif-Regular.ttf'))process.exit(1);})"
+# The build stops here if exports would not use Liberation Serif (a base image without fonts-liberation2), or would find
+# no font file at all (fontPath() is null then).
+RUN node -e "import('./services/pdf-layout/engine.mjs').then(({fontPath})=>{const path=fontPath();console.log('PDF font: '+(path||'none'));if(!path||!require('node:fs').existsSync(path)||!path.endsWith('/LiberationSerif-Regular.ttf'))process.exit(1);})"
 # Uploaded PDFs are parsed by native code: run without root (Chromium still needs --no-sandbox inside a container).
 USER node
 EXPOSE 8091

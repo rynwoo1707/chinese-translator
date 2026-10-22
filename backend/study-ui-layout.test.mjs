@@ -44,7 +44,7 @@ function fakeAccount(document,hooks={}){
  account.api=async(path,method,json)=>{
   if(path==='/api/my/study/pdf-layout/extract'){const call=++account.calls.extract,hooked=await hooks.extract?.(call,json);if(hooked)return hooked;return {assetId:ASSET,document:account.document,originalUrl:`/api/my/study/pdf-layout/assets/${ASSET}/original`};}
   if(path==='/api/my/study/history'&&method==='POST'||path===`/api/my/study/history/${SESSION}`&&method==='PUT'){
-   if(json.revision!==undefined&&json.revision!==account.revision)return {fakeStatus:409,json:{error:'Bản dịch này vừa được lưu từ một thẻ hoặc thiết bị khác.',code:'history_conflict',revision:account.revision}};
+   if(json.revision!==undefined&&json.revision!==account.revision)return {fakeStatus:409,json:{error:'Bản dịch này vừa được lưu từ một tab hoặc thiết bị khác.',code:'history_conflict',revision:account.revision}};
    account.revision++;account.session=structuredClone(json.state);account.saves.push(structuredClone(json.state));const complete=json.state.done===json.state.parts.length;
    return {id:SESSION,status:complete?'complete':json.state.done?'translating':'draft',libraryStoryId:complete?'book-1':null,libraryChapterId:complete?'chapter-1':null,updatedAt:now(),revision:account.revision};
   }
@@ -86,7 +86,7 @@ async function openStudy(api){
    // A form (an upload) is handed over parsed, a JSON body as its value.
    let json=null;const type=request.headers()['content-type']||'';
    if(type.startsWith('multipart/form-data'))json=await new Request('http://fake/',{method:'POST',headers:{'content-type':type},body:request.postDataBuffer()}).formData();else try{json=JSON.parse(request.postData()||'null');}catch{}
-   let body=await api(path,method,json);if(body===undefined)body=defaults(path,method);
+   let body=await api(path,method,json,url);if(body===undefined)body=defaults(path,method);
    if(body===undefined)return route.fulfill({status:404,json:{error:`fake: ${method} ${path}`}});
    if(body?.fakeBody)return route.fulfill({status:200,headers:{'Content-Type':body.contentType},body:body.fakeBody});
    if(body?.fakeStatus)return route.fulfill({status:body.fakeStatus,json:body.json,headers:body.headers||{}});
@@ -109,6 +109,8 @@ async function pickPdf(page){
 const progress=page=>page.textContent('#progress');
 const waitProgress=(page,pattern,timeout=60000)=>page.waitForFunction(source=>new RegExp(source,'u').test(document.querySelector('#progress').textContent),pattern.source,{timeout});
 const idle=page=>page.waitForFunction(()=>!document.querySelector('#translate').disabled,null,{timeout:60000});
+// Waits until check() holds (on this side: a fake's counters); false when it never did within ms.
+const until=async(check,ms=30000)=>{for(const end=Date.now()+ms;Date.now()<end;await new Promise(resolve=>setTimeout(resolve,50)))if(await check())return true;return false;};
 
 // Three pages at a time: all eight at once (pdf.js and its workers in each) made Edge close mid-run on a machine
 // short of memory, failing whichever tests were still running.
@@ -240,20 +242,21 @@ test('An export refused for translations longer than their boxes says so in the 
   await page.waitForFunction(()=>/^2 trang · /u.test(document.querySelector('#file-status').textContent),null,{timeout:30000});
   await page.fill('#content-title','Bài giữ bố cục');await page.fill('#api-key',KEY);await page.click('#translate');await idle(page);
   // The student reads the service's words; the editor is already where they lead: Trang 2, Đoạn 1, every such block marked.
-  const message=overflowAnswer(document,refusals[0]).json.error;assert.match(message,/^Trang 2: bản dịch của Đoạn 1 và Đoạn 2 dài hơn khung chữ/u);
+  const message=overflowAnswer(document,refusals[0]).json.error;assert.match(message,/^Trang 2: bản dịch của [Đđ]oạn 1 và [Đđ]oạn 2 dài hơn khung chữ/u);
   assert.equal(await progress(page),message);assert.equal(await page.getAttribute('#progress','class'),'error');
   await page.waitForFunction(()=>document.querySelectorAll('#pdf-dual-viewer .is-overflow').length===2);
   let state=await viewerState(page);
   assert.deepEqual({page:state.page,open:state.open,block:state.block,text:state.text,outlined:state.outlined,focused:state.focused},{page:'Trang 2 · 2/2',open:true,block:'p2-b1',text:translated('p2-b1'),outlined:['p2-b1','p2-b2'],focused:true});
   assert.deepEqual(state.options.map(text=>text.replace(/ · .*?(?= · |$)/u,'')),['Đoạn 1 · Dài hơn khung chữ','Đoạn 2 · Dài hơn khung chữ'],'the editor names the blocks as the message does');
-  assert.match(state.notice,/^Khi xuất PDF, Đoạn 1, Đoạn 2 của trang này dài hơn khung chữ \(viền đỏ\)\./u);
+  // In a sentence a block is "Trang N · đoạn k", as in the warnings; "Đoạn k" is the editor's own list.
+  assert.match(state.notice,/^Khi xuất PDF, bản dịch của Trang 2 · đoạn 1 và Trang 2 · đoạn 2 dài hơn khung chữ \(viền đỏ\)\./u);
   // Shortened and saved: its mark goes; the other block keeps its own.
   await page.fill('[data-pdf-edit-text]','Ngắn.');await page.click('[data-pdf-edit-save]');await waitProgress(page,/^Đã lưu đoạn sửa\./u);
   assert.equal(account.session.translationParts[2],'Ngắn.');
   await page.waitForFunction(()=>document.querySelectorAll('#pdf-dual-viewer .is-overflow').length===1);state=await viewerState(page);
   assert.deepEqual(state.outlined,['p2-b2']);assert.doesNotMatch(state.options[0],/Dài hơn khung chữ/u);assert.match(state.options[1],/Dài hơn khung chữ$/u);
   // Exported again: the one still too long is opened in turn; once it is shortened too, the PDF is exported and downloaded.
-  await page.click('#download-pdf');await waitProgress(page,/^Trang 2: bản dịch của Đoạn 2 dài hơn khung chữ/u);await idle(page);
+  await page.click('#download-pdf');await waitProgress(page,/^Trang 2: bản dịch của [Đđ]oạn 2 dài hơn khung chữ/u);await idle(page);
   await page.waitForFunction(()=>document.querySelector('#pdf-dual-viewer [data-pdf-edit-select]').value==='p2-b2');
   assert.equal((await viewerState(page)).text,translated('p2-b2'));
   await page.fill('[data-pdf-edit-text]','Cũng ngắn.');await page.click('[data-pdf-edit-save]');await waitProgress(page,/^Đã lưu đoạn sửa\./u);
@@ -304,5 +307,112 @@ test('A scanned block kept with its machine text is never paid for again, even w
   assert.equal(account.calls.refresh,0,'the scan is not extracted and read again');assert.equal(account.calls.ocr,1,'nor read again');assert.equal(account.calls.extract,1);
   assert.match(await progress(page),/^Đã dịch đủ các đoạn\./u);assert.deepEqual(errors,[]);
  }finally{await context.close();}
+});
+
+test('Photos picked again become the same PDF, so the unfinished whole-book run made from them goes on instead of starting over',{skip,timeout:120000},async()=>{
+ const shas=[];let jobs=[];const account=fakeAccount(manifest(1));
+ const {context,page,errors}=await openStudy((path,method,json,url)=>{
+  if(path==='/api/my/study/library-match'){shas.push(url.searchParams.get('sha256'));return {match:null};}
+  if(path==='/api/my/study/book-jobs'&&method==='GET')return {jobs};
+  return account.api(path,method,json);
+ });
+ try{
+  const photos=await page.evaluate(()=>[[620,877],[877,620]].map(([width,height],index)=>{const canvas=document.createElement('canvas'),g=canvas.getContext('2d');canvas.width=width;canvas.height=height;g.fillStyle='#fff';g.fillRect(0,0,width,height);g.fillStyle='#111';g.font='40px sans-serif';g.fillText(`Trang ${index+1}`,60,120);return canvas.toDataURL('image/png').slice('data:image/png;base64,'.length);}));
+  const files=photos.map((data,index)=>({name:`trang-${index+1}.png`,mimeType:'image/png',buffer:Buffer.from(data,'base64')}));
+  const pick=async count=>{await page.evaluate(()=>{document.querySelector('#source-file').value='';});await page.setInputFiles('#source-file',files);await page.waitForFunction(()=>/^2 trang · /u.test(document.querySelector('#file-status').textContent),null,{timeout:30000});assert.ok(await until(()=>shas.length>=count),'the PDF made of the photos is hashed');};
+  await pick(1);
+  // The run a closed tab left behind: page 1 translated, page 2 not yet.
+  jobs=[{id:'6a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d',sourceSha256:shas[0],filename:'trang-1.pdf',title:'Ảnh chụp sách',storyId:null,totalPages:2,pageStates:'d.',chunkSize:20,domain:'general',mode:'economy',model:null,status:'paused',pauseReason:'network',usage:{prompt:600,output:267,thinking:0,total:867,requests:1},glossary:{},createdAt:now(),updatedAt:now(),runner:null,leaseSeconds:0}];
+  // More than a second later (a PDF date counts whole seconds), the same photos again.
+  await page.waitForTimeout(1100);await pick(2);
+  assert.equal(shas[1],shas[0],'the same photos give the same bytes, hence the same SHA-256');
+  await page.waitForFunction(()=>document.querySelector('#translate').textContent.trim()==='Tiếp tục dịch cả quyển →',null,{timeout:30000});
+  assert.match(await page.textContent('#whole-book-status'),/^Quyển này đã có tiến độ: Đã dịch 1\/2 trang\. Bấm Tiếp tục dịch cả quyển/u);
+  assert.equal(account.calls.extract,0);assert.deepEqual(errors,[]);
+ }finally{await context.close();}
+});
+
+test('While the PDF service is busy the file is not uploaded again to find out: after each wait Xưởng dịch asks for a free place, Dừng still ends the wait, and the file goes up once a place is free',{skip,timeout:120000},async()=>{
+ const BUSY='Dịch vụ PDF đang bận vì nhiều người dùng cùng lúc. Hãy thử lại sau khoảng 20 giây.',uploads=[];let place='full',asked=0;
+ const account=fakeAccount(manifest(2),{extract:(call,form)=>{uploads.push(form.get('file').size);return call<=2?{fakeStatus:503,json:{error:BUSY,code:'pdf_service_busy',retryAfter:1},headers:{'Retry-After':'1'}}:null;}});
+ const {context,page,errors}=await openStudy((path,method,json)=>{
+  if(path==='/api/my/study/pdf-layout/capacity'&&method==='GET'){asked++;return place==='full'?{busy:true,free:0,slots:2,retryAfter:1}:{busy:false,free:1,slots:2,retryAfter:null};}
+  return account.api(path,method,json);
+ });
+ try{
+  await pickPdf(page);await page.click('#translate');
+  // Two waits while every place is taken: the file went up once, and the countdown and Dừng stay.
+  assert.ok(await until(()=>asked>=2,40000),'the service is asked for a free place after each wait');assert.equal(uploads.length,1);
+  assert.match(await progress(page),/^Dịch vụ PDF đang bận vì nhiều người dùng cùng lúc\. Tự thử lại sau \d+ giây… Bấm Dừng để thôi chờ\.$/u);
+  await page.click('#stop');await idle(page);
+  assert.equal(await progress(page),'Dịch vụ PDF đang bận vì nhiều người dùng cùng lúc. Đã thôi chờ; bấm Bắt đầu dịch khi muốn thử lại.');assert.equal(uploads.length,1);
+  // Busy once more, then a place is free: the file goes up again only then.
+  place='open';await page.click('#translate');await waitProgress(page,/^PDF tiếng Việt đã được lưu vào Thư viện riêng/u);
+  assert.equal(uploads.length,3,'one refused upload per run, and the one sent once a place was free');assert.ok(uploads.every(size=>size===uploads[0]));
+  assert.deepEqual(errors,[]);
+ }finally{await context.close();}
+});
+
+test('Blocks asked for again after a refusal are named, not counted as a range over blocks not sent; their notes go once they are translated, also after the extraction\'s own notes',{skip,timeout:120000},async()=>{
+ const document=manifest(30),REFUSED='Gemini không trả kết quả vì đoạn này trùng khớp nguyên văn với nội dung có bản quyền.',OCR='Trang 1: dùng OCR; hãy đối chiếu công thức với PDF gốc.';
+ document.pages[0].blocks.forEach((b,i)=>{b.box=[40,20+i*17,360,34+i*17];});document.warnings=[OCR];
+ const account=fakeAccount(document,{translate:(json,call)=>call===1?{blocks:json.blocks.filter(b=>!['p1-b3','p1-b25'].includes(b.id)).map(b=>({id:b.id,translation:translated(b.id)})),failedBlocks:['p1-b3','p1-b25'].map(id=>({id,code:'gemini_refused',message:REFUSED})),context:'',glossary:{},usage:{prompt:600,output:200,total:800,requests:1},warnings:[],model:'gemini-test'}:null});
+ const {context,page,errors}=await openStudy(account.api);
+ try{
+  await pickPdf(page);await page.click('#translate');await waitProgress(page,/^PDF tiếng Việt đã được lưu vào Thư viện riêng\. Cần xem lại: 2 đoạn giữ nguyên chữ gốc/u);await idle(page);
+  const before=await page.textContent('#warnings');assert.ok(before.startsWith(`${OCR}\nTrang 1 · đoạn 3: giữ nguyên chữ gốc.`),before);
+  await page.evaluate(()=>{window.__statuses=[];});await page.click('#translate');await waitProgress(page,/^PDF tiếng Việt đã được lưu vào Thư viện riêng/u);await idle(page);
+  assert.deepEqual(account.translateBodies.at(-1).blocks.map(b=>b.id),['p1-b3','p1-b25']);
+  const statuses=await page.evaluate(()=>window.__statuses);
+  assert.ok(statuses.includes('Đang dịch lại 2 đoạn còn chữ gốc (Trang 1 · đoạn 3, Trang 1 · đoạn 25)…'),statuses.join(' | '));assert.ok(!statuses.some(line=>/Đang dịch đoạn 3–25/u.test(line)),statuses.join(' | '));
+  assert.equal(await page.textContent('#warnings'),`${OCR}\n`);assert.deepEqual(errors,[]);
+ }finally{await context.close();}
+});
+
+test('The block editor names a formula box it lost, or holds twice, in its own words ("Đoạn k", "[Công thức n]"), and saves nothing',{skip,timeout:120000},async()=>{
+ const document=manifest(2),block=document.pages[0].blocks[0];
+ Object.assign(block,{text:'设 x 为实数。',source:'设@@PDF_INLINE_1@@为实数。',inlines:[{token:'@@PDF_INLINE_1@@',image:PNG,width:10,height:12,text:'x'}]});
+ const account=fakeAccount(document,{translate:json=>({blocks:json.blocks.map(b=>({id:b.id,translation:b.id==='p1-b1'?'Đặt @@PDF_INLINE_1@@ là số thực.':translated(b.id)})),failedBlocks:[],context:'',glossary:{},usage:{prompt:600,output:200,total:800,requests:1},warnings:[],model:'gemini-test'})});
+ const {context,page,errors}=await openStudy(account.api);
+ try{
+  await pickPdf(page);await page.click('#translate');await waitProgress(page,/^PDF tiếng Việt đã được lưu vào Thư viện riêng/u);await idle(page);
+  await page.click('#pdf-dual-viewer .pdf-block-editor > summary');await page.selectOption('[data-pdf-edit-select]','p1-b1');
+  assert.equal(await page.inputValue('[data-pdf-edit-text]'),'Đặt [Công thức 1] là số thực.');
+  const saves=account.saves.length;
+  await page.fill('[data-pdf-edit-text]','Đặt là số thực.');await page.click('[data-pdf-edit-save]');await waitProgress(page,/^Đoạn 1:/u);
+  assert.equal(await progress(page),'Đoạn 1: bản sửa làm mất [Công thức 1]; hãy giữ nguyên ô này.');assert.equal(await page.getAttribute('#progress','class'),'error');
+  await page.fill('[data-pdf-edit-text]','Đặt [Công thức 1] và [Công thức 1].');await page.click('[data-pdf-edit-save]');await waitProgress(page,/hơn một lần/u);
+  assert.equal(await progress(page),'Đoạn 1: bản sửa có [Công thức 1] hơn một lần; hãy giữ đúng một ô này.');
+  assert.equal(account.saves.length,saves,'nothing is saved');assert.equal(account.session.translationParts[0],'Đặt @@PDF_INLINE_1@@ là số thực.');assert.deepEqual(errors,[]);
+ }finally{await context.close();}
+});
+
+test('A finished part whose export was refused says so in the history, and opened again elsewhere it finds and opens the block too long for its box; once exported the history stops saying so',{skip,timeout:150000},async()=>{
+ const document=manifest(2),LONG='Bản dịch rất dài của đoạn một, không thể nào vừa khung chữ. '.repeat(60);
+ const account=fakeAccount(document,{translate:json=>({blocks:json.blocks.map(b=>({id:b.id,translation:b.id==='p1-b1'?LONG:translated(b.id)})),failedBlocks:[],context:'',glossary:{},usage:{prompt:600,output:200,total:800,requests:1},warnings:[],model:'gemini-test'}),render:(json,call)=>call===1?overflowAnswer(document,['p1-b1']):null});
+ // The books as GET /api/my/study/books lists them: the part's chapter stays text until an export succeeds.
+ const books=()=>account.session?.done===2?[{id:'book-1',title:'Bài giữ bố cục',cover:{image:false,page:null,sha256:null},parts:[{id:'chapter-1',title:'Bài giữ bố cục',position:1,mime:account.calls.render>=2?'application/pdf':'text/plain',sessionId:SESSION,filename:'bai-scan.pdf',pageStart:1,pageEnd:1,totalPages:1,sha256:null,pages:[1],updatedAt:now(),translatedAt:now()}]}]:[];
+ const api=(path,method,json)=>path==='/api/my/study/books'&&method==='GET'?books():account.api(path,method,json);
+ const first=await openStudy(api);
+ try{
+  await pickPdf(first.page);await first.page.click('#translate');await idle(first.page);
+  assert.match(await progress(first.page),/^Trang 1: bản dịch của [Đđ]oạn 1 dài hơn khung chữ/u);assert.deepEqual(first.errors,[]);
+ }finally{await first.context.close();}
+ const again=await openStudy(api),{page}=again;
+ try{
+  await page.click('#study-history > summary');
+  await page.waitForFunction(()=>/chưa có PDF tiếng Việt/u.test(document.querySelector('#study-history-list').textContent));
+  assert.match(await page.textContent(`[data-history-open="${SESSION}"]`),/Hoàn tất · trang 1 · chưa có PDF tiếng Việt/u);
+  await page.click(`[data-history-open="${SESSION}"]`);
+  await waitProgress(page,/^Phần này chưa có PDF tiếng Việt vì bản dịch của Trang 1 · đoạn 1 dài hơn khung chữ, kể cả khi đã thu nhỏ chữ hết mức\./u);await idle(page);
+  const state=await viewerState(page);assert.deepEqual({open:state.open,block:state.block,outlined:state.outlined},{open:true,block:'p1-b1',outlined:['p1-b1']});
+  assert.equal(account.calls.render,1,'opening the part asks nothing of the PDF service');
+  // Shortened, saved and exported: the history stops saying the part lacks its PDF.
+  await page.fill('[data-pdf-edit-text]','Ngắn.');await page.click('[data-pdf-edit-save]');await waitProgress(page,/^Đã lưu đoạn sửa\./u);
+  const download=page.waitForEvent('download');await page.click('#download-pdf');const file=await download;assert.ok(await file.path());
+  await waitProgress(page,/^PDF tiếng Việt đã được lưu vào Thư viện riêng/u);
+  await page.waitForFunction(()=>!/chưa có PDF tiếng Việt/u.test(document.querySelector('#study-history-list').textContent));
+  assert.deepEqual(again.errors,[]);
+ }finally{await again.context.close();}
 });
 });

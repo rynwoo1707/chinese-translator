@@ -38,7 +38,9 @@ test('Gemini not serving the server\'s location is waited out with the key kept;
  assert.match(book.pauseMessage('history_full',full),/^Lịch sử dịch của tài khoản đã có 300 bản dịch.* Tiến độ của quyển đã lưu; dọn bớt xong, bấm Tiếp tục dịch cả quyển\.$/u);
  assert.equal(book.classifyError(error(413,{code:'too_many_parts'}),'save').reason,'too_many_parts');
  assert.equal(book.classifyError(error(409,{code:'history_conflict',revision:8}),'translate').reason,'conflict');
- assert.match(book.pauseMessage('conflict'),/vừa được lưu từ một thẻ hoặc thiết bị khác.*Tiếp tục dịch cả quyển để mở bản mới nhất/u);
+ // One word for a browser tab everywhere: "tab".
+ assert.match(book.pauseMessage('conflict'),/^Phần đang dịch vừa được lưu từ một tab hoặc thiết bị khác, nên tab này dừng.*Tiếp tục dịch cả quyển để mở bản mới nhất/u);
+ assert.doesNotMatch(Object.keys(book).filter(name=>/Message$/u.test(name)).flatMap(name=>['stopped','busy','gemini_unavailable','quota_day','quota','quota_minute','gemini_key','rate_limited','pdf_busy','pdf_account','gemini_location','history_full','conflict','network','limit','x'].map(reason=>book[name](reason,null,0))).join('\n'),/thẻ/u);
 });
 
 // A run over a fake job: chunks are cut as the run asks, extraction numbers pages from the chunk's offset, and start()

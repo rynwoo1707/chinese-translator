@@ -138,7 +138,10 @@ test('PDF rendering uses saved owner history and ignores translations supplied i
  assert.equal(calls[0].body.title,row.title);assert.equal(result.renderVersion,3);
  assert.doesNotMatch(JSON.stringify(calls[0].body),/attacker|never-use-me/);assert.equal(result.url,`${base}/assets/${assetId}/translated`);
  // The render addresses this range's own chapter, never every chapter of the book.
- const chapterUpdate=queries.find(item=>item.sql.startsWith('UPDATE chapters'));assert.match(chapterUpdate.sql,/WHERE id=\?/u);assert.doesNotMatch(chapterUpdate.sql,/WHERE story_id=/u);assert.deepEqual(chapterUpdate.args,[assetKey(reader,'translated.pdf'),'application/pdf','private-chapter',reader.id]);
+ const chapterUpdate=queries.find(item=>item.sql.startsWith('UPDATE chapters'));assert.match(chapterUpdate.sql,/WHERE id=\?3/u);assert.doesNotMatch(chapterUpdate.sql,/WHERE story_id=/u);
+ // Linked only while the session is still the save the PDF was made from (its revision and chapter).
+ assert.match(chapterUpdate.sql,/EXISTS \(SELECT 1 FROM study_sessions WHERE id=\?5 AND user_id=\?4 AND revision=\?6 AND library_chapter_id=\?3\)/u);
+ assert.deepEqual(chapterUpdate.args,[assetKey(reader,'translated.pdf'),'application/pdf','private-chapter',reader.id,historyId,0]);
  assert.equal((await (await FILES.get(row.state_key)).json()).pdfLayout.exported,true);
  assert.equal((await (await FILES.get(row.state_key)).json()).pdfLayout.renderVersion,3);
  const translated=await pdfLayoutRoute(new Request(origin+result.url),env,result.url,reader);
@@ -400,7 +403,7 @@ test('PDF service failures reach the browser typed: busy is waited out, too heav
  }
  // Busy is waited out far longer than a lost connection, and a hidden tab keeps counting down.
  answer=cases[0][0];const busy=classifyError(await browserError(call),'extract');
- assert.deepEqual(busy,{reason:'pdf_busy',backoff:true,retries:30,wait:20,early:false,jitter:true});
+ for(const [key,value] of Object.entries({reason:'pdf_busy',backoff:true,retries:30,wait:20,early:false,jitter:true}))assert.deepEqual(busy[key],value,key);
  // A problem of the file itself keeps its plain answer, so a run halves the chunk to find that page.
  answer=()=>Response.json({error:'Trang 3: không đọc được hình vẽ.'},{status:422});
  const page=await browserError(call);assert.equal(page.status,400);assert.equal(page.data.code,undefined);assert.equal(classifyError(page,'extract').reason,'page');
@@ -518,4 +521,173 @@ test('Manifests are stored as ASCII JSON and handed on as stored bytes: the extr
  const streaming={...env,FILES:{get:async key=>{const object=await FILES.get(key);return object&&{...object,body:new Response(object.body).body};},put:(...args)=>FILES.put(...args)}};
  assert.equal((await render(streaming)).status,200);assert.ok(renders[0].includes(before));
  const sent=JSON.parse(renders[0]);assert.deepEqual(sent.document,document());assert.equal(sent.title,row.title);assert.deepEqual(sent.translations.map(item=>item.id),['p4-b0','p4-b1']);
+});
+
+// Like R2: every stored object has an etag, and put() with onlyIf.etagMatches stores nothing (null) when it differs.
+class EtagFiles extends MemoryFiles{
+ constructor(){super();this.etags=new Map();this.version=0;}
+ async put(key,value,options){const wanted=options?.onlyIf?.etagMatches;if(wanted!==undefined&&this.etags.get(key)!==wanted)return null;await super.put(key,value,options);this.etags.set(key,`etag-${++this.version}`);return {key,etag:this.etags.get(key)};}
+ async get(key){const object=await super.get(key);return object&&{...object,etag:this.etags.get(key)};}
+}
+// A PDF range saved as complete through the history route over real SQLite: its revision, its chapter and its state.json.
+async function pdfSession(t,{files=null}={}){
+ const {sqlite,env}=sqliteEnvironment(t);if(files)env.FILES=files;
+ await env.FILES.put(assetKey(reader,'manifest.json'),JSON.stringify(document()));
+ const sources=document().pages[0].blocks.map(b=>b.source),historyPath='/api/my/study/history';
+ const save=async(translationParts,{id,revision}={})=>{
+  const path=id?`${historyPath}/${id}`:historyPath,body={title:'Vectơ - bài 1',filename:'lesson.pdf',domain:'math',...(revision===undefined?{}:{revision}),state:{source:sources.join('\n\n'),parts:sources,translationParts,done:translationParts.filter(Boolean).length,pdfLayout:{assetId}}};
+  const response=await studyHistoryRoute(new Request(origin+path,{method:id?'PUT':'POST',headers:{'Content-Type':'application/json',Origin:origin},body:JSON.stringify(body)}),env,path,reader);
+  return {...await response.json(),http:response.status};
+ };
+ const first=await save(['Định nghĩa vectơ.','Công thức @@PDF_INLINE_0@@.']);assert.equal(first.http,201);assert.equal(first.revision,1);
+ const stateKey=`study/${reader.id}/${first.id}/state.json`;
+ return {sqlite,env,save,first,stateKey,state:async()=>JSON.parse(await (await env.FILES.get(stateKey)).text()),
+  chapter:()=>({...sqlite.prepare('SELECT file_key,mime FROM chapters WHERE id=?').get(first.libraryChapterId)}),
+  render:()=>browserError(()=>pdfLayoutRoute(jsonRequest(base+'/render',{assetId,historyId:first.id}),env,base+'/render',reader))};
+}
+
+test('An export never undoes a save made while the service worked, nor links the PDF of the older text',async t=>{
+ const {sqlite,env,save,first,state,chapter,render}=await pdfSession(t);
+ let release,entered;const held=new Promise(done=>{release=done;}),reached=new Promise(done=>{entered=done;}),sent=[];
+ t.mock.method(globalThis,'fetch',async(url,options)=>{sent.push(JSON.parse(await new Response(options.body).text()).translations.map(item=>item.translation));if(sent.length===1){entered();await held;}return Response.json({pdfBase64:btoa('%PDF-1.7\nVietnamese'),report:[]});});
+ const exporting=render();await reached;
+ // Meanwhile another tab saves a corrected block, naming the revision it was opened at: accepted as revision 2.
+ const edited=['Định nghĩa vectơ.','Công thức đã sửa @@PDF_INLINE_0@@.'],saved=await save(edited,{id:first.id,revision:first.revision});
+ assert.equal(saved.http,200);assert.equal(saved.revision,2);
+ release();const refused=await exporting;
+ assert.equal(refused.status,409);assert.equal(refused.data.code,'history_conflict');assert.equal(refused.data.revision,2);assert.ok(refused.data.updatedAt);
+ assert.match(refused.data.error,/^Bản dịch này vừa được lưu từ một tab hoặc thiết bị khác trong lúc xuất PDF.*Lịch sử dịch.*Xuất PDF tiếng Việt\.$/u);
+ assert.equal(classifyError(refused).reason,'conflict','a whole-book run pauses as for a save from an older copy');
+ // The newer save stands, unexported, and the library keeps its text instead of a PDF of the older one.
+ const kept=await state();assert.deepEqual(kept.translationParts,edited);assert.notEqual(kept.pdfLayout.exported,true);
+ assert.deepEqual(chapter(),{file_key:null,mime:'text/plain'});assert.equal(env.FILES.values.has(assetKey(reader,'translated.pdf')),false);
+ assert.equal(sqlite.prepare('SELECT revision FROM study_sessions WHERE id=?').get(first.id).revision,2,'the export wrote nothing');
+ // Exported again, the PDF is made from the newer text and kept.
+ const again=await render();assert.equal(again.status,200,again.message);assert.deepEqual(sent[1],edited);
+ assert.equal((await state()).pdfLayout.exported,true);assert.deepEqual((await state()).translationParts,edited);assert.deepEqual(chapter(),{file_key:assetKey(reader,'translated.pdf'),mime:'application/pdf'});
+});
+
+test('A save landing after the export\'s last check is never overwritten: the chapter link checks the revision, state.json its etag',async t=>{
+ // The other tab's save lands while the PDF is being stored: after the export compared the session, before it links the
+ // chapter (the save's whole route runs), or only its state.json write before the chapter link and the export's write.
+ for(const step of ['whole save','state.json only']){
+  const files=new EtagFiles(),{env,save,first,state,stateKey,chapter,render}=await pdfSession(t,{files});
+  t.mock.method(globalThis,'fetch',async()=>Response.json({pdfBase64:btoa('%PDF-1.7\nVietnamese'),report:[]}));
+  const edited=['Định nghĩa vectơ.','Công thức sửa ở thẻ khác @@PDF_INLINE_0@@.'],put=files.put.bind(files),stateWrites=[];let landed=null;
+  files.put=async(key,value,options)=>{
+   if(key===stateKey)stateWrites.push(options);
+   if(!landed&&key.endsWith('/translated.pdf')){
+    landed=step==='whole save'?await save(edited,{id:first.id,revision:first.revision}):await put(stateKey,JSON.stringify({...await state(),translationParts:edited}));
+   }
+   return put(key,value,options);
+  };
+  const refused=await render();
+  assert.equal(refused.status,409,step);assert.equal(refused.data.code,'history_conflict',step);
+  const kept=await state();assert.deepEqual(kept.translationParts,edited,step);assert.notEqual(kept.pdfLayout.exported,true,step);
+  if(step==='whole save'){assert.equal(landed.http,200);assert.equal(refused.data.revision,2);assert.deepEqual(chapter(),{file_key:null,mime:'text/plain'},'the link waited for the same revision');}
+  // The export's own write named the etag of the copy it compared, so storage refused it.
+  else assert.match(String(stateWrites.at(-1)?.onlyIf?.etagMatches),/^etag-\d+$/u);
+ }
+});
+
+// The bytes of a request body as the browser sends them, read only when someone pulls them: reads counts the pulls.
+async function recordedBody(body){
+ const encoded=new Response(body),type=encoded.headers.get('Content-Type'),bytes=new Uint8Array(await encoded.arrayBuffer()),record={reads:0};let offset=0;
+ const stream=new ReadableStream({pull(controller){record.reads++;if(offset>=bytes.length)return controller.close();controller.enqueue(bytes.slice(offset,offset+=1024));}},{highWaterMark:0});
+ return {request:path=>new Request(origin+base+path,{method:'POST',headers:{'Content-Type':type,Origin:origin},body:stream,duplex:'half'}),record};
+}
+test('A busy answer comes before the upload is read: another call of the account, or every slot taken, costs no body and no daily call',async t=>{
+ const {sqlite,env}=sqliteEnvironment(t);let calls=0;
+ t.mock.method(globalThis,'fetch',async()=>{calls++;return Response.json({document:document(),originalPdfBase64:btoa(pdf)});});
+ const chunk=()=>{const form=extractForm();form.set('sourceSha256','a'.repeat(64));form.set('pageOffset','10');form.set('pages','1-2');return form;};
+ const bodies=()=>[['/extract',extractForm()],['/extract',chunk()],['/refresh',JSON.stringify({assetId,forceClone:true})],['/render',JSON.stringify({assetId,historyId})]];
+ const leases=()=>sqlite.prepare('SELECT key,token FROM service_leases ORDER BY key').all().map(row=>`${row.key}=${row.token}`);
+ const hold=(key,token)=>sqlite.prepare('INSERT INTO service_leases(key,token,expires_at) VALUES(?,?,?)').run(key,token,Date.now()+60000);
+ // Another tab of this account is extracting; then two other students hold both slots of the site.
+ for(const [held,status,code,wait] of [[[['pdf:student-1','other-tab']],429,'pdf_busy','30'],[[['pdf-slot:0','student-2'],['pdf-slot:1','student-3']],503,'pdf_service_busy','20']]){
+  sqlite.prepare('DELETE FROM service_leases').run();for(const [key,token] of held)hold(key,token);const before=leases();
+  for(const [path,body] of bodies()){
+   const {request,record}=await recordedBody(body),response=await pdfLayoutRoute(request(path),env,base+path,reader);
+   assert.equal(response.status,status,path);assert.equal(response.headers.get('Retry-After'),wait,path);assert.equal((await response.json()).code,code,path);
+   assert.equal(record.reads,0,`${path}: not a byte of the upload was read`);
+  }
+  assert.deepEqual(leases(),before,'the account\'s lease taken on the way is given back');
+ }
+ assert.equal(calls,0);assert.equal(sqlite.prepare('SELECT COUNT(*) AS n FROM rate_limits').get().n,0,'no daily call used');
+ // Once a slot is free, the same kind of upload is read and extracted.
+ sqlite.prepare('DELETE FROM service_leases').run();
+ const {request,record}=await recordedBody(extractForm()),response=await pdfLayoutRoute(request('/extract'),env,base+'/extract',reader);
+ assert.equal(response.status,201);assert.ok(record.reads>0);assert.equal(calls,1);assert.equal(count(sqlite,`pdf-extract:${reader.id}`),1);
+});
+
+test('GET capacity tells a waiting browser whether its call would find a place, in one read of D1 that takes nothing',async t=>{
+ const {sqlite,env}=sqliteEnvironment(t),statements=[],db=env.DB;
+ env.DB={prepare:sql=>{statements.push(sql);return db.prepare(sql);},batch:list=>db.batch(list)};
+ const ask=async(owner=reader,vars=env)=>{statements.length=0;const response=await pdfLayoutRoute(new Request(origin+base+'/capacity'),vars,base+'/capacity',owner);return {status:response.status,cache:response.headers.get('Cache-Control'),body:await response.json(),queries:statements.length};};
+ const hold=(key,ms=60000)=>sqlite.prepare('INSERT INTO service_leases(key,token,expires_at) VALUES(?,?,?)').run(key,'held',Date.now()+ms);
+ assert.deepEqual(await ask(),{status:200,cache:'no-store',body:{busy:false,free:2,slots:2,retryAfter:null},queries:1});
+ hold('pdf-slot:0');assert.deepEqual((await ask()).body,{busy:false,free:1,slots:2,retryAfter:null});
+ hold(`pdf:${reader.id}`);assert.deepEqual((await ask()).body,{busy:true,free:1,slots:2,retryAfter:30},'this account\'s own call is still running');
+ assert.deepEqual((await ask(other)).body,{busy:false,free:1,slots:2,retryAfter:null},'another student is not held up by it');
+ hold('pdf-slot:1');assert.deepEqual((await ask(other)).body,{busy:true,free:0,slots:2,retryAfter:20});assert.deepEqual((await ask()).body,{busy:true,free:0,slots:2,retryAfter:30});
+ // A lease nobody renewed is free; a slot past PDF_LAYOUT_SLOTS (left from a larger setting) is not counted.
+ sqlite.prepare("UPDATE service_leases SET expires_at=? WHERE key IN ('pdf-slot:1',?)").run(Date.now()-1,`pdf:${reader.id}`);hold('pdf-slot:12');
+ assert.deepEqual((await ask()).body,{busy:false,free:1,slots:2,retryAfter:null});
+ env.PDF_LAYOUT_SLOTS='3';assert.deepEqual((await ask()).body,{busy:false,free:2,slots:3,retryAfter:null});
+ // Asking takes no lease and uses no daily call; without D1 the hint says free (the call itself still takes its leases).
+ assert.equal(sqlite.prepare('SELECT COUNT(*) AS n FROM service_leases').get().n,4);assert.equal(sqlite.prepare('SELECT COUNT(*) AS n FROM rate_limits').get().n,0);
+ const withoutDb={...env};delete withoutDb.DB;assert.deepEqual((await ask(reader,withoutDb)).body,{busy:false,free:3,slots:3,retryAfter:null});
+ const path=base+'/capacity',url=new URL(origin+path),signedOut={...env,DB:{prepare(){return {bind(){return this;},async first(){return null;}};}}};
+ assert.equal((await studyRoute(new Request(url),signedOut,url,path)).status,401,'only for a signed-in student');
+});
+
+test('A refresh too heavy for one job keeps the old copy, says how to go on, and gives the day\'s extraction back',async t=>{
+ const {sqlite,env}=sqliteEnvironment(t),prior=document();prior.totalPages=40;
+ for(const number of [5,9]){const page=structuredClone(prior.pages[0]);page.number=number;page.blocks.forEach(b=>b.id=b.id.replace(/^p4-/u,`p${number}-`));prior.pages.push(page);}
+ await env.FILES.put(assetKey(reader,'manifest.json'),JSON.stringify(prior));await env.FILES.put(assetKey(reader,'original.pdf'),new TextEncoder().encode(pdf));
+ const writes=env.FILES.writes.length,asked=[];let answer;
+ t.mock.method(globalThis,'fetch',async(url,options)=>{asked.push(options.headers);await new Response(options.body).arrayBuffer();return answer();});
+ const refresh=()=>browserError(()=>pdfLayoutRoute(jsonRequest(base+'/refresh',{assetId,forceClone:true}),env,base+'/refresh',reader));
+ // As the service numbers them: pages 1-3 of the stored range.
+ const selected=count=>{const doc=structuredClone(prior);doc.pages=doc.pages.slice(0,count).map((page,i)=>{page.number=i+1;page.blocks.forEach(b=>b.id=b.id.replace(/^p\d+-/u,`p${i+1}-`));return page;});doc.extractionVersion=3;doc.totalPages=3;return doc;};
+ const advice='Chưa cập nhật được bố cục của bản dịch này: 3 trang của nó (trang 4-5, 9) quá nặng để dịch vụ PDF xử lý hết trong một lượt. Bản dịch cũ vẫn còn nguyên trong Lịch sử dịch. Hãy chọn lại PDF gốc rồi dịch lại các trang đó thành nhiều lượt nhỏ hơn, ví dụ 3–5 trang mỗi lượt.';
+ // The service stopped after the first page (its time budget, or its size limits): the pages it did cannot replace the range.
+ answer=()=>{const doc=selected(1);doc.warnings=['Lượt này xử lý 1/3 trang đã chọn (trang 1) vì đã dùng hết thời gian xử lý của một lượt. Hãy dịch tiếp trang 2-3 ở lượt sau.'];return Response.json({document:doc,originalPdfBase64:btoa(pdf)});};
+ const short=await refresh();
+ assert.equal(short.status,413);assert.deepEqual(short.data,{error:advice,code:'pdf_too_large'});
+ assert.equal(asked[0]['X-PDF-All-Pages'],'1','the service may give this job its whole time limit');assert.equal(asked[0]['X-PDF-Pages'],'1-3');
+ // Out of time even so: the same advice, with the service's kind of failure.
+ answer=()=>Response.json({error:'Tách PDF vượt thời gian cho phép. Hãy chọn ít trang hơn cho mỗi lượt.',code:'timeout'},{status:422});
+ const late=await refresh();assert.equal(late.status,413);assert.deepEqual(late.data,{error:advice,code:'pdf_timeout'});
+ assert.equal(env.FILES.writes.length,writes,'nothing stored');assert.equal(count(sqlite,`pdf-extract:${reader.id}`),0,'nothing kept: the day\'s extractions are given back');
+ // Every page back: refreshed, and counted.
+ answer=()=>Response.json({document:selected(3),originalPdfBase64:btoa(pdf)});
+ const done=await pdfLayoutRoute(jsonRequest(base+'/refresh',{assetId,forceClone:true}),env,base+'/refresh',reader);
+ assert.equal(done.status,201);assert.deepEqual((await done.json()).document.pages.map(page=>page.number),[4,5,9]);assert.equal(count(sqlite,`pdf-extract:${reader.id}`),1);
+});
+
+test('A PDF service that refuses the Worker (another token or URL) is out of reach for students, logged for the operator, and costs no daily call',async t=>{
+ const {sqlite,env}=sqliteEnvironment(t),logs=[];t.mock.method(console,'error',line=>logs.push(String(line)));
+ let status;t.mock.method(globalThis,'fetch',async()=>Response.json({error:'Unauthorized'},{status}));
+ for(status of [401,403,404]){
+  const error=await browserError(()=>extract(env));
+  assert.equal(error.status,503,String(status));assert.deepEqual(error.data,{error:'Dịch vụ PDF đang tạm ngừng. Hãy thử lại sau ít phút; nếu lỗi kéo dài, hãy báo quản trị viên.',code:'pdf_unavailable',retryAfter:30});assert.equal(error.retryAfter,30);
+  assert.equal(classifyError(error,'extract').reason,'network','a whole-book run backs off and tries again');
+ }
+ const refused=logs.filter(line=>line.includes('"event":"pdf_service_refused"'));assert.equal(refused.length,3);assert.match(refused[0],/"operation":"extract","status":401/u);assert.doesNotMatch(logs.join('\n'),/service-secret/u);
+ // On the machine running both (npm start), the answer names the settings to compare.
+ status=401;const local=await browserError(()=>extract({...env,PDF_LAYOUT_SERVICE_URL:'http://127.0.0.1:18191'}));
+ assert.equal(local.data.code,'pdf_unavailable');assert.match(local.data.error,/PDF_LAYOUT_SERVICE_TOKEN hoặc PDF_LAYOUT_SERVICE_URL trong \.dev\.vars/u);
+ // A busy service, one out of reach and a font the service lacks did not do the call either.
+ t.mock.method(globalThis,'fetch',async()=>Response.json({error:'Dịch vụ PDF đang bận. Hãy thử lại sau.',code:'busy',retryAfter:20},{status:503,headers:{'Retry-After':'20'}}));
+ assert.equal((await browserError(()=>extract(env))).data.code,'pdf_service_busy');
+ t.mock.method(globalThis,'fetch',async()=>{throw new TypeError('fetch failed');});
+ assert.equal((await browserError(()=>extract(env))).data.code,'pdf_unavailable');
+ const noFont='Dịch vụ PDF đang thiếu phông chữ để dựng bản PDF tiếng Việt, nên chưa xuất được PDF. Hãy báo quản trị viên; bản dịch vẫn được lưu trong Lịch sử dịch.';
+ t.mock.method(globalThis,'fetch',async()=>Response.json({error:noFont,code:'font'},{status:500}));
+ const font=await browserError(()=>pdfLayoutRoute(new Request(origin+base+'/font'),{...env,PDF_LAYOUT_SERVICE_URL:'https://font-missing.example.test/'},base+'/font',reader));
+ assert.equal(font.status,503);assert.deepEqual(font.data,{error:noFont,code:'pdf_unavailable',retryAfter:30});
+ assert.equal(count(sqlite,`pdf-extract:${reader.id}`),0,'none of these used up a daily call');
+ t.mock.method(globalThis,'fetch',async()=>Response.json({document:document(),originalPdfBase64:btoa(pdf)}));
+ assert.equal((await extract(env)).status,201);assert.equal(count(sqlite,`pdf-extract:${reader.id}`),1,'a call the service did is counted');
 });

@@ -115,11 +115,11 @@ test('Deleting an account removes its whole-book runs itself, also where foreign
 
 test('Deleting an account removes the wrong-password counts kept for it; a network\'s count stays',async t=>{
  const {sqlite,env,lan}=await environment(t),{failureKey}=await import('./reader-auth.js');
- for(const name of [`password:${lan}`,'login-email:lan@example.test','login-network:203.0.113.9','login-email:user-minh@example.test'])sqlite.prepare('INSERT INTO auth_failures(key,level,updated_at,locked_until) VALUES(?,?,?,0)').run(await failureKey(name),3,Date.now());
+ for(const name of [`password:${lan}`,'login-email:lan@example.test','login-network:203.0.113.9','login-email:user-minh@example.test'])sqlite.prepare('INSERT INTO auth_failures(key,level,updated_at,locked_until) VALUES(?,?,?,0)').run(await failureKey(env,name),3,Date.now());
  assert.equal(await deleteAccount(env,lan),'deleted');
  // Minh signs in with Google only: passwords typed for her address were counted under it too.
  assert.equal(await deleteAccount(env,'user-minh'),'deleted');
- assert.deepEqual(sqlite.prepare('SELECT key FROM auth_failures').all().map(row=>row.key),[await failureKey('login-network:203.0.113.9')]);
+ assert.deepEqual(sqlite.prepare('SELECT key FROM auth_failures').all().map(row=>row.key),[await failureKey(env,'login-network:203.0.113.9')]);
 });
 
 test('Deleting an account removes the daily counts kept under its id, the new-history cap included; others stay',async t=>{

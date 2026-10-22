@@ -15,16 +15,17 @@ const source=(await readFile(new URL('../frontend/app.js',import.meta.url),'utf8
 const settle=()=>new Promise(done=>setTimeout(done,20));
 const story=(id,extra={})=>({id,title:`Sách ${id}`,author:'',genre:'Lịch sử Trung Hoa',cover_key:null,cover_page:null,source_url:null,owner_user_id:null,visibility:'public',created_at:'2026-10-20 08:00:00',glossary:'{}',owner_name:null,owner_email:null,chapters:1,...extra});
 const job=(id,extra={})=>({id,story_id:'s1',filename:`${id}.txt`,file_key:null,mime:'text/plain',status:'review',progress:'',error:null,source_key:null,translation_key:null,created_at:'2026-10-20 08:00:00',has_translation:1,warning_count:0,story_title:'Sử ký',genre:'Lịch sử Trung Hoa',...extra});
-function console_(server,elements={}){
+// all(selector): what document.querySelectorAll answers (nothing by default); globals: more of the page's globals.
+function console_(server,elements={},{all=()=>[],globals={}}={}){
  const root={innerHTML:''},calls=[],intervals=[],timeouts=[],listeners={},location={pathname:'/admin',hash:'',search:'',origin:'https://hoatri.test'};
  const toast={textContent:'',className:'',setAttribute(){}},modal={open:false,innerHTML:'',close(){this.open=false;},showModal(){this.open=true;},addEventListener(){},removeAttribute(){}};
- const document={title:'',visibilityState:'visible',querySelector:selector=>({'#app':root,'#toast':toast,'#modal':modal,...elements})[selector]||null,querySelectorAll:()=>[],addEventListener(type,fn){(listeners[type]||=[]).push(fn);}};
+ const document={title:'',visibilityState:'visible',querySelector:selector=>({'#app':root,'#toast':toast,'#modal':modal,...elements})[selector]||null,querySelectorAll:selector=>all(selector,root),addEventListener(type,fn){(listeners[type]||=[]).push(fn);}};
  const context=vm.createContext({musicMarkup:()=>'',bindMusic(){},renderMathText,mathStyles,termMatcher,highlightTerms,bindTermPopover,hideTermPopover(){},attachHanziLookup(){},openHanziPanel(){},closeHanziPanel(){},setHanziTheme(){},footerHtml,isSample,sampleBadge,sampleCardNote,sampleIntro,sampleReaderNotice,SAMPLE_LABEL,bilingualSource,mountBilingual(){return {destroy(){}};},mountPdfPages(){return {destroy(){}};},releaseBilingual(){},inAppBrowser:()=>null,openInBrowserHelp(){},
-  location,document,matchMedia:()=>({matches:false,addEventListener(){}}),localStorage:{getItem:()=>null},sessionStorage:{getItem:()=>null,setItem(){},removeItem(){}},window:{addEventListener(type,fn){(listeners[type]||=[]).push(fn);}},setTimeout:(fn,ms)=>{timeouts.push({fn,ms});const timer=setTimeout(fn,ms);timer.unref?.();return timer;},clearTimeout,setInterval:fn=>{intervals.push(fn);return intervals.length;},clearInterval(){},FormData,console});
+  location,document,matchMedia:()=>({matches:false,addEventListener(){}}),localStorage:{getItem:()=>null},sessionStorage:{getItem:()=>null,setItem(){},removeItem(){}},window:{addEventListener(type,fn){(listeners[type]||=[]).push(fn);}},setTimeout:(fn,ms)=>{timeouts.push({fn,ms});const timer=setTimeout(fn,ms);timer.unref?.();return timer;},clearTimeout,setInterval:fn=>{intervals.push(fn);return intervals.length;},clearInterval(){},FormData,console,...globals});
  context.fetch=async(url,init={})=>{
-  calls.push({url,method:init.method||'GET',body:init.body});await new Promise(done=>setTimeout(done,1));
+  calls.push({url,method:init.method||'GET',body:init.body,headers:init.headers||{}});await new Promise(done=>setTimeout(done,1));
   const [status,body,headers={}]=await server(url,init)||(url==='/api/status'?[200,{authenticated:true}]:[200,[]]);
-  return {ok:status<300,status,headers:{get:name=>headers[name]??null},json:async()=>body};
+  return {ok:status<300,status,headers:{get:name=>headers[name]??null},json:async()=>body,blob:async()=>new Blob([body instanceof Uint8Array?body:JSON.stringify(body)],{type:headers['Content-Type']||'application/json'})};
  };
  vm.runInContext(source,context);
  return {root,calls,intervals,timeouts,listeners,document,toast,modal,urls:()=>calls.map(call=>call.url),run:code=>vm.runInContext(code,context)};
@@ -109,6 +110,36 @@ test('Students: the book counts come with the accounts; each one\'s books load w
  assert.equal(page.run(`adminStory('b2').visibility`),'public','actions on a shelf book find it');
  page.run(`loadUserBooks('u1',{more:true})`);await settle();
  assert.equal(page.run(`state.userBooks.u1.rows.length`),3);assert.doesNotMatch(page.run('usersView()'),/data-user-books-more/u);
+});
+
+// An <img> cannot send the admin's token, and the admin has no reader cookie: the covers of private books (a student's,
+// an unpublished draft) are fetched with the token into object URLs, revoked when the admin opens another view.
+test('Covers of private books load with the admin token as object URLs, are reused while the view stays, and are revoked when it changes',async()=>{
+ const users=[{id:'u1',email:'lan@example.test',name:'Lan',provider:'local',books:3,requests:0}];
+ const shelf=[story('b1',{owner_user_id:'u1',visibility:'private',cover_key:'covers/b1-1.jpg'}),story('b2',{owner_user_id:'u1',visibility:'public',cover_key:'covers/b2-1.jpg'}),story('b3',{owner_user_id:'u1',visibility:'private',cover_key:'covers/b3-1.jpg'})];
+ // The <img> elements a render makes, as the page would hold them (an attribute removed, an element replaced).
+ let drawn=null,images=[];
+ const all=(selector,root)=>{
+  if(selector!=='img[data-admin-cover]')return [];
+  if(root.innerHTML!==drawn){drawn=root.innerHTML;images=[...drawn.matchAll(/<img class="book-cover" src="([^"]*)" data-admin-cover="([^"]+)" data-cover-key="([^"]+)" alt="([^"]*)">/gu)].map(([,src,id,key,alt])=>({src,alt,dataset:{adminCover:id,coverKey:key},replaced:null,removeAttribute(name){if(name==='data-admin-cover')delete this.dataset.adminCover;},set outerHTML(value){this.replaced=value;}}));}
+  return images.filter(image=>image.dataset.adminCover&&!image.replaced);
+ };
+ const made=[],revoked=[],URL={createObjectURL:blob=>{made.push(blob);return `blob:cover-${made.length}`;},revokeObjectURL:url=>{revoked.push(url);}};
+ const page=console_((url,init)=>url==='/api/users'?[200,users]:url==='/api/user-library?user=u1&offset=0&limit=100'?[200,shelf]:url==='/api/covers/b1?v=covers%2Fb1-1.jpg'?(init.headers?.Authorization==='Bearer admin-token-0123456789-abcdef'?[200,new Uint8Array([255,216,255,224]),{'Content-Type':'image/jpeg'}]:[404,{error:'Không tìm thấy ảnh bìa hoặc bạn không có quyền xem.'}]):url.startsWith('/api/covers/')?[404,{error:'Chưa có ảnh bìa.'}]:null,{},{all,globals:{URL}});
+ await settle();
+ page.run(`token='admin-token-0123456789-abcdef';state.route='users';loadUserBooks('u1')`);await settle();await settle();
+ const html=page.root.innerHTML,first=images;
+ assert.match(html,/<img class="book-cover" src="\/api\/covers\/b2\?v=covers%2Fb2-1\.jpg" alt="Bìa Sách b2" loading="lazy">/u,'a public cover needs no token');
+ const coverCalls=page.calls.filter(call=>call.url.startsWith('/api/covers/'));
+ assert.deepEqual(coverCalls.map(call=>[call.url,call.headers.Authorization]),[['/api/covers/b1?v=covers%2Fb1-1.jpg','Bearer admin-token-0123456789-abcdef'],['/api/covers/b3?v=covers%2Fb3-1.jpg','Bearer admin-token-0123456789-abcdef']]);
+ assert.equal(first[0].src,'blob:cover-1');assert.equal(made.length,1);assert.match(first[1].replaced,/cover-placeholder[\s\S]*Chưa có ảnh bìa/u,'a cover that cannot be loaded shows the placeholder');
+ // Drawn again in the same view: the object URL is reused, nothing is fetched again.
+ page.run('render()');
+ assert.match(page.root.innerHTML,/<img class="book-cover" src="blob:cover-1" alt="Bìa Sách b1">/u);assert.equal(page.calls.filter(call=>call.url.startsWith('/api/covers/')).length,2);assert.deepEqual(revoked,[]);
+ // Another view: the URL is revoked; signing out leaves none behind either.
+ page.run(`go('stories')`);assert.deepEqual(revoked,['blob:cover-1']);
+ page.run(`go('users')`);await settle();assert.equal(made.length,2,'back in the view, the cover is fetched again');
+ await page.run('logout()');assert.deepEqual(revoked,['blob:cover-1','blob:cover-2']);
 });
 
 // Translation requests waiting for the admin are counted on the "Yêu cầu dịch" button and in the tab's title. A console

@@ -72,14 +72,23 @@ const utf8Length=text=>{let bytes=0;for(let i=0;i<text.length;i++){const code=te
 const STORED_SIZE='CASE WHEN stored_bytes>0 THEN stored_bytes ELSE 6*source_characters+4*translation_characters END';
 const storedSize=row=>Number(row?.stored_bytes)>0?Number(row.stored_bytes):6*(Number(row?.source_characters)||0)+4*(Number(row?.translation_characters)||0);
 const sizeLabel=bytes=>bytes>=10*MB?`${number(Math.round(bytes/MB))} MB`:`${(bytes/MB).toFixed(1).replace('.',',')} MB`;
+const roomLimits=env=>({maxItems:dailyMax(env,'MAX_HISTORY_PER_USER',300),maxBytes:dailyMax(env,'MAX_HISTORY_MB_PER_USER',500)*MB});
 async function historyRoom(env,userId,existing,bytes){
- const maxItems=dailyMax(env,'MAX_HISTORY_PER_USER',300),maxBytes=dailyMax(env,'MAX_HISTORY_MB_PER_USER',500)*MB,previous=existing?storedSize(existing):0;
+ const {maxItems,maxBytes}=roomLimits(env),previous=existing?storedSize(existing):0;
  if(!maxItems&&!maxBytes||existing&&bytes<=previous)return null;
  const row=await env.DB.prepare(`SELECT COUNT(*) AS items,COALESCE(SUM(${STORED_SIZE}),0) AS bytes FROM study_sessions WHERE user_id=?`).bind(userId).first();
  const items=Number(row?.items)||0,used=Number(row?.bytes)||0,full=reason=>reply({error:`${reason} Hãy xóa trong Lịch sử dịch những bản dịch không cần nữa rồi thử lại.`,code:'history_full',items,maxItems,bytes:used,maxBytes},413);
  if(!existing&&maxItems&&items>=maxItems)return full(`Lịch sử dịch của tài khoản đã có ${number(items)} bản dịch, mức tối đa cho mỗi tài khoản.`);
  if(maxBytes&&used-previous+bytes>maxBytes)return full(`Lịch sử dịch của tài khoản đã chiếm ${sizeLabel(used)}; lưu bản dịch này (${sizeLabel(bytes)}) sẽ vượt mức ${sizeLabel(maxBytes)} cho mỗi tài khoản.`);
  return null;
+}
+// The same check for a new item, made inside the save's transaction: saves sent at once all pass historyRoom before any
+// of them is written. Run first in the batch, it tries to insert a row the CHECK on status refuses whenever the item
+// would not fit, so the whole save fails and nothing of it is kept; an item saved meanwhile under the same id (a save
+// sent again) is an update and passes.
+function roomGuard(env,userId,sessionId,bytes){
+ const {maxItems,maxBytes}=roomLimits(env);if(!maxItems&&!maxBytes)return null;
+ return env.DB.prepare(`INSERT INTO study_sessions(id,user_id,title,state_key,status) SELECT ?1,?2,'','','history_full' WHERE NOT EXISTS (SELECT 1 FROM study_sessions WHERE id=?1) AND (?3>0 AND (SELECT COUNT(*) FROM study_sessions WHERE user_id=?2)>=?3 OR ?4>0 AND (SELECT COALESCE(SUM(${STORED_SIZE}),0) FROM study_sessions WHERE user_id=?2)+?5>?4)`).bind(sessionId,userId,maxItems,maxBytes,bytes);
 }
 // The terms a save gives its book: the student's own first, then the learned ones, within MAX_BOOK_GLOSSARY.
 function bookTerms(state){
@@ -90,7 +99,7 @@ function bookTerms(state){
  }
  return JSON.stringify(terms);
 }
-const CONFLICT='Bản dịch này vừa được lưu từ một thẻ hoặc thiết bị khác. Hãy tải lại bản dịch từ Lịch sử dịch rồi tiếp tục, để không ghi đè phần đã dịch.';
+const CONFLICT='Bản dịch này vừa được lưu từ một tab hoặc thiết bị khác. Hãy tải lại bản dịch từ Lịch sử dịch rồi tiếp tục, để không ghi đè phần đã dịch.';
 // The history list comes newest first, HISTORY_PAGE items at a time. When more are left the answer carries
 // X-Next-Before, a cursor naming the last item (its updated_at and id, opaque to the browser); ?before=<cursor> answers
 // the items after it. Keyset paging: an item saved meanwhile moves to the top, so no item is listed twice or skipped.
@@ -459,11 +468,20 @@ export async function studyHistoryRoute(request,env,path,reader){
  // only the book of an existing chapter; keeping the stored book then avoids pointing back at a deleted story.
  statements.push(env.DB.prepare(`INSERT INTO study_sessions(id,user_id,title,filename,domain,subject,mode,status,state_key,source_preview,translation_preview,translated_parts,total_parts,source_characters,translation_characters,library_story_id,library_chapter_id,page_start,page_end,source_total_pages,source_sha256,source_pages,pdf_asset_id,translated_at,stored_bytes,revision)
   VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,CASE WHEN ? THEN NULL ELSE CURRENT_TIMESTAMP END,?,1) ON CONFLICT(id) DO UPDATE SET revision=study_sessions.revision+1,stored_bytes=excluded.stored_bytes,translated_at=COALESCE(excluded.translated_at,study_sessions.translated_at,CURRENT_TIMESTAMP), title=excluded.title,filename=excluded.filename,domain=excluded.domain,subject=excluded.subject,mode=excluded.mode,status=excluded.status,state_key=excluded.state_key,source_preview=excluded.source_preview,translation_preview=excluded.translation_preview,translated_parts=excluded.translated_parts,total_parts=excluded.total_parts,source_characters=excluded.source_characters,translation_characters=excluded.translation_characters,library_story_id=CASE WHEN study_sessions.library_chapter_id IS NOT NULL AND study_sessions.library_chapter_id=excluded.library_chapter_id THEN study_sessions.library_story_id ELSE excluded.library_story_id END,library_chapter_id=excluded.library_chapter_id,page_start=excluded.page_start,page_end=excluded.page_end,source_total_pages=excluded.source_total_pages,source_sha256=excluded.source_sha256,source_pages=excluded.source_pages,pdf_asset_id=excluded.pdf_asset_id,updated_at=CURRENT_TIMESTAMP WHERE user_id=excluded.user_id`).bind(sessionId,reader.id,title,filename,checkedDomain,domain,mode,status,key,state.source.slice(0,PREVIEW),state.translation.slice(0,PREVIEW),state.done,state.parts.length,state.source.length,state.translation.length,libraryStoryId,chapterId,pages.start,pages.end,pages.total,pages.sha256,pages.list,state.pdfLayout?.assetId||null,sameTranslation?1:0,storedBytes));
+ const guard=existing?null:roomGuard(env,reader.id,sessionId,storedBytes);if(guard)statements.unshift(guard);
  const written=[key,...(state.complete?[translatedKey]:[])];
  await env.FILES.put(key,stateJson,{httpMetadata:{contentType:'application/json; charset=utf-8'}});
  if(state.complete)await env.FILES.put(translatedKey,state.translation,{httpMetadata:{contentType:'text/plain; charset=utf-8'}});
  // An account deleted meanwhile keeps none of this: its rows cannot be written (or went with it), its files go here.
- try{await env.DB.batch(statements);}catch(error){if(!await accountKept(env,reader.id,written))return accountGone();throw error;}
+ // A new item the guard refused (saves sent at once took the room) keeps none either; its files are its own unless the
+ // same save, sent again, landed meanwhile.
+ try{await env.DB.batch(statements);}
+ catch(error){
+  if(!await accountKept(env,reader.id,written))return accountGone();
+  const full=guard?await historyRoom(env,reader.id,null,storedBytes):null;
+  if(full){if(!await existingSession(env,sessionId,reader.id))await removeKeys(env,written);return full;}
+  throw error;
+ }
  // The revision this save made, which the next save from this tab names; read back, as a save from elsewhere may have
  // landed in between.
  const revision=Number((await env.DB.prepare('SELECT revision FROM study_sessions WHERE id=? AND user_id=?').bind(sessionId,reader.id).first())?.revision)||(existing?(Number(existing.revision)||0)+1:1);

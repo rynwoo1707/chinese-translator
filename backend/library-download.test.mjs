@@ -51,12 +51,12 @@ async function book(t){
 }
 // app.js as the reader's page runs it: imports stripped and given, fetch to the Worker, the PDF it saves kept.
 const source=(await readFile(new URL('../frontend/app.js',import.meta.url),'utf8')).replace(/^import .*\r?\n/gmu,'');
-async function reader(env){
+async function reader(env,{fetch=null}={}){
  const saved=[],root={innerHTML:''};
  const context=vm.createContext({musicMarkup:()=>'',bindMusic(){},renderMathText,mathStyles,termMatcher,highlightTerms,bindTermPopover,hideTermPopover(){},attachHanziLookup(){},openHanziPanel(){},closeHanziPanel(){},setHanziTheme(){},footerHtml,isSample,sampleBadge,sampleCardNote,sampleIntro,sampleReaderNotice,SAMPLE_LABEL,bilingualSource,mountBilingual(){return {destroy(){}};},releaseBilingual(){},
   location:{pathname:'/',hash:'',search:''},document:{querySelector:selector=>selector==='#app'?root:null,querySelectorAll:()=>[],createElement:()=>({click(){},remove(){}}),body:{append(){}}},localStorage:{getItem:()=>null},window:{addEventListener(){}},
   URL:{createObjectURL:blob=>{saved.push(blob);return 'blob:hoatri';},revokeObjectURL(){}},Blob,setTimeout:(fn,ms)=>{const timer=setTimeout(fn,ms);timer.unref?.();return timer;},clearTimeout,clearInterval,FormData,console});
- context.fetch=(url,init={})=>worker.fetch(new Request(new URL(url,ORIGIN),{method:init.method||'GET',headers:init.headers,body:init.body}),env,{});
+ context.fetch=fetch||((url,init={})=>worker.fetch(new Request(new URL(url,ORIGIN),{method:init.method||'GET',headers:init.headers,body:init.body}),env,{}));
  vm.runInContext(source,context);
  const run=code=>vm.runInContext(code,context);run('loadBookLibraries=()=>Promise.resolve(libraries)');
  context.libraries={PDFLib,pdfjs,assembly,covers:{detectCoverInBytes:async()=>({})}};
@@ -83,4 +83,24 @@ test('"Tải cả quyển" of a public book joins a PDF part without page number
   'Phần “Lời nói đầu” là bản dịch dạng chữ, không có trang PDF, nên không có trong tệp ghép; phần này vẫn đọc được trong Thư viện.'
  ]);
  assert.doesNotMatch(result.notes.join(' '),/Xưởng dịch|Thư viện riêng/u,'a library reader is never sent to the workspace');
+});
+
+// A student's book from "Dịch cả quyển": cover 1, pages 2–3 and 5–6 translated, page 4 blank inside the one part 2–6.
+// Xưởng dịch says "Đã dịch xong cả quyển: 4/4 trang"; the reader's download counts the same four pages.
+test('"Tải cả quyển" of a whole-book run counts a blank page inside a part as kept, as Xưởng dịch counts it',async()=>{
+ const original=await pdf(['Bia','Goc 2','Goc 3','Trang trong','Goc 5','Goc 6']),sha256=hex(original),rendered=await pdf(['Dich 2','Dich 3','Trang trong','Dich 5','Dich 6']);
+ const part={id:'c1',title:'Trang 2–6',position:1,mime:'application/pdf',sessionId:'s1',filename:'sach.pdf',pageStart:2,pageEnd:6,totalPages:6,sha256,pages:[2,3,4,5,6],updatedAt:'2026-10-22 08:00:00',translatedAt:'2026-10-22 08:00:00',layout:true,file:'/api/chapter-file/c1'};
+ const answers=(jobs)=>({'/api/my/study/books/book-1/assembly':{id:'book-1',title:'Sách học',cover:{image:false,page:0,sha256:null},parts:[part],storedSources:[{sha256,pages:6,url:`/api/my/study/sources/${sha256}`}]},...(jobs?{'/api/my/study/book-jobs':{jobs}}:{}),[`/api/my/study/sources/${sha256}`]:original,'/api/chapter-file/c1':rendered});
+ const download=async served=>{
+  const asked=[],fetch=async url=>{const path=new URL(url,ORIGIN).pathname,value=served[path];asked.push(path);return value===undefined?Response.json({error:'Không tìm thấy.'},{status:404}):value instanceof Uint8Array?new Response(value,{headers:{'Content-Type':'application/pdf'}}):Response.json(value);};
+  const {run,saved}=await reader(null,{fetch});
+  run(`state.route='reader';state.chapters=[{id:'c1',title:'Trang 2–6',mime:'application/pdf'}];state.chapter=0;state.readerStory={id:'book-1',title:'Sách học',cover:false,study:true,sample:false,assembly:false};state.bookDownload=null`);
+  await run('downloadWholeBook()');return {result:run('state.bookDownload'),saved,asked};
+ };
+ const {result,saved,asked}=await download(answers([{id:'j1',storyId:'book-1',sourceSha256:sha256,pageStates:'cddbdd',status:'done'},{id:'j2',storyId:'book-2',sourceSha256:sha256,pageStates:'bbbbbb',status:'done'}]));
+ assert.equal(saved.length,1,result.message);assert.deepEqual((await texts(await saved[0].arrayBuffer())).texts,['Bia','Dich 2','Dich 3','Trang trong','Dich 5','Dich 6']);
+ assert.ok(asked.includes('/api/my/study/book-jobs'));
+ assert.equal(result.message,'Đã ghép 6 trang như bản gốc. Đã dịch 4/6 trang; các trang còn lại giữ nguyên bản gốc.');
+ // Without the run's page states (its progress deleted, or the list failed), each page of a part counts as before.
+ const older=await download(answers(null));assert.equal(older.saved.length,1);assert.equal(older.result.message,'Đã ghép 6 trang như bản gốc. Đã dịch 5/6 trang; các trang còn lại giữ nguyên bản gốc.');
 });

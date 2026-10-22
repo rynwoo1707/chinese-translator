@@ -87,7 +87,7 @@
      <p class="whole-book-count"><strong id="whole-book-count"></strong><span id="whole-book-tokens"></span></p>
      <p id="whole-book-note" class="whole-book-note"></p>
      <div id="page-grid" class="page-grid" role="img" aria-label="Tiến độ trang"></div>
-     <ul class="page-legend" aria-hidden="true"><li data-state="pending">Chưa dịch</li><li data-state="working">Đang dịch</li><li data-state="done">Đã dịch</li><li data-state="blank">Trang trống</li><li data-state="cover">Bìa</li><li data-state="skipped">Bỏ qua</li><li data-state="failed">Lỗi</li></ul>
+     <ul class="page-legend" aria-hidden="true"><li data-state="pending">Chưa dịch</li><li data-state="working">Đang dịch</li><li data-state="done">Đã dịch</li><li data-state="nopdf" hidden>Chưa có PDF</li><li data-state="blank">Trang trống</li><li data-state="cover">Bìa</li><li data-state="skipped">Bỏ qua</li><li data-state="failed">Lỗi</li></ul>
      <p id="whole-book-status" class="whole-book-status" role="status" aria-live="polite"></p>
      <a id="book-read" class="whole-book-read" hidden>Đọc sách trong Thư viện riêng</a>
      <p class="hint">Bìa và trang không có chữ Trung giữ nguyên ảnh gốc, không gọi Gemini. Hãy để tab này mở khi dịch; trên điện thoại, nếu chuyển sang ứng dụng khác, việc dịch tạm chờ và tự chạy tiếp khi bạn quay lại.</p>
@@ -103,10 +103,10 @@
      <div class="key-line"><input id="api-key" type="password" autocomplete="off" spellcheck="false" required aria-describedby="key-status key-note" placeholder="Dán khóa API cho phiên này"><button id="clear-key" type="button" title="Xóa khóa khỏi phiên">Xóa</button></div>
      <p id="key-status" class="hint key-status">Chưa nạp khóa cho phiên này.</p>
      <div class="key-help">
-      <a class="key-help-link" href="https://aistudio.google.com/apikey" target="_blank" rel="noopener">Chưa có khóa? Tạo miễn phí ở Google AI Studio<span class="visually-hidden"> (mở trong thẻ mới)</span></a>
+      <a class="key-help-link" href="https://aistudio.google.com/apikey" target="_blank" rel="noopener">Chưa có khóa? Tạo miễn phí ở Google AI Studio<span class="visually-hidden"> (mở trong tab mới)</span></a>
       <ol><li>Đăng nhập Google AI Studio bằng tài khoản Google của bạn.</li><li>Bấm “Create API key” (Tạo khóa API) rồi sao chép khóa.</li><li>Dán khóa vào ô trên và bấm Bắt đầu dịch.</li></ol>
       <p id="key-note">Gói miễn phí có giới hạn số lượt dùng mỗi ngày, và mức dùng được tính vào tài khoản Google của chính bạn. Khóa chỉ nằm trong bộ nhớ của tab này và không bao giờ được lưu lại.</p>
-      <p class="key-terms">Theo <a href="https://ai.google.dev/gemini-api/terms" target="_blank" rel="noopener">điều khoản Gemini API của Google<span class="visually-hidden"> (mở trong thẻ mới)</span></a>, người dùng phải từ 18 tuổi trở lên. Với gói miễn phí, Google có thể dùng nội dung bạn gửi để cải thiện sản phẩm và nhân viên của Google có thể đọc nội dung đó, nên đừng gửi thông tin nhạy cảm. Xem thêm mục <a href="/dieu-khoan#khoa-gemini">Khóa Gemini</a> trong Điều khoản sử dụng.</p>
+      <p class="key-terms">Theo <a href="https://ai.google.dev/gemini-api/terms" target="_blank" rel="noopener">điều khoản Gemini API của Google<span class="visually-hidden"> (mở trong tab mới)</span></a>, người dùng phải từ 18 tuổi trở lên. Với gói miễn phí, Google có thể dùng nội dung bạn gửi để cải thiện sản phẩm và nhân viên của Google có thể đọc nội dung đó, nên đừng gửi thông tin nhạy cảm. Xem thêm mục <a href="/dieu-khoan#khoa-gemini">Khóa Gemini</a> trong Điều khoản sử dụng.</p>
      </div>
     </div>
     <div class="control-grid"><label for="domain">Lĩnh vực tài liệu<select id="domain"><option value="general">Chuyên khảo · Nghiên cứu</option><option value="math">Toán học · STEM</option><option value="history">Lịch sử Trung Hoa</option><option value="physics">Vật lý</option><option value="chemistry">Hóa học</option><option value="biology">Sinh học</option><option value="informatics">Tin học</option></select></label><label id="mode-field" for="mode">Cách dịch<select id="mode"><option value="economy">Tiết kiệm (ít token nhất)</option><option value="balanced">Cân bằng</option><option value="quality">Kỹ hơn (tốn token hơn)</option></select></label></div>

@@ -61,13 +61,13 @@ async function openHistoryItem(page,id){if(!await page.evaluate(()=>document.que
 // The server's history of one text session: saves are checked against its revision as backend/study-history.js does.
 function textServer({item=textItem(),state=textState()}={}){
  const server={item:{...item},state:structuredClone(state),translateCalls:[],saves:[]};
- server.save=(json,status='translating')=>{if(json.revision!==undefined&&json.revision!==server.item.revision)return {fakeStatus:409,json:{error:'Bản dịch này vừa được lưu từ một thẻ hoặc thiết bị khác. Hãy tải lại bản dịch từ Lịch sử dịch rồi tiếp tục, để không ghi đè phần đã dịch.',code:'history_conflict',revision:server.item.revision,updatedAt:server.item.updated_at}};
+ server.save=(json,status='translating')=>{if(json.revision!==undefined&&json.revision!==server.item.revision)return {fakeStatus:409,json:{error:'Bản dịch này vừa được lưu từ một tab hoặc thiết bị khác. Hãy tải lại bản dịch từ Lịch sử dịch rồi tiếp tục, để không ghi đè phần đã dịch.',code:'history_conflict',revision:server.item.revision,updatedAt:server.item.updated_at}};
   server.item.revision++;server.state=structuredClone(json.state);const complete=json.state.done===json.state.parts.length;Object.assign(server.item,{status:complete?'complete':status,translated_parts:json.state.done,mode:json.mode,domain:json.domain});
   return {id:server.item.id,status:server.item.status,libraryStoryId:null,libraryChapterId:null,updatedAt:now(),revision:server.item.revision};};
  return server;
 }
 
-describe('Xưởng dịch: what happens to a session after it started, in Edge',{concurrency:true},()=>{
+describe('Xưởng dịch: what happens to a session after it started, in Edge',{concurrency:4},()=>{
 test('Changing Cách dịch or Lĩnh vực on an opened session translates only the parts left; the saved parts are never sent again or overwritten',{skip,timeout:90000},async()=>{
  const server=textServer();
  const {context,page,bodies,errors}=await openStudy({api:(path,method,json)=>{
@@ -196,9 +196,9 @@ test('A save the server refuses says why and stops before Gemini: a full history
  try{
   await historyLoaded(conflict.page);await openHistoryItem(conflict.page,TEXT_ID);await waitProgress(conflict.page,RESTORED);
   await conflict.page.fill('#api-key',KEY);await conflict.page.click('#translate');await waitProgress(conflict.page,/không gửi thêm yêu cầu tới Gemini|^Hoàn tất/u);
-  assert.equal(elsewhere.translateCalls.length,0,'no Gemini call on a copy that is not the latest');assert.match(await progress(conflict.page),/vừa được lưu từ một thẻ hoặc thiết bị khác/u);assert.deepEqual(elsewhere.state.translationParts,[...DONE,'Bản của thẻ khác.'],'the other tab\'s save is kept');
+  assert.equal(elsewhere.translateCalls.length,0,'no Gemini call on a copy that is not the latest');assert.match(await progress(conflict.page),/vừa được lưu từ một tab hoặc thiết bị khác/u);assert.deepEqual(elsewhere.state.translationParts,[...DONE,'Bản của thẻ khác.'],'the other tab\'s save is kept');
   assert.equal(conflict.bodies.find(entry=>entry.method==='PUT').json.revision,7);
-  assert.match(await conflict.page.textContent('#save-warning'),/^Chưa lưu được tiến độ: Bản dịch này vừa được lưu từ một thẻ hoặc thiết bị khác\. Hãy tải lại bản dịch từ Lịch sử dịch/u);
+  assert.match(await conflict.page.textContent('#save-warning'),/^Chưa lưu được tiến độ: Bản dịch này vừa được lưu từ một tab hoặc thiết bị khác\. Hãy tải lại bản dịch từ Lịch sử dịch/u);
   // One click opens the newest copy (after the usual question about this tab's unsaved part).
   let asked=0;conflict.page.on('dialog',dialog=>{asked++;dialog.accept().catch(()=>{});});
   await conflict.page.click('#save-warning .save-warning-action');await waitProgress(conflict.page,/^Bản dịch đã hoàn tất/u);
@@ -241,9 +241,17 @@ test('A PDF with a password, or a file that is not a PDF, is explained in Vietna
    assert.doesNotMatch(state.body,/No password given|Invalid PDF structure|Đang kiểm tra/u);
    state=await failed('hong.pdf',broken);assert.match(state.status,/^Chưa mở được “hong\.pdf”\. Không đọc được tệp PDF này: tệp bị hỏng, chưa tải về đủ hoặc không phải PDF/u,`layout ${layout}`);assert.doesNotMatch(state.body,/Invalid PDF structure/u);
   }
-  // The same picker then reads a good PDF, layout on again.
+  // The same picker then reads a good PDF, layout on again; the error of the file before leaves the progress line and the
+  // floating action bar of phones (which repeats it).
   await page.check('#pdf-layout-enabled');await pick('tot.pdf',good);await page.waitForFunction(()=>/^1 trang · /u.test(document.querySelector('#file-status').textContent),null,{timeout:30000});
   assert.equal(await page.evaluate(()=>document.querySelector('#pdf-range-options').hidden),false);
+  const lines=()=>page.evaluate(()=>({progress:document.querySelector('#progress').textContent,type:document.querySelector('#progress').className,bar:document.querySelector('#run-bar-status').textContent,barError:document.querySelector('#run-bar-status').classList.contains('error')}));
+  assert.deepEqual(await lines(),{progress:'Chưa bắt đầu.',type:'',bar:'',barError:false});
+  // Photos that cannot be read, then a good PDF: the same.
+  await page.setInputFiles('#source-file',[{name:'trang-1.jpg',mimeType:'image/jpeg',buffer:Buffer.from('không phải ảnh')},{name:'trang-2.jpg',mimeType:'image/jpeg',buffer:Buffer.from('cũng không phải ảnh')}]);
+  await page.waitForSelector('#progress.error',{timeout:30000});assert.match(await page.textContent('#progress'),/^Không đọc được ảnh “trang-1\.jpg”/u);
+  await pick('tot.pdf',good);await page.waitForFunction(()=>!document.querySelector('#progress').className,null,{timeout:30000});
+  assert.deepEqual(await lines(),{progress:'Chưa bắt đầu.',type:'',bar:'',barError:false});
   assert.deepEqual(errors,[]);
  }finally{await context.close();}
 });

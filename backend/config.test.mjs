@@ -109,6 +109,7 @@ test('CI tests and checks the PDF service with its production font, Liberation S
  const testJob=/^ {2}test:\n([\s\S]*?)^ {2}pdf-image:/mu.exec(workflow)?.[1]||'',imageJob=workflow.slice(workflow.indexOf('\n  pdf-image:'));
  assert.match(testJob,/apt-get install[^\n]*\bfonts-liberation2\b/u,'the engine tests render with the image\'s font');
  assert.match(testJob,/fontPath\(\)[\s\S]*?case "\$font" in \*\/LiberationSerif-Regular\.ttf\)/u,'and fail when the engine would pick another one');
+ assert.match(testJob,/case "\$font" in [^\n]*\n\s*test -f "\$font" \|\| \{[^\n]*exit 1; \}/u,'or when the file is not there');
  assert.doesNotMatch(testJob,/DejaVu Serif is the PDF font/u);
  assert.match(imageJob,/grep -qF '"font":"LiberationSerif-Regular\.ttf"'/u,'the built image reports Liberation Serif on /health');
 });
@@ -124,7 +125,7 @@ test('Settings the Worker and the PDF service share are declared where they are 
  assert.equal(Number(/PDF_LAYOUT_JOBS: \$\{PDF_LAYOUT_JOBS:-(\d+)\}/u.exec(compose)?.[1]),slotCount(vars));assert.equal(jobLimit(undefined),slotCount(vars));
  // The extraction time budget reaches the container, at extract.py's default and below the engine's hard stop.
  const budget=Number(/^ +PDF_EXTRACT_SECONDS: \$\{PDF_EXTRACT_SECONDS:-(\d+)\}$/mu.exec(compose)?.[1]);
- const fallback=Number(/os\.getenv\("PDF_EXTRACT_SECONDS"\) or (\d+)/u.exec(read('services/pdf-layout/extract.py'))?.[1]),stop=Number(/TIMEOUT_MS=(\d+)/u.exec(read('services/pdf-layout/engine.mjs'))?.[1])/1000;
+ const fallback=Number(/os\.getenv\("PDF_EXTRACT_SECONDS"\)(?: or |,\s*)(\d+)/u.exec(read('services/pdf-layout/extract.py'))?.[1]),stop=Number(/TIMEOUT_MS=(\d+)/u.exec(read('services/pdf-layout/engine.mjs'))?.[1])/1000;
  assert.equal(budget,fallback);assert.ok(budget>0&&budget<stop,`${budget} s, stopped at ${stop} s`);assert.match(env,/^# PDF_EXTRACT_SECONDS=170$/mu);
  // PDF_LAYOUT_SLOTS belongs to the Worker (wrangler.jsonc), not to the service's .env.
  assert.match(env,/PDF_LAYOUT_SLOTS, biến của Worker chứ không phải của tệp này: sửa nó trong khối "vars" của\n# wrangler\.jsonc ở repo rồi chạy npm run deploy\./u);

@@ -1,18 +1,15 @@
 import {initKf8File} from '@lingo-reader/mobi-parser';
-import {parseDocument} from 'htmlparser2';
-import {countTags,documentTooLarge,HTML_ELEMENTS} from './document-limits.js';
+import {countTags,documentTooLarge,HTML_ELEMENTS,markupText} from './document-limits.js';
 
-const blocks=new Set(['p','div','section','article','h1','h2','h3','h4','h5','h6','li','blockquote','tr','pre','hr']);
 const NON_READER_SECTION=/(?:^(?:目录|目次|书名页|書名頁)$|^(?:图书在版编目|圖書在版編目|CIP\b|版权(?:页|信息)?|版權(?:頁|資訊)?))/iu;
-const localName=node=>(node.name||'').split(':').pop().toLowerCase();
-function htmlText(node){if(node.type==='text')return node.data.replace(/[\t\r\n ]+/g,' ');const name=localName(node);if(['script','style','head','noscript','rt','rp'].includes(name))return '';if(name==='br')return '\n';const content=(node.children||[]).map(htmlText).join('');return blocks.has(name)?'\n'+content+'\n':name==='td'?content+'\t':content;}
-export function azw3HtmlToText(html){return htmlText(parseDocument(String(html||''),{decodeEntities:true})).replace(/ *\n */g,'\n').replace(/\n{3,}/g,'\n\n').trim();}
 // The library keeps a book's whole decompressed text in memory and copies it again for every text record it adds, so the
 // text a book declares is checked before any of it is decompressed. A stored text record of at most 64 KB decompresses
 // to a bounded size with PalmDOC; HUFF/CDIC (KindleGen's optional "huffdic" compression) expands through a dictionary
-// without any bound and is refused. A chapter is parsed into a tree, like an EPUB chapter.
+// without any bound and is refused. A chapter's markup is read as a stream, like an EPUB chapter (document-limits.js).
 const MAX_TEXT=16*1024*1024,MAX_CHAPTER=8*1024*1024,MAX_RECORD=64*1024,HUFF_CDIC=17480;
 const TOO_LARGE='Sách AZW3 quá lớn để máy chủ đọc an toàn. Hãy dùng Calibre chuyển sách sang EPUB hoặc chia sách thành các tệp nhỏ hơn, rồi thử lại.';
+// The text of a chapter's HTML, the whole document read (a KF8 chapter is a fragment of the book's one HTML flow).
+export function azw3HtmlToText(html){return markupText(String(html||''),{tooComplex:()=>documentTooLarge(TOO_LARGE)}).text.replace(/ *\n */g,'\n').replace(/\n{3,}/g,'\n\n').trim();}
 function guardText(book,fileSize){
  const mobi=book.mobiFile,header=mobi?.palmdocHeader;
  if(header?.compression===HUFF_CDIC)throw documentTooLarge('Sách AZW3 này dùng kiểu nén HUFF/CDIC mà máy chủ chưa đọc an toàn được. Hãy dùng Calibre chuyển sách sang EPUB rồi tải lên.');

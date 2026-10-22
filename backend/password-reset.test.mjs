@@ -73,7 +73,10 @@ test('A link from an admin lets the student set a new password once: signed in, 
  assert.ok(!JSON.stringify(sqlite.prepare('SELECT * FROM reader_password_resets').all()).includes(token));
  const done=await reset(token,NEW);
  assert.equal(done.status,200);assert.deepEqual(done.json,{ok:true});
- assert.match(done.headers.get('Set-Cookie'),/^cat_hien_session=[^;]+; Path=\/; HttpOnly; SameSite=Lax; Max-Age=2592000; Secure$/u);
+ // A new session, and the mark of the new password for this browser (as a password change gives one).
+ const [sessionCookie,deviceCookie,...more]=done.headers.getSetCookie();assert.deepEqual(more,[]);
+ assert.match(sessionCookie,/^cat_hien_session=[^;]+; Path=\/; HttpOnly; SameSite=Lax; Max-Age=2592000; Secure$/u);
+ assert.match(deviceCookie,/^cat_hien_device=[A-Za-z0-9_-]{22}\.[A-Za-z0-9_-]{43}; Path=\/api\/auth\/; HttpOnly; SameSite=Strict; Max-Age=31536000; Secure$/u);
  assert.deepEqual(sessions(lan.id),[await hashToken(done.cookie.split('=')[1])],'the new session is the only one left');
  assert.equal((await me(done.cookie)).user.id,lan.id);
  for(const cookie of [lan.cookie,second.cookie])assert.equal((await me(cookie)).authenticated,false,'whoever knew the old password is signed out');

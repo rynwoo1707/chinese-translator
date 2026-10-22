@@ -9,7 +9,7 @@
 // It never calls Gemini and never prints a secret value. Wrangler runs as `node node_modules/wrangler/bin/wrangler.js`,
 // which works on Windows without a shell.
 import {spawn} from 'node:child_process';
-import {existsSync,mkdtempSync,readFileSync,readdirSync,rmSync} from 'node:fs';
+import {existsSync,mkdtempSync,readFileSync,readdirSync,realpathSync,rmSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {basename,isAbsolute,join,relative,resolve,sep} from 'node:path';
 import {createInterface} from 'node:readline';
@@ -293,6 +293,8 @@ export async function postDeployChecks(base,{fetch=globalThis.fetch,sha=null,adm
     if(layout&&pdf.expectedLayout&&pdf.expectedLayout!==layout)warn(`Worker đang chạy báo mã bố cục ${pdf.expectedLayout}, mã nguồn này là ${layout}: chờ vài phút rồi mở lại ${new URL('/api/health?deep=1',base)}.`);
     if(service&&pdf.version?.service&&pdf.version.service!==service)warn(`Dịch vụ PDF đang chạy bản ${pdf.version.service}, mã nguồn này là bản ${service}: cập nhật dịch vụ PDF trên máy chủ (deploy/pdf-layout/README.md mục A.5).`);
     if(pdf.font&&!/^LiberationSerif/u.test(pdf.font))warn(`Dịch vụ PDF xuất bằng phông ${pdf.font}, không phải Liberation Serif như image chuẩn: chữ Việt có thể nhỏ hơn bản đã thử. Build lại image (deploy/pdf-layout/README.md mục A.5).`);
+    // A service names its font only when the file is there; an image older than /health's font field names none either.
+    else if(!pdf.font)warn('Dịch vụ PDF không báo phông chữ xuất PDF: image thiếu tệp phông (mọi lần xuất PDF tiếng Việt sẽ lỗi) hoặc là bản cũ. Build lại image (deploy/pdf-layout/README.md mục A.5).');
    }
    else if(pdf?.status==='mismatch')bad(`Dịch vụ PDF kiểm tra tài liệu bằng mã bố cục ${pdf.version?.layout||'?'}, còn Worker vừa deploy dùng ${pdf.expectedLayout||'?'}: trang scan có thể bị từ chối ("Ảnh trang PDF không hợp lệ."). Cập nhật dịch vụ PDF ngay (deploy/pdf-layout/README.md mục A.5).`);
    else if(pdf)bad(PDF_SERVICE_PROBLEMS[pdf.status]||`Dịch vụ PDF chưa dùng được (${pdf.status}).`);
@@ -542,5 +544,8 @@ export async function main({argv=process.argv.slice(2),env=process.env,root=ROOT
  return failed?1:0;
 }
 
-const samePath=(a,b)=>process.platform==='win32'?a.toLowerCase()===b.toLowerCase():a===b;
-if(process.argv[1]&&samePath(fileURLToPath(import.meta.url),resolve(process.argv[1])))process.exitCode=await main();
+// Started as a program, also through a symlinked or junction folder: Node runs a module from its real path, while argv[1]
+// keeps the path it was given, so both are compared as real paths.
+const realPath=path=>{const real=realpathSync(path);return process.platform==='win32'?real.toLowerCase():real;};
+const started=()=>{try{return Boolean(process.argv[1])&&realPath(process.argv[1])===realPath(fileURLToPath(import.meta.url));}catch{return false;}};
+if(started())process.exitCode=await main();

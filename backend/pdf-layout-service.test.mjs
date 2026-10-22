@@ -1,8 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {createServer} from 'node:http';
-import {spawn} from 'node:child_process';
-import {existsSync,mkdirSync,mkdtempSync,readFileSync,readdirSync,rmSync,writeFileSync} from 'node:fs';
+import {spawn,spawnSync} from 'node:child_process';
+import {existsSync,lstatSync,mkdirSync,mkdtempSync,readFileSync,readdirSync,rmdirSync,rmSync,symlinkSync,unlinkSync,writeFileSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {fileURLToPath,pathToFileURL} from 'node:url';
@@ -283,9 +283,77 @@ test('Production renders with Liberation Serif (Times New Roman widths, every Vi
  const docker=read('services/pdf-layout/Dockerfile'),{fontPath,LINUX_FONTS}=await import('../services/pdf-layout/engine.mjs');
  assert.match(docker,/apt-get install[^\n]*\bfonts-liberation2\b/u);assert.match(docker,/fontPath\(\)[^\n]*LiberationSerif-Regular\.ttf/u);
  assert.match(LINUX_FONTS[0],/liberation2\/LiberationSerif-Regular\.ttf$/u);assert.match(LINUX_FONTS.at(-1),/DejaVuSerif\.ttf$/u);
- const saved={path:process.env.PDF_FONT_PATH,platform:Object.getOwnPropertyDescriptor(process,'platform')};
- t.after(()=>{if(saved.path===undefined)delete process.env.PDF_FONT_PATH;else process.env.PDF_FONT_PATH=saved.path;Object.defineProperty(process,'platform',saved.platform);});
- process.env.PDF_FONT_PATH='/srv/fonts/Own.ttf';assert.equal(fontPath(),'/srv/fonts/Own.ttf');
+ const saved={path:process.env.PDF_FONT_PATH,platform:Object.getOwnPropertyDescriptor(process,'platform')},dir=mkdtempSync(join(tmpdir(),'hoa-tri-font-'));
+ t.after(()=>{if(saved.path===undefined)delete process.env.PDF_FONT_PATH;else process.env.PDF_FONT_PATH=saved.path;Object.defineProperty(process,'platform',saved.platform);rmSync(dir,{recursive:true,force:true});});
+ const own=join(dir,'Own.ttf');writeFileSync(own,'font');process.env.PDF_FONT_PATH=own;assert.equal(fontPath(),own);
+ // Only a file that is there is named: never a path the service cannot read.
+ process.env.PDF_FONT_PATH=join(dir,'missing.ttf');assert.equal(fontPath(),null);
  delete process.env.PDF_FONT_PATH;Object.defineProperty(process,'platform',{...saved.platform,value:'linux'});
- assert.equal(fontPath(),LINUX_FONTS.find(path=>existsSync(path))||LINUX_FONTS[0]);
+ assert.equal(fontPath(),LINUX_FONTS.find(path=>existsSync(path))||null);
+});
+
+test('Without its font file the service names none: /health says null, /font and an export answer code font, and the image build stops',async t=>{
+ const {fontPath,fontCss}=await import('../services/pdf-layout/engine.mjs'),dir=mkdtempSync(join(tmpdir(),'hoa-tri-font-')),saved=process.env.PDF_FONT_PATH;
+ t.after(()=>{if(saved===undefined)delete process.env.PDF_FONT_PATH;else process.env.PDF_FONT_PATH=saved;rmSync(dir,{recursive:true,force:true});});
+ const liberation=join(dir,'liberation2','LiberationSerif-Regular.ttf').replaceAll('\\','/');process.env.PDF_FONT_PATH=liberation;
+ assert.equal(fontPath(),null);
+ const message='Dịch vụ PDF đang thiếu phông chữ để dựng bản PDF tiếng Việt, nên chưa xuất được PDF. Hãy báo quản trị viên; bản dịch vẫn được lưu trong Lịch sử dịch.';
+ const failed=await fontCss().catch(error=>error);assert.equal(failed.code,'font');assert.equal(failed.message,message);assert.match(String(failed.cause?.message),/LiberationSerif-Regular\.ttf/u);
+ // The service with its real engine: no browser starts, the log names the file looked for.
+ const logs=[],origin=await listen(t,serviceHandler({token:TOKEN,version:null,log:line=>logs.push(line)}).handler);
+ assert.equal((await (await fetch(origin+'/health',{headers:auth})).json()).font,null,'/health never names a font that is not there');
+ const font=await fetch(origin+'/font',{headers:auth});assert.equal(font.status,500);assert.deepEqual(await font.json(),{error:message,code:'font'});
+ const render=await fetch(origin+'/render',{method:'POST',headers:{...auth,'Content-Type':'application/json'},body:JSON.stringify({document:{version:1,pages:[page()]},translations:[{id:'p1-b0',translation:'Vectơ trong không gian.'}],title:'Bài 1'})});
+ assert.equal(render.status,500);assert.deepEqual(await render.json(),{error:message,code:'font'});
+ assert.match(logs.join('\n'),/\/font .*no font file: .*LiberationSerif-Regular\.ttf/u);assert.match(logs.join('\n'),/\/render .*no font file: /u);
+ // The image build runs the same fontPath(): it stops without the file, and with a font that is not Liberation Serif.
+ const check=read('services/pdf-layout/Dockerfile').split(/\r?\n/u).map(line=>/^RUN node -e "(.+)"$/u.exec(line)?.[1]).find(code=>code?.includes('fontPath()'));assert.ok(check,'the Dockerfile checks the font');
+ const {NODE_TEST_CONTEXT,...inherited}=process.env;void NODE_TEST_CONTEXT;
+ const build=path=>spawnSync(process.execPath,['-e',check],{cwd:root,windowsHide:true,encoding:'utf8',env:{...inherited,PDF_FONT_PATH:path}});
+ const missing=build(liberation);assert.equal(missing.status,1,missing.stdout+missing.stderr);assert.match(missing.stdout,/PDF font: none/u);
+ mkdirSync(join(dir,'liberation2'));writeFileSync(liberation,'font');const dejavu=join(dir,'DejaVuSerif.ttf').replaceAll('\\','/');writeFileSync(dejavu,'font');
+ assert.equal(build(dejavu).status,1,'another font stops the build too');
+ const present=build(liberation);assert.equal(present.status,0,present.stdout+present.stderr);
+ // Once the file is there, it is named and read.
+ assert.equal(fontPath(),liberation);assert.match(await fontCss(),/^@font-face\{font-family:HoaTriPDF;src:url\(data:font\/ttf;base64,Zm9udA==\)/u);
+});
+
+test('An all-pages extraction (a refresh) may use the whole time limit; any other keeps the service\'s own budget',async t=>{
+ const saved=process.env.PDF_EXTRACT_SECONDS;process.env.PDF_EXTRACT_SECONDS='170';t.after(()=>{if(saved===undefined)delete process.env.PDF_EXTRACT_SECONDS;else process.env.PDF_EXTRACT_SECONDS=saved;});
+ const node=process.execPath,echo=['-e','process.stdout.write(JSON.stringify({seconds:process.env.PDF_EXTRACT_SECONDS??null}))'];
+ assert.deepEqual(await pythonOperation({pages:'1'},{command:node,args:echo}),{seconds:'170'});
+ assert.deepEqual(await pythonOperation({pages:'1'},{command:node,args:echo,allPages:true}),{seconds:'225'},'240 s hard stop, 15 s to write the answer');
+ assert.deepEqual(await pythonOperation({pages:'1'},{command:node,args:echo,allPages:true,timeoutMs:100000}),{seconds:'85'});
+ // The service hands the Worker's X-PDF-All-Pages on to the job.
+ const seen=[],operations={pythonOperation:async(payload,options)=>{seen.push(options.allPages);return extracted();},renderDocument:async()=>({}),fontCss:async()=>''};
+ const origin=await listen(t,serviceHandler({token:TOKEN,operations,version:null,log:()=>{}}).handler);
+ assert.equal((await extract(origin)).status,200);
+ assert.equal((await extract(origin,{headers:{...auth,'Content-Type':'application/pdf','X-PDF-Pages':'1-3','X-PDF-All-Pages':'1'}})).status,200);
+ assert.deepEqual(seen,[false,true]);
+});
+
+// A folder link to the repository's services folder, as a release layout (/srv/app/current) or a Windows junction makes
+// one. Removed as a link only: its target is never touched.
+function linkedServices(t){
+ const dir=mkdtempSync(join(tmpdir(),'hoa-tri-link-')),link=join(dir,'services');symlinkSync(join(root,'services'),link,'junction');
+ t.after(()=>{
+  try{unlinkSync(link);}catch{try{rmdirSync(link);}catch{}}
+  let gone=false;try{lstatSync(link);}catch{gone=true;}
+  if(gone)rmSync(dir,{recursive:true,force:true});
+ });
+ return {dir,link};
+}
+const freePort=async()=>{const probe=createServer();await new Promise(done=>probe.listen(0,'127.0.0.1',done));const {port}=probe.address();await new Promise(done=>probe.close(done));return port;};
+test('server.mjs and healthcheck.mjs run as programs also when started through a symlinked or junction folder',async t=>{
+ const {dir,link}=linkedServices(t),{NODE_TEST_CONTEXT,...inherited}=process.env;void NODE_TEST_CONTEXT;
+ const port=await freePort(),child=spawn(process.execPath,[join(link,'pdf-layout','server.mjs')],{cwd:dir,windowsHide:true,stdio:['ignore','pipe','pipe'],env:{...inherited,PDF_LAYOUT_SERVICE_TOKEN:TOKEN,PORT:String(port),PDF_LAYOUT_HOST:'127.0.0.1'}});
+ let output='',exited=null;child.stdout.on('data',chunk=>output+=chunk);child.stderr.on('data',chunk=>output+=chunk);child.on('exit',(code,signal)=>{exited=code??signal;});
+ t.after(()=>{if(exited===null)child.kill();});
+ await until(async()=>exited!==null||(await fetch(`http://127.0.0.1:${port}/health`,{headers:auth}).catch(()=>null))?.ok,15000).catch(error=>{throw new Error(`${error.message}: ${output}`);});
+ assert.equal(exited,null,`server.mjs ended at once (code ${exited}) instead of serving: ${output}`);assert.match(output,/PDF layout service ready/u);
+ child.kill();await until(()=>exited!==null);
+ // The health check really asks: with nothing listening on its port it fails, through the link as through the real path.
+ const closed=await freePort(),temp=join(dir,'temp');mkdirSync(temp);
+ const check=script=>spawnSync(process.execPath,[script,'/health','PDF_LAYOUT_SERVICE_TOKEN'],{cwd:dir,windowsHide:true,env:{...inherited,PORT:String(closed),PDF_LAYOUT_SERVICE_TOKEN:TOKEN,PDF_HEALTH_RESTART_AFTER:'0',TMP:temp,TEMP:temp,TMPDIR:temp}}).status;
+ assert.equal(check(join(link,'pdf-layout','healthcheck.mjs')),1,'through the link');assert.equal(check(join(root,'services','pdf-layout','healthcheck.mjs')),1,'through the real path');
 });

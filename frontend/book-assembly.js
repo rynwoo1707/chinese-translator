@@ -19,16 +19,28 @@ export function bookSources(parts){
  sources.forEach((source,index)=>{source.key=source.sha256||`tệp ${index+1}: ${source.filename}`;});
  return {sources,unplaced};
 }
+// The pages the whole-book runs of a book found without Chinese to translate (page state 'b' of GET
+// /api/my/study/book-jobs), by the sha256 of their original: they come from the part's PDF like its other pages but
+// count as kept, as Xưởng dịch counts them ("Đã dịch 4/4 trang" there, never 5 here).
+export function blankPages(jobs,storyId){
+ const pages=new Map();
+ for(const job of Array.isArray(jobs)?jobs:[]){
+  if(!storyId||job?.storyId!==storyId||!/^[a-f\d]{64}$/u.test(job.sourceSha256||''))continue;
+  const found=pages.get(job.sourceSha256)||new Set();[...String(job.pageStates||'')].forEach((state,index)=>{if(state==='b')found.add(index+1);});pages.set(job.sourceSha256,found);
+ }
+ return pages;
+}
 // One entry per page of the finished book: {source, page, from:'translated'|'original', part, index (page in the part's PDF)}.
 // When two parts translated the same page, the newer translation wins: translatedAt, which a rename or a move between
-// books leaves alone (updatedAt does not); equal times fall back to the book order.
-export function planBook(sources,pageCounts=new Map()){
+// books leaves alone (updatedAt does not); equal times fall back to the book order. blank (blankPages): a part's page
+// with nothing to translate is placed from the part (blank:true) but not counted as translated.
+export function planBook(sources,pageCounts=new Map(),blank=new Map()){
  const entries=[],warnings=[];let translated=0;
  for(const source of sources){
   const total=pageCounts.get(source.key)??source.totalPages;if(!Number.isInteger(total)||total<1)throw Object.assign(new Error(`Chưa biết số trang của tệp gốc “${source.filename}”.`),{known:true});
-  const when=part=>String(part.translatedAt||part.updatedAt||''),owners=new Map(),recent=[...source.parts].filter(usable).sort((a,b)=>when(a).localeCompare(when(b))||(a.position??0)-(b.position??0));
+  const when=part=>String(part.translatedAt||part.updatedAt||''),owners=new Map(),recent=[...source.parts].filter(usable).sort((a,b)=>when(a).localeCompare(when(b))||(a.position??0)-(b.position??0)),empty=source.sha256&&blank.get(source.sha256)||new Set();
   for(const part of recent)part.pages.forEach((page,index)=>{if(page>=1&&page<=total)owners.set(page,{part,index});else warnings.push(`Phần “${part.title}” có trang ${page} nằm ngoài tệp gốc ${total} trang; trang này bị bỏ qua.`);});
-  for(let page=1;page<=total;page++){const owner=owners.get(page);if(owner)translated++;entries.push(owner?{source,page,from:'translated',part:owner.part,index:owner.index}:{source,page,from:'original'});}
+  for(let page=1;page<=total;page++){const owner=owners.get(page);if(owner&&!empty.has(page))translated++;entries.push(owner?{source,page,from:'translated',part:owner.part,index:owner.index,...(empty.has(page)?{blank:true}:{})}:{source,page,from:'original'});}
   for(const part of source.parts)if(!usable(part))warnings.push(missingPdfNote(part));
  }
  return {entries,translated,total:entries.length,warnings};
@@ -161,9 +173,9 @@ async function loadPdfLib(PDFLib,bytes,what){
 // Pages are inserted at their final place whatever order they arrive in, so only one input PDF is open at a time:
 // each translated part, then the original it belongs to.
 // extras: translated parts whose original file is unknown; they follow the rebuilt originals instead of being dropped.
-export async function assembleBook({PDFLib,pdfjs,title,sources,loadSource,loadPart,onProgress=()=>{},pageCounts=new Map(),extras=[]}){
+export async function assembleBook({PDFLib,pdfjs,title,sources,loadSource,loadPart,onProgress=()=>{},pageCounts=new Map(),extras=[],blank=new Map()}){
  const out=await PDFLib.PDFDocument.create(),placed=[],pageAt=new Map(),outline=[],labels=[];let done=0,offset=0,anyLabels=false;
- const plan=planBook(sources,pageCounts),finalIndex=new Map(plan.entries.map((entry,index)=>[entry,index]));
+ const plan=planBook(sources,pageCounts,blank),finalIndex=new Map(plan.entries.map((entry,index)=>[entry,index]));
  let total=plan.total+extras.reduce((sum,part)=>sum+(part.pages?.length||0),0);
  const insert=(page,index)=>{let low=0,high=placed.length;while(low<high){const mid=(low+high)>>1;if(placed[mid]<index)low=mid+1;else high=mid;}out.insertPage(low,page);placed.splice(low,0,index);pageAt.set(index,page);onProgress(++done,total);};
  for(const source of sources){
@@ -179,7 +191,7 @@ export async function assembleBook({PDFLib,pdfjs,title,sources,loadSource,loadPa
    }catch(error){
     // A part whose PDF is unreadable or does not match its pages keeps those pages from the original instead of
     // leaving a hole; a download that failed (network) still fails, so a retry gives the complete book.
-    if(!error?.unreadable)throw error;plan.warnings.push(`${error.message} Các trang này giữ nguyên bản gốc.`);for(const entry of mine){entry.from='original';plan.translated--;}
+    if(!error?.unreadable)throw error;plan.warnings.push(`${error.message} Các trang này giữ nguyên bản gốc.`);for(const entry of mine){entry.from='original';if(!entry.blank)plan.translated--;}
    }
   }
   const bytes=await loadSource(source),data=bytes instanceof Uint8Array?bytes:new Uint8Array(bytes);

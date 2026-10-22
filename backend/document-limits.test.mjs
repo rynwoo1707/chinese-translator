@@ -4,10 +4,11 @@ import {spawnSync} from 'node:child_process';
 import {existsSync,readdirSync,readFileSync} from 'node:fs';
 import {fileURLToPath} from 'node:url';
 import {zipSync,strToU8} from 'fflate';
+import {parseDocument} from 'htmlparser2';
 import mammoth from 'mammoth/mammoth.browser.js';
-import {extractDocxText,countTags,DOCX_LIMITS} from './document-limits.js';
+import {extractDocxText,countTags,markupText,DOCX_LIMITS,HTML_ELEMENTS} from './document-limits.js';
 import {extractEpub} from './epub.js';
-import {extractAzw3} from './azw3.js';
+import {extractAzw3,azw3HtmlToText} from './azw3.js';
 import {readPublication} from './admin-content.js';
 import {studyRoute} from './study-translation.js';
 import worker,{acceptReaderRequest} from './worker.js';
@@ -22,39 +23,82 @@ const buffer=bytes=>bytes.buffer.slice(bytes.byteOffset,bytes.byteOffset+bytes.b
 function docx(files,level=6){return buffer(zipSync(Object.fromEntries(Object.entries({'[Content_Types].xml':CONTENT_TYPES,'_rels/.rels':packageRels(),...files}).map(([name,value])=>[name,typeof value==='string'?strToU8(value):value])),{level}));}
 const refused=async(promise,code)=>{try{await promise;}catch(error){assert.equal(error.code,code,error.message);return error;}assert.fail(`expected ${code}`);};
 const small=docx({'word/document.xml':documentXml(paragraph('第一段。')+paragraph('第二段。'))});
-// 200,000 short paragraphs: about 3 KB zipped, 800,000 elements and several hundred MB in mammoth.
+// 200,000 short paragraphs: about 3 KB zipped, 800,000 elements and several hundred MB in a tree.
 const bomb=()=>docx({'word/document.xml':documentXml(paragraph('字').repeat(200000))},9);
+const mammothText=async data=>(await mammoth.extractRawText({arrayBuffer:data})).value;
 
 test('A DOCX within the limits reads exactly as mammoth reads it, real Word files included',async t=>{
- assert.equal(await extractDocxText(small),(await mammoth.extractRawText({arrayBuffer:small})).value);
+ assert.equal(await extractDocxText(small),await mammothText(small));
  const dir=fileURLToPath(new URL('../node_modules/mammoth/test/test-data/',import.meta.url));
  if(!existsSync(dir)){t.diagnostic('mammoth test files not installed');return;}
  let compared=0;
  for(const name of readdirSync(dir).filter(name=>name.endsWith('.docx'))){
-  const data=buffer(readFileSync(dir+name));let expected;try{expected=(await mammoth.extractRawText({arrayBuffer:data})).value;}catch{continue;}
+  const data=buffer(readFileSync(dir+name));let expected;try{expected=await mammothText(data);}catch{continue;}
   assert.equal(await extractDocxText(data),expected,name);compared++;
  }
- assert.ok(compared>=10,`${compared} Word files compared`);
+ assert.ok(compared>=15,`${compared} Word files compared`);
 });
 
-test('A small DOCX that unzips to hundreds of thousands of elements is refused before mammoth parses it',async t=>{
- const file=bomb();assert.ok(file.byteLength<32*1024,`${file.byteLength} bytes`);
- const parse=t.mock.method(mammoth,'extractRawText');
- const error=await refused(extractDocxText(file),'document_too_large');
- assert.equal(error.status,413);assert.match(error.message,/TXT \(UTF-8\) hoặc PDF/u);assert.equal(parse.mock.callCount(),0);
- // Elements in another part mammoth reads (styles) count too.
- await refused(extractDocxText(docx({'word/document.xml':documentXml(paragraph('字')),'word/styles.xml':`<w:styles xmlns:w="${W}">${'<w:style/>'.repeat(DOCX_LIMITS.elements)}</w:styles>`})),'document_too_large');
-});
-
-test('A process with 64 MB of heap refuses the small DOCX and EPUB bombs instead of running out of memory',()=>{
- for(const kind of ['docx','epub']){
-  const child=spawnSync(process.execPath,['--max-old-space-size=64',fileURLToPath(new URL('./test-support/document-bomb-child.mjs',import.meta.url)),kind],{encoding:'utf8',timeout:120000});
-  assert.equal(child.status,0,`${kind}: ${child.stderr.slice(-300)}`);
-  const result=JSON.parse(child.stdout.trim().split('\n').at(-1));assert.deepEqual([result.code,result.status],['document_too_large',413],kind);
+// Documents put together from everything mammoth's raw text depends on, in random combinations: deleted paragraph marks
+// (tracked changes: the paragraph joins the next one, also from inside a text box), text boxes in VML pictures and in
+// mc:AlternateContent, content controls and checkbox ones, merged and spanned cells, deleted rows, bookmarks between
+// rows, fields, symbols, hyphens, tabs and breaks, what mammoth leaves out (equations, simple fields, custom XML, deleted
+// text), CDATA, character references and line ends, another prefix for the main namespace, and the strict namespace.
+test('Generated Word documents read exactly as mammoth reads them',async()=>{
+ let seed=20261022,w='w';const random=()=>(seed=(seed*1103515245+12345)&0x7fffffff)/0x7fffffff;
+ const pick=list=>list[Math.floor(random()*list.length)],maybe=chance=>random()<chance,some=(most,make)=>Array.from({length:Math.floor(random()*(most+1))},make).join('');
+ // CDATA only before the text: mammoth fails on a w:t whose text it splits in two.
+ const t=()=>maybe(0.05)?`<${w}:t/>`:`<${w}:t${maybe(0.2)?' xml:space="preserve"':''}>${maybe(0.1)?'<![CDATA[cd]]>':''}${some(3,()=>pick(['学习','数学 ',' x ','a\r\nb','c\rd','&amp;&lt;b&gt;','&#x4e2d;','&#13;','']))}</${w}:t>`;
+ const box=depth=>`<${w}:pict><v:shape><v:textbox><${w}:txbxContent>${paragraph(depth+1)}${some(1,()=>paragraph(depth+1))}</${w}:txbxContent></v:textbox></v:shape></${w}:pict>`;
+ const runPart=depth=>pick([t,t,t,()=>`<${w}:tab/>`,()=>`<${w}:br/>`,()=>`<${w}:br ${w}:type="page"/>`,()=>`<${w}:cr/>`,()=>`<${w}:noBreakHyphen/><${w}:softHyphen/>`,
+  ()=>`<${w}:sym ${w}:font="${pick(['Symbol','Wingdings','Nothing'])}" ${w}:char="${pick(['F061','F0FC','0061','f061'])}"/>`,()=>`<${w}:footnoteReference ${w}:id="1"/>`,()=>`<${w}:delText>x</${w}:delText>`,
+  ()=>depth<2?box(depth):t(),()=>depth<2?`<mc:AlternateContent><mc:Choice Requires="wps"><${w}:drawing><wp:inline/></${w}:drawing></mc:Choice><mc:Fallback>${box(depth)}</mc:Fallback></mc:AlternateContent>`:t(),
+  ()=>`<${w}:drawing><wp:inline><wp:docPr id="1" name="x"/></wp:inline></${w}:drawing>`])();
+ const run=depth=>`<${w}:r>${maybe(0.3)?`<${w}:rPr><${w}:b/></${w}:rPr>`:''}${some(3,()=>runPart(depth))}</${w}:r>`;
+ const inline=depth=>pick([run,run,run,d=>`<${w}:hyperlink r:id="rId5">${run(d)}</${w}:hyperlink>`,d=>`<${w}:hyperlink>${run(d)}</${w}:hyperlink>`,d=>`<${w}:ins ${w}:id="1">${run(d)}</${w}:ins>`,
+  d=>`<${w}:del ${w}:id="2">${run(d)}</${w}:del>`,d=>`<${w}:smartTag>${run(d)}</${w}:smartTag>`,d=>`<${w}:fldSimple ${w}:instr="PAGE">${run(d)}</${w}:fldSimple>`,d=>`<${w}:customXml>${run(d)}</${w}:customXml>`,
+  ()=>`<${w}:bookmarkStart ${w}:id="0" ${w}:name="${pick(['_GoBack','mark'])}"/><${w}:bookmarkEnd ${w}:id="0"/>`,()=>'<m:oMath><m:r><m:t>x+1</m:t></m:r></m:oMath>',
+  d=>`<${w}:r><${w}:fldChar ${w}:fldCharType="begin"/></${w}:r><${w}:r><${w}:instrText> HYPERLINK "http://x" </${w}:instrText></${w}:r><${w}:r><${w}:fldChar ${w}:fldCharType="separate"/></${w}:r>${run(d)}<${w}:r><${w}:fldChar ${w}:fldCharType="end"/></${w}:r>`,
+  d=>`<${w}:sdt><${w}:sdtPr>${maybe(0.5)?'<w14:checkbox><w14:checked w14:val="1"/></w14:checkbox>':''}</${w}:sdtPr><${w}:sdtContent>${some(2,()=>run(d))}</${w}:sdtContent></${w}:sdt>`])(depth);
+ const paragraph=depth=>{const deleted=maybe(0.15);return `<${w}:p>${deleted||maybe(0.3)?`<${w}:pPr><${w}:jc ${w}:val="center"/>${deleted?`<${w}:rPr><${w}:del ${w}:id="3"/></${w}:rPr>`:''}</${w}:pPr>`:''}${some(3,()=>inline(depth))}</${w}:p>`;};
+ const cell=depth=>`<${w}:tc>${maybe(0.6)?`<${w}:tcPr>${maybe(0.2)?`<${w}:gridSpan ${w}:val="2"/>`:''}${maybe(0.4)?`<${w}:vMerge${pick(['',` ${w}:val="restart"`,` ${w}:val="continue"`])}/>`:''}</${w}:tcPr>`:''}${depth<1&&maybe(0.15)?table(depth+1):''}${paragraph(depth)}</${w}:tc>`;
+ const row=depth=>`<${w}:tr>${maybe(0.2)?`<${w}:trPr>${pick([`<${w}:del ${w}:id="4"/>`,`<${w}:tblHeader/>`])}</${w}:trPr>`:''}${maybe(0.08)?`<${w}:bookmarkStart ${w}:id="1" ${w}:name="c"/>`:''}${some(3,()=>maybe(0.1)?`<${w}:sdt><${w}:sdtContent>${cell(depth)}</${w}:sdtContent></${w}:sdt>`:cell(depth))}</${w}:tr>`;
+ const table=depth=>`<${w}:tbl><${w}:tblPr/><${w}:tblGrid/>${some(4,()=>row(depth))}</${w}:tbl>`;
+ const block=()=>pick([()=>paragraph(0),()=>paragraph(0),()=>table(0),()=>`<${w}:sdt><${w}:sdtPr>${maybe(0.3)?'<w14:checkbox/>':''}</${w}:sdtPr><${w}:sdtContent>${paragraph(0)}</${w}:sdtContent></${w}:sdt>`,()=>`<${w}:customXml>${paragraph(0)}</${w}:customXml>`,()=>`<!-- x -->${paragraph(0)}`])();
+ const namespaces=uri=>`xmlns:${w}="${uri}" xmlns:r="${R}" xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" xmlns:v="urn:schemas-microsoft-com:vml" xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:m="http://schemas.openxmlformats.org/officeDocument/2006/math" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml"`;
+ const links=`<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId5" Type="${R}/hyperlink" Target="http://example.com" TargetMode="External"/></Relationships>`;
+ for(let n=0;n<250;n++){
+  w=maybe(0.2)?'ns0':'w';const uri=maybe(0.15)?'http://purl.oclc.org/ooxml/wordprocessingml/main':W;
+  const xml=`${maybe(0.1)?String.fromCharCode(0xfeff):''}<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\r\n<${w}:document ${namespaces(uri)}><${w}:body>${some(5,block)}<${w}:sectPr/></${w}:body></${w}:document>`;
+  const data=docx({'word/document.xml':xml,'word/_rels/document.xml.rels':links});
+  assert.equal(await extractDocxText(data),await mammothText(data),xml);
  }
 });
 
-test('Sizes a zip lies about, parts named like images, encryption and ZIP64 never reach mammoth',async t=>{
+test('A small DOCX that unzips to hundreds of thousands of elements is refused, and parts the text never needs are not read',async t=>{
+ const file=bomb();assert.ok(file.byteLength<32*1024,`${file.byteLength} bytes`);
+ const error=await refused(extractDocxText(file),'document_too_large');
+ assert.equal(error.status,413);assert.match(error.message,/TXT \(UTF-8\) hoặc PDF/u);
+ // The limit counts the main document wherever the relationships put it.
+ await refused(extractDocxText(docx({'_rels/.rels':packageRels('/word/main.xml'),'word/main.xml':documentXml(paragraph('字').repeat(DOCX_LIMITS.elements))})),'document_too_large');
+ assert.equal(await extractDocxText(docx({'_rels/.rels':packageRels('/word/main.xml'),'word/main.xml':documentXml(paragraph('主文档。'))})),'主文档。\n\n');
+ // Styles, numbering and the rest never change the text: a part of them as large as the limit is not even unzipped.
+ assert.equal(await extractDocxText(docx({'word/document.xml':documentXml(paragraph('字')),'word/styles.xml':`<w:styles xmlns:w="${W}">${'<w:style/>'.repeat(DOCX_LIMITS.elements)}</w:styles>`})),'字\n\n');
+ // Nesting deeper than any document refuses before the parser's stack grows with it.
+ await refused(extractDocxText(docx({'word/document.xml':documentXml(`${'<w:sdt><w:sdtContent>'.repeat(600)}${paragraph('x')}${'</w:sdtContent></w:sdt>'.repeat(600)}`)})),'document_too_large');
+});
+
+test('Small files heavy in elements, attributes or repeated text are read or refused in 64 and 128 MB of heap, never run out of memory',()=>{
+ const outcomes={docx:'document_too_large','docx-attributes':'ok','docx-one-tag':'document_too_large',epub:'document_too_large','epub-attributes':'ok','epub-one-tag':'document_too_large','opf-attributes':'ok','epub-repeat':'document_too_large','azw3-attributes':'ok'};
+ for(const heap of [64,128])for(const [kind,outcome] of Object.entries(outcomes)){
+  const child=spawnSync(process.execPath,[`--max-old-space-size=${heap}`,fileURLToPath(new URL('./test-support/document-bomb-child.mjs',import.meta.url)),kind],{encoding:'utf8',timeout:120000});
+  assert.equal(child.status,0,`${kind} in ${heap} MB: ${child.stderr.slice(-300)}`);
+  const result=JSON.parse(child.stdout.trim().split('\n').at(-1));
+  if(outcome==='ok')assert.equal(result.ok,true,`${kind} in ${heap} MB: ${result.message}`);else assert.deepEqual([result.code,result.status],[outcome,413],`${kind} in ${heap} MB`);
+ }
+});
+
+test('Sizes a zip lies about, parts named like images, encryption and ZIP64 are refused or never read',async()=>{
  // The central directory and local header claim 100 bytes; the part unzips to 1.7 MB. JSZip would unzip it all.
  const lying=new Uint8Array(docx({'word/document.xml':documentXml(paragraph('x').repeat(50000))}));
  const view=new DataView(lying.buffer),name='word/document.xml';
@@ -63,11 +107,9 @@ test('Sizes a zip lies about, parts named like images, encryption and ZIP64 neve
   if(signature===0x04034b50&&new TextDecoder().decode(lying.subarray(i+30,i+30+view.getUint16(i+26,true)))===name)view.setUint32(i+22,100,true);
   if(signature===0x02014b50&&new TextDecoder().decode(lying.subarray(i+46,i+46+view.getUint16(i+28,true)))===name)view.setUint32(i+24,100,true);
  }
- const parse=t.mock.method(mammoth,'extractRawText');
- await refused(extractDocxText(lying.buffer),'docx_invalid');assert.equal(parse.mock.callCount(),0);
- parse.mock.restore();
- // mammoth parses whatever part the relationships name, junk before the XML included: here styles is a ".png" holding
- // a bomb. Parts that are not XML reach mammoth empty, so the document still reads and the bomb is never parsed.
+ await refused(extractDocxText(lying.buffer),'docx_invalid');
+ // The document's relationships can name any part, junk before the XML included: here styles is a ".png" holding a
+ // bomb. Only the main document is read, so the document still reads and the bomb is never unzipped.
  const styles=strToU8('\u0089PNG\r\n'+`<w:styles xmlns:w="${W}">${'<w:style/>'.repeat(300000)}</w:styles>`);
  const redirected=docx({'word/document.xml':documentXml(paragraph('正文。')),'word/_rels/document.xml.rels':`<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId9" Type="${R}/styles" Target="media/image1.png"/></Relationships>`,'word/media/image1.png':styles},9);
  assert.equal(await extractDocxText(redirected),'正文。\n\n');
@@ -103,11 +145,55 @@ test('Every place the server opens a DOCX uses the guard: study extraction, requ
  assert.equal(response.status,413);assert.equal((await response.json()).code,'document_too_large');assert.equal(sqlite.prepare('SELECT COUNT(*) AS n FROM jobs').get().n,0);
 });
 
+const epubFile=({chapter='<html><body><p>字</p></body></html>',items='',spine='<itemref idref="one"/>'}={})=>zipSync(Object.fromEntries(Object.entries({mimetype:'application/epub+zip','META-INF/container.xml':'<container><rootfiles><rootfile full-path="OPS/book.opf" media-type="application/oebps-package+xml"/></rootfiles></container>','OPS/book.opf':`<package><manifest><item id="one" href="one.xhtml" media-type="application/xhtml+xml"/>${items}</manifest><spine>${spine}</spine></package>`,'OPS/one.xhtml':chapter}).map(([name,text])=>[name,strToU8(text)])));
+const tooLarge=pattern=>error=>error.code==='document_too_large'&&error.status===413&&pattern.test(error.message);
+
 test('An EPUB chapter of nothing but tags is refused before it is parsed; ordinary chapters read as before',()=>{
- const epub=chapter=>zipSync(Object.fromEntries(Object.entries({mimetype:'application/epub+zip','META-INF/container.xml':'<container><rootfiles><rootfile full-path="OPS/book.opf" media-type="application/oebps-package+xml"/></rootfiles></container>','OPS/book.opf':'<package><manifest><item id="one" href="one.xhtml" media-type="application/xhtml+xml"/></manifest><spine><itemref idref="one"/></spine></package>','OPS/one.xhtml':chapter}).map(([name,text])=>[name,strToU8(text)])));
- assert.throws(()=>extractEpub(epub(`<html><body>${'<p>字</p>'.repeat(200000)}</body></html>`)),error=>error.code==='document_too_large'&&error.status===413&&/Phần 1 của EPUB/u.test(error.message));
- assert.equal(extractEpub(epub(`<html><body>${'<p>字</p>'.repeat(1000)}</body></html>`)).parts[0].content,Array(1000).fill('字').join('\n\n'));
+ assert.throws(()=>extractEpub(epubFile({chapter:`<html><body>${'<p>字</p>'.repeat(200000)}</body></html>`})),tooLarge(/Phần 1 của EPUB/u));
+ assert.equal(extractEpub(epubFile({chapter:`<html><body>${'<p>字</p>'.repeat(1000)}</body></html>`})).parts[0].content,Array(1000).fill('字').join('\n\n'));
  assert.equal(countTags('<p>a</p><!-- x --><?pi?><br/>'),2);assert.equal(countTags('<p>'.repeat(10),3),4);
+ // Tags never closed nest deeper than any chapter (the tree walk ran out of stack at a few thousand levels).
+ assert.throws(()=>extractEpub(epubFile({chapter:`<html><body>${'<span>'.repeat(5000)}字</body></html>`})),tooLarge(/Phần 1 của EPUB/u));
+ assert.equal(extractEpub(epubFile({chapter:`<html><body>${'<span>'.repeat(3500)}字</body></html>`})).parts[0].content,'字');
+});
+
+// The tree walk epub.js and azw3.js read chapters with before they read them as a stream: the reference for markupText.
+const nodeName=node=>(node.name||'').split(':').pop().toLowerCase();
+const named=(node,name)=>(node.children||[]).flatMap(child=>[...nodeName(child)===name?[child]:[],...named(child,name)]);
+const BLOCKS=new Set(['p','div','section','article','h1','h2','h3','h4','h5','h6','li','blockquote','tr','pre','hr']);
+function walk(node){
+ if(node.type==='text')return node.data.replace(/[\t\r\n ]+/g,' ');
+ const name=nodeName(node);if(['script','style','head','noscript','rt','rp'].includes(name))return '';if(name==='br')return '\n';
+ const content=(node.children||[]).map(walk).join('');return BLOCKS.has(name)?'\n'+content+'\n':name==='td'?content+'\t':content;
+}
+test('EPUB and AZW3 chapters read exactly as the tree walk of their HTML read them, on generated HTML',()=>{
+ let seed=7;const random=()=>(seed=(seed*1103515245+12345)&0x7fffffff)/0x7fffffff;
+ const pick=list=>list[Math.floor(random()*list.length)],some=(most,make)=>Array.from({length:Math.floor(random()*(most+1))},make).join('');
+ const TAGS=['p','div','span','b','td','tr','table','li','h1','pre','blockquote','font','br','hr','img','svg','image','script','style','head','noscript','rt','rp','ruby','body','html','x:p','math','select','textarea','form'];
+ const TEXTS=['字','Hello  world',' \n\t ','&amp;&nbsp;&lt;p&gt;','a&#10;b','x\r\ny','<!-- c -->','<![CDATA[cd]]>','<?pi x?>','<!DOCTYPE html>','</p>','</br>','</td>','<','中文。'];
+ const node=depth=>{
+  if(depth>5||random()<0.35)return pick(TEXTS);
+  const tag=pick(TAGS),open=`<${tag}${random()<0.3?' class="c" data-x=\'y\'':''}`;
+  return random()<0.1?`${open}/>`:random()<0.1?`${open}>${some(2,()=>node(depth+1))}`:`${open}>${some(3,()=>node(depth+1))}</${random()<0.05?pick(TAGS):tag}>`;
+ };
+ const tooComplex=()=>new Error('too complex');
+ for(let n=0;n<1500;n++){
+  const html=random()<0.5?`<html><head><title>t</title><style>s</style></head><body>${some(4,()=>node(0))}</body></html>`:some(5,()=>node(0));
+  const tree=parseDocument(html,{decodeEntities:true}),body=named(tree,'body')[0]||tree;
+  assert.deepEqual(markupText(html,{body:true,tooComplex}),{text:walk(body),images:named(body,'img').length+named(body,'svg').length>0},html);
+  assert.equal(markupText(html,{tooComplex}).text,walk(tree),html);
+  assert.equal(azw3HtmlToText(html),walk(tree).replace(/ *\n */g,'\n').replace(/\n{3,}/g,'\n\n').trim(),html);
+ }
+});
+
+test('An EPUB is refused cleanly when its reading order repeats a chapter past 25 MB of text or lists too many parts, or its package file is all tags',()=>{
+ // A chapter of a million characters named 30 times: 30 million characters out of a file of a few KB.
+ assert.throws(()=>extractEpub(epubFile({chapter:`<html><body><p>${'字'.repeat(1000000)}</p></body></html>`,spine:'<itemref idref="one"/>'.repeat(30)})),tooLarge(/vượt quá 25 MB/u));
+ // Named a few times, it reads, each time as a part, as before.
+ const repeated=extractEpub(epubFile({spine:'<itemref idref="one"/>'.repeat(3)}));assert.equal(repeated.chapterCount,3);assert.equal(repeated.source,'[Phần EPUB 1: 字]\n字\n\n[Phần EPUB 2: 字]\n字\n\n[Phần EPUB 3: 字]\n字');
+ assert.throws(()=>extractEpub(epubFile({spine:'<itemref idref="one"/>'.repeat(20001)})),tooLarge(/20\.000 phần/u));
+ assert.equal(extractEpub(epubFile({spine:'<itemref idref="one"/>'.repeat(20000)})).chapterCount,20000);
+ assert.throws(()=>extractEpub(epubFile({items:'<item/>'.repeat(HTML_ELEMENTS)})),tooLarge(/Tệp mô tả của EPUB/u));
 });
 
 test('AZW3 text is checked before the library decompresses it: declared size, record size, chapter size and tags',async()=>{

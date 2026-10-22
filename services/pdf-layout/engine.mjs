@@ -13,6 +13,7 @@ const STDOUT_LIMIT=100*1024*1024,STDERR_TAIL=16*1024,TIMEOUT_MS=240000;
 //  too_large  its result was over the size limit;  crash   the process died for another reason;
 //  aborted    the caller left (or the job was stopped), so nobody waits for an answer.
 //  browser    the export's browser did not start (the service, not the document, needs looking at);
+//  font       the export font is missing or unreadable (the service again);
 //  overflow   a translation is longer than its box (error.blocks names the boxes; see overflowError).
 // Other failures (a damaged PDF, "Trang 3: …") carry no code. cause keeps the original error for the service's log.
 const failure=(message,code,cause)=>Object.assign(new Error(message,cause?{cause}:undefined),code?{code}:{});
@@ -30,7 +31,7 @@ export function stderrTail(text,limit=STDERR_TAIL){
  const tail=text.slice(-limit),newline=tail.indexOf('\n');
  return newline>=0?tail.slice(newline+1):tail;
 }
-export const PYTHON_SHORTCUT_MESSAGE='Máy chạy dịch vụ PDF chưa có Python thật: lệnh "python" đang mở lối tắt Microsoft Store. Cài Python 3 từ python.org (tích "Add python.exe to PATH"), mở cửa sổ terminal mới, chạy "npm run setup" rồi khởi động lại "npm run dev:pdf-layout".';
+export const PYTHON_SHORTCUT_MESSAGE='Máy chạy dịch vụ PDF chưa có Python thật: lệnh "python" đang mở lối tắt Microsoft Store. Cài Python 3 từ python.org (tích "Add python.exe to PATH"), mở cửa sổ terminal mới, chạy "npm run setup" rồi khởi động lại Hoa Trí ("npm start", hoặc bấm đúp start.cmd).';
 const WINDOWS_CRASHES={0xC0000005:'lỗi truy cập bộ nhớ',0xC00000FD:'tràn ngăn xếp',0xC0000409:'thư viện dừng khẩn cấp',0xC0000374:'hỏng vùng nhớ heap',0xC0000017:'hết bộ nhớ',0xC000013A:'bị ngắt'};
 // Any NTSTATUS error code (0xC0000000 and above) means the process crashed, even when the code is not in the list.
 const windowsCrash=code=>typeof code==='number'&&(code>>>0)>=0xC0000000?WINDOWS_CRASHES[code>>>0]||'lỗi hệ thống':null;
@@ -52,16 +53,21 @@ export function pythonFailure({code=null,signal=null,stdout='',stderr='',killedF
 }
 export const pythonFailureMessage=outcome=>pythonFailure(outcome).message;
 
+// allPages: the caller wants every page or none (a refresh replaces a stored range whole), so extract.py may use the whole
+// time limit instead of stopping at its own budget (PDF_EXTRACT_SECONDS) with the pages done so far; the margin is left
+// for writing the answer.
+const ALL_PAGES_MARGIN_S=15;
+const extractSeconds=(allPages,timeoutMs)=>allPages?{PDF_EXTRACT_SECONDS:String(Math.max(1,Math.floor(timeoutMs/1000)-ALL_PAGES_MARGIN_S))}:{};
 // Runs extract.py with payload as JSON on stdin and returns its JSON answer. signal stops it at once: the caller left,
 // or a deadline of the whole job passed (renderDocument). command and args replace Python and extract.py (tests).
-export function pythonOperation(payload,{signal,timeoutMs=TIMEOUT_MS,command,args}={}){
+export function pythonOperation(payload,{signal,timeoutMs=TIMEOUT_MS,command,args,allPages=false}={}){
  return new Promise((resolve,reject)=>{
   if(signal?.aborted)return reject(stopError(signal));
   const python=command||process.env.PDF_PYTHON||'python';
   let child;
   // PYMUPDF_MESSAGE=fd:2 keeps MuPDF messages (also those printed while PyMuPDF imports) off the JSON stdout.
   // Some misconfigured PDF_PYTHON values make spawn() throw instead of emitting 'error'.
-  try{child=spawn(python,args||[fileURLToPath(new URL('./extract.py',import.meta.url))],{windowsHide:true,env:{...process.env,PYTHONPATH:[`${root}.runtime/pdf-python`,process.env.PYTHONPATH].filter(Boolean).join(process.platform==='win32'?';':':'),PYTHONUTF8:'1',PYMUPDF_MESSAGE:'fd:2',...(process.env.TESSDATA_PREFIX?{}:existsSync(`${root}.runtime/tessdata`)?{TESSDATA_PREFIX:`${root}.runtime/tessdata`}:{})},stdio:['pipe','pipe','pipe']});}
+  try{child=spawn(python,args||[fileURLToPath(new URL('./extract.py',import.meta.url))],{windowsHide:true,env:{...process.env,PYTHONPATH:[`${root}.runtime/pdf-python`,process.env.PYTHONPATH].filter(Boolean).join(process.platform==='win32'?';':':'),PYTHONUTF8:'1',PYMUPDF_MESSAGE:'fd:2',...(process.env.TESSDATA_PREFIX?{}:existsSync(`${root}.runtime/tessdata`)?{TESSDATA_PREFIX:`${root}.runtime/tessdata`}:{}),...extractSeconds(allPages,timeoutMs)},stdio:['pipe','pipe','pipe']});}
   catch(error){reject(new Error(`Không khởi động được PyMuPDF (${python}): ${error.message}. Hãy kiểm tra PDF_PYTHON hoặc chạy npm run setup.`));return;}
   const chunks=[];let size=0,stderr='',killedForSize=false,timedOut=false,settled=false;
   // Python never handles SIGTERM, so the kill ends it even inside MuPDF or Tesseract.
@@ -93,16 +99,19 @@ export function chromiumPath(){
 // Vietnamese letter (Debian fonts-liberation2, or fonts-liberation 1.x); DejaVu Serif, the old Linux default, sets the
 // same text about 26% wider, so boxes shrink far more often. PDF_FONT_PATH (npm run setup writes it) always wins.
 export const LINUX_FONTS=Object.freeze(['/usr/share/fonts/truetype/liberation2/LiberationSerif-Regular.ttf','/usr/share/fonts/truetype/liberation/LiberationSerif-Regular.ttf','/usr/share/fonts/truetype/dejavu/DejaVuSerif.ttf']);
-export function fontPath(){
- if(process.env.PDF_FONT_PATH)return process.env.PDF_FONT_PATH;
- if(process.platform==='win32')return 'C:/Windows/Fonts/times.ttf';
- return LINUX_FONTS.find(path=>existsSync(path))||LINUX_FONTS[0];
-}
-// The same face for the export and for the browser preview (/font); built once per font file.
+const fontsWanted=()=>process.env.PDF_FONT_PATH?[process.env.PDF_FONT_PATH]:process.platform==='win32'?['C:/Windows/Fonts/times.ttf']:LINUX_FONTS;
+// null when the file is not there, so /health, the image build and CI never name a font the service cannot read.
+export function fontPath(){return fontsWanted().find(path=>existsSync(path))||null;}
+const FONT_MISSING='Dịch vụ PDF đang thiếu phông chữ để dựng bản PDF tiếng Việt, nên chưa xuất được PDF. Hãy báo quản trị viên; bản dịch vẫn được lưu trong Lịch sử dịch.';
+// The same face for the export and for the browser preview (/font); built once per font file. A missing or unreadable
+// file is the service's own problem (code font): the student is told so, the service's log names the files looked for.
 let fontCache=null;
 export async function fontCss(){
- const path=fontPath();if(fontCache?.path===path)return fontCache.css;
- const font=await readFile(path),css=`@font-face{font-family:HoaTriPDF;src:url(data:font/ttf;base64,${font.toString('base64')}) format('truetype');font-weight:400;font-display:block}`;
+ const path=fontPath();if(path&&fontCache?.path===path)return fontCache.css;
+ let font;
+ try{if(!path)throw new Error(`no font file: ${fontsWanted().join(', ')}`);font=await readFile(path);}
+ catch(error){throw failure(FONT_MISSING,'font',error);}
+ const css=`@font-face{font-family:HoaTriPDF;src:url(data:font/ttf;base64,${font.toString('base64')}) format('truetype');font-weight:400;font-display:block}`;
  fontCache={path,css};return css;
 }
 // Edge on Windows (seen with 155, October 2026) restarts itself under its compatibility layer and the started process

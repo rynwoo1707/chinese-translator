@@ -30,3 +30,12 @@ test('Setup recommends fonts-liberation2 when no font is found or exports would 
  // A path the student set keeps winning until it is removed.
  for(const from of ['file','env'])assert.match(fontWarning({from,value:'/usr/share/fonts/TTF/DejaVuSerif.ttf'}),/bỏ PDF_FONT_PATH khỏi \.dev\.vars/u,from);
 });
+
+test('Setup ends by naming the one command that starts the app (npm start, or start.cmd on Windows), not two terminal windows',()=>{
+ const setup=readFileSync(new URL('./setup.mjs',import.meta.url),'utf8'),ending=setup.slice(setup.indexOf("if(process.argv.includes('--launcher'))"));
+ const scripts=JSON.parse(readFileSync(new URL('../package.json',import.meta.url),'utf8')).scripts;
+ assert.equal(scripts.start,'node backend/start-local.mjs','npm start runs the PDF service and the web app in one window');
+ assert.match(ending,/Chạy app trong một cửa sổ, ở thư mục dự án:\n {2}\$\{npm\} start\$\{windows\?' {3}\(hoặc bấm đúp start\.cmd\)':''\}\n/u);
+ assert.match(ending,/cả dịch vụ PDF giữ bố cục \(cổng \$\{layoutPort\}\) lẫn trang web/u);
+ assert.doesNotMatch(ending,/cửa sổ terminal|run dev:pdf-layout|\$\{npm\} run dev\b/u,'no longer two windows of their own');
+});

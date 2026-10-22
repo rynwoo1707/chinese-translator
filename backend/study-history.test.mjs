@@ -30,6 +30,8 @@ class MemoryDB{
  async batch(statements){for(const statement of statements)this.apply(statement);return statements.map(()=>({success:true}));}
  apply({sql,args}){
   const query=sql.trim();
+  // The room guard of a new item inserts nothing while the item fits (study-history-limits.test.mjs tests it on SQLite).
+  if(query.includes("'history_full'"))return;
   if(query.startsWith('INSERT INTO study_sessions')){
    const [id,user_id,title,filename,domain,subject,mode,status,state_key,source_preview,translation_preview,translated_parts,total_parts,source_characters,translation_characters,storyId,library_chapter_id,page_start,page_end,source_total_pages,source_sha256]=args,previous=this.sessions.get(id),now=new Date().toISOString();
    const library_story_id=previous?.library_chapter_id&&previous.library_chapter_id===library_chapter_id?previous.library_story_id:storyId;

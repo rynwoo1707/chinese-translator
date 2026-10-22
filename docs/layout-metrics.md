@@ -4,6 +4,8 @@ Ngày đo: 2026-10-19. Mã dựng PDF `0bf0cefc9d8de3c5` (`services/pdf-layout/e
 
 **Sau ngày 22/10/2026:** `extract.py` đã đổi hai lần trong ngày (mục “Bộ tách trang 22/10/2026” và “Lượt sửa thứ hai cùng ngày”); trên 6 bộ scan thể loại, mọi chỉ số đo lại trước và sau lần đổi đầu đều giống hệt, lần đổi thứ hai chỉ chạm trang có lớp chữ, còn mẫu thật c01 được đo trên tệp PDF đã lưu. `frontend/math-text.js` được viết lại không dùng lookbehind, cho đúng cùng kết quả (so 20.000 chuỗi ngẫu nhiên); `engine.mjs` đổi phông trên Linux và cách dừng việc, không đổi cách dàn chữ trên Windows. Vì vậy các số dưới đây vẫn áp dụng, nhưng lệnh “Chạy lại” chưa được chạy lại sau các thay đổi đó (mã dựng nay khác `0bf0cefc9d8de3c5`).
 
+**Sau ngày 23/10/2026:** `extract.py` đổi lần thứ ba (mục “Lượt sửa thứ ba” ở cuối). Phần lớn thay đổi chỉ chạm trang có lớp chữ, nhưng thứ tự đọc dưới hai cột và cách quyết định trang nào là scan đổi cả với trang scan, nên các số dưới đây, nhất là thứ tự đọc, **chưa được đo lại** cho bộ tách hiện tại.
+
 Tài liệu này thay các câu chưa đo như “giữ nguyên 90–95% bố cục” và “tiết kiệm hơn 80% thời gian”. Bố cục không có một con số chung: mỗi chỉ số dưới đây đo một việc, có định nghĩa và có giới hạn.
 
 ## Tóm tắt
@@ -136,7 +138,7 @@ Phân bố tỷ lệ dựng/in (14 đoạn văn): ≥1: 3, 0,95–1: 3, 0,85–0
 - **Hình bị xóa nằm trong khung chữ.** Trang thật chưa có đáp án hình; vùng “hình giữ nguyên” là vùng bộ tách tự chọn. Biểu tượng cạnh chữ “探究” ở trang 5 bị khung đoạn che mất (ghi chú của người duyệt) mà không chỉ số nào bắt được.
 - **Chữ Hán đi theo ảnh công thức** (như “时” trong p5-b4): trên trang thật không đếm tự động.
 - **Thứ tự đọc, xuống dòng, tách đoạn sai, công thức nhận nhầm.** Harness fixture có các chỉ số riêng cho việc này (`tmp/pdf-layout/genre-fixtures/README.md`).
-- **PDF có lớp chữ của sách thật.** Hai bộ đo chính đều là ảnh scan; đường tách chữ của PDF có lớp chữ khác (xóa chữ bằng redaction). PDF có lớp chữ mới được đo trên trang tổng hợp in từ Edge (mục “Bộ tách trang 22/10/2026”), chưa đo trên PDF của nhà xuất bản, Word, WPS hay LaTeX: không PDF thật nào trên máy gốc có chữ Trung trong lớp chữ.
+- **PDF có lớp chữ của sách thật.** Hai bộ đo chính đều là ảnh scan; đường tách chữ của PDF có lớp chữ khác (xóa chữ bằng redaction). PDF có lớp chữ mới được đo trên trang tổng hợp in từ Edge (mục “Bộ tách trang 22/10/2026”), chưa đo trên PDF của nhà xuất bản, Word, WPS hay LaTeX: không PDF thật nào trên máy gốc có chữ Trung trong lớp chữ. Lượt sửa thứ ba có dùng 4 PDF do lượt kiểm chứng soạn và xuất bằng Microsoft Word để kiểm từng lỗi (mục cuối), nhưng không đo chúng bằng các chỉ số ở đây.
 - **Phông chữ máy chủ.** Mọi số đo dựng trên Windows với Times New Roman. Từ 22/10/2026 máy chủ Linux dùng Liberation Serif, có cùng độ rộng chữ (đo bằng PyMuPDF trên 4 câu tiếng Việt: tỉ lệ 1,0000; DejaVu Serif, phông Linux trước đó, rộng hơn khoảng 26%). Các số này vì vậy nên đúng cho bản xuất trên máy chủ, nhưng chưa đo lại trên Linux.
 - **Bố cục ngoài bộ thử**: hai cột, chữ dọc, trang nghiêng, nền màu mới đo trên trang tổng hợp (mục “Bộ tách trang 22/10/2026”); trang cong, ảnh chụp bằng điện thoại chưa đo.
 - **Mẫu nhỏ**: 7 trang tổng hợp và 3 trang thật, chưa có khoảng tin cậy thống kê.
@@ -146,7 +148,7 @@ Phân bố tỷ lệ dựng/in (14 đoạn văn): ≥1: 3, 0,95–1: 3, 0,85–0
 ## Câu nên dùng trong báo cáo
 
 - Thay “giữ nguyên 90–95% bố cục” bằng: “Trên 3 trang scan thật của sách Toán, toàn bộ phần không phải chữ (hình, khung, đường kẻ) giữ nguyên, chỉ lệch nhiễu nén ảnh; 98,9% chữ Việt nằm đúng khung đoạn gốc, không đoạn nào tràn. Tiêu đề chương và chân trang (36 chữ Hán) chưa được dịch. 8/14 đoạn văn giữ ≥85% cỡ chữ in; 3 đoạn nhỏ hơn rõ, khoảng 80%.” Với bộ thử nhiều thể loại: “Trên 7 trang mẫu của 6 thể loại có đáp án chuẩn, với bản dịch thử dài 1 chữ Việt cho mỗi chữ Hán, 99,5% diện tích chữ Trung được thay, 0 đoạn tràn, 84% đoạn giữ ≥85% cỡ chữ gốc (thân bài 33/35).”
-- Với PDF có lớp chữ, chỉ nói: “Trên 23 trang tổng hợp in từ trình duyệt, với bản dịch thử dài 1 chữ Việt cho mỗi chữ Hán, 0 đoạn tràn và thứ tự đọc 99%; chưa đo trên PDF thật.”
+- Với PDF có lớp chữ, chỉ nói: “Trên 23 trang tổng hợp in từ trình duyệt, với bản dịch thử dài 1 chữ Việt cho mỗi chữ Hán, 0 đoạn tràn và thứ tự đọc 99%; chưa đo trên PDF thật.” (số của bộ tách 22/10/2026; nếu báo cáo nói về bản hiện tại, thêm “chưa đo lại sau lượt sửa ngày 23/10/2026”.)
 - Bỏ “tiết kiệm hơn 80% thời gian” cho tới khi chạy quy trình dưới đây. Có thể nói: “10 trang trong một lượt cần 7 thao tác trên Hoa Trí; số phút tiết kiệm chưa đo.”
 
 ## Thời gian tiết kiệm: chưa đo
@@ -235,3 +237,18 @@ Theo cách app chia lượt (`ocrImageBatches`, `blockBatches`), mẫu c01 (3 tr
 
 - Thời gian tách các bộ trên không đổi (0,07–1,04 s mỗi tệp). Trên một trang thử nặng (300 cặp nhãn và số, 8.000 chấm vẽ rời), riêng bước gộp mất 0,44 s; khi cả 300 cặp được gộp, cả lượt tách trang đó từ 1,3 s lên khoảng 4 s, phần lớn do mỗi token cần một ảnh và một vùng xóa.
 - Giới hạn: mọi số đều trên trang tổng hợp (in từ Edge, trang PyMuPDF), chưa có PDF thật của Word, WPS hay LaTeX. Mẩu thẳng hàng (trong 0,25 em) với một mẩu không có chữ Hán khác cách 0,6–4 em phía trên hay dưới vẫn để riêng, nên tử và mẫu của phân số xếp chồng giữ nguyên trên nền. Một ô số đứng riêng của bảng không kẻ một hàng, cách đầu hàng chữ Hán dưới 2 em, bị gộp với ô đó. MuPDF tự giữ trong một dòng các cụm chữ Hán cách nhau tới khoảng 1,7 em mà không chèn dấu cách, nên các lựa chọn “A．3个B．4个” in sát nhau vẫn là một dòng như trước.
+
+## Lượt sửa thứ ba (23/10/2026)
+
+`extract.py` sửa các lỗi mà lượt kiểm chứng bản `864cbf3` tìm thấy trên PDF có lớp chữ: phông Symbol và chữ Hán mở rộng A, chữ nhỏ trên hay dưới dòng, nét vẽ trong dòng, dòng cuối ngắn, bảng kẻ sát chữ, cột ô một chữ, dòng bị cắt rời, watermark và ảnh chữ Latin, bản scan nhỏ hơn trang, thứ tự đọc dưới hai cột, khung của đoạn một dòng, trích dẫn bị xuống dòng (chi tiết: `docs/pdf-layout-pipeline.md`, mục “Hình, công thức và scan”). Mỗi lỗi có một test trên trang tổng hợp (`services/pdf-layout/test_text_layer_shapes.py`, 28 test, đỏ trên `864cbf3` trừ 3 test giữ hành vi cũ). Các bảng ở trên **chưa được đo lại**.
+
+Lượt sửa so `extract.py` của `864cbf3` với bản mới trên 41 trang do người rà soát và người kiểm chứng tạo, OCR giả lập, 0 lượt gọi Gemini (harness tạm, không nằm trong repo):
+
+- **Trang:** 36 trang tổng hợp, 4 PDF soạn rồi xuất bằng Microsoft Word (`word1-g1`, `word2`, `word3`, `word4`: chữ Hy Lạp phông Symbol, bảng kẻ sát chữ, cột ô một chữ, đoạn hai dòng có dòng cuối ngắn, chú thích tiếng Anh cỡ nhỏ, tiêu đề dãn chữ, ảnh công thức dán trong dòng) và 1 trang thử nặng. 36 trang khác trước, mọi khác biệt là các bản sửa có chủ ý; 5 trang giống hệt.
+- **Thời gian tách:** tổng 4,98 s trước, 4,92 s sau; trang nặng nhất (lưới 45×8 vẽ bằng một path) 0,42 s thành 0,58 s.
+- **Chữ nhỏ còn trên nền** (điểm mực của nhãn trên trang gốc → trên nền đã làm sạch): nhãn tiếng Anh “nucleus” 72 → 72, “cell membrane” 130 → 130, ghi nguồn “Source” 257 → 257, “Chapter” 833 → 833, “Photo” 251 → 251; với `864cbf3` mọi nhãn này về 0 (bị xóa mà không được đọc).
+- **`word1-g1`:** nét chữ phông Symbol còn trên nền 60/68/40/10 điểm mực → 0 (nay vào token của dòng, dòng đọc “…可知，[∠α][+][∠β][+][∠γ][= 180][°]，…”); vùng giữ ảnh gốc vì “chữ dọc” 2 → 0, hết cảnh báo thừa; đoạn hai dòng có dòng cuối “氧钾。” (dòng trên kết thúc bằng “…是二”) lại là một block; “二氧化碳” và “氢气” là block riêng của từng hàng (ở `word4`: “二氧化碳” và “稀有气体”).
+- **`word2`, `word3`:** 9 → 6 và 4 → 2 block, đúng như cách gộp của bản trước `864cbf3` (`c99912d`), kể cả tiêu đề dãn chữ “前言” thành một block.
+- **Khác:** công thức hóa học có điều kiện trên và dưới dấu bằng vẽ hai nét thành một block, cả hai nét rời khỏi nền (`864cbf3`: “____”, nét dưới bị xóa, nét trên còn); trang có watermark mờ và trang có ảnh chữ tiếng Anh không còn sang OCR; bản scan nhỏ hơn trang có lớp chữ OCR bên dưới thì sang OCR; trang hai cột có niên biểu dưới cột trái: cột phải được đọc trước niên biểu.
+
+Giới hạn: mọi trang đều tổng hợp hoặc do lượt kiểm chứng soạn trong Word, không có sách thật của nhà xuất bản, WPS hay LaTeX; OCR được giả lập nên không đo được thay đổi trên trang scan; chưa chạy trên Linux. Muốn đo bằng các chỉ số ở trên phải chạy lại lệnh ở mục “Chạy lại” và harness của mục “Bộ tách trang 22/10/2026”.

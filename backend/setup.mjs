@@ -99,7 +99,8 @@ else{console.log('Bỏ qua vì thiếu frontend/vendor/tessdata (bước 2).');s
 
 step(5,'Trình duyệt và phông chữ để xuất PDF');
 // The service finds the AUTO paths by itself (services/pdf-layout/engine.mjs); other choices are written to .dev.vars,
-// which `npm run dev:pdf-layout` reads. A value set in the shell or a still-valid value in .dev.vars is kept.
+// which the local service reads (services/pdf-layout/local.mjs, started by npm start). A value set in the shell or a
+// still-valid value in .dev.vars is kept.
 const AUTO_BROWSERS=['C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe','C:/Program Files/Microsoft/Edge/Application/msedge.exe','/usr/bin/chromium','/usr/bin/chromium-browser'];
 const OTHER_BROWSERS=['C:/Program Files/Google/Chrome/Application/chrome.exe','C:/Program Files (x86)/Google/Chrome/Application/chrome.exe','/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge','/Applications/Google Chrome.app/Contents/MacOS/Google Chrome','/Applications/Chromium.app/Contents/MacOS/Chromium','/usr/bin/google-chrome','/usr/bin/google-chrome-stable','/usr/bin/microsoft-edge','/snap/bin/chromium'];
 // The font list follows the PDF service's own order (Liberation Serif before DejaVu Serif on Linux): setup-font.mjs.
@@ -149,12 +150,13 @@ for(const warning of warnings)console.warn(`\nCẢNH BÁO: ${warning}`);
 for(const problem of problems)console.error(`\nLỖI: ${problem}`);
 if(problems.length)process.exitCode=1;
 let layoutPort='8091';try{layoutPort=new URL(current('PDF_LAYOUT_SERVICE_URL')).port||layoutPort;}catch{}
+// npm.cmd: PowerShell may refuse to run npm's own .ps1 script (execution policy).
 const npm=windows?'npm.cmd':'npm',done=`Cài đặt xong.${warnings.length?' Có CẢNH BÁO ở trên.':''}`;
-// start.cmd starts both services itself right after setup.
+// start.cmd starts the app itself right after setup.
 if(process.argv.includes('--launcher'))console.log(problems.length?'\nCài đặt còn LỖI (xem ở trên).':`\n${done}`);
 else console.log(`
-${problems.length?`${skipped.length?`Bước ${skipped.join(' và ')} bị bỏ qua`:'Đã làm xong các bước còn lại'}; sửa LỖI ở trên rồi chạy lại "npm run setup".`:done} Chạy app (2 cửa sổ terminal, đều ở thư mục dự án):
-  1) ${npm} run dev:pdf-layout   (dịch vụ PDF giữ bố cục, cổng ${layoutPort})
-  2) ${npm} run dev              (web, mở địa chỉ wrangler in ra, thường là http://127.0.0.1:8787)
+${problems.length?`${skipped.length?`Bước ${skipped.join(' và ')} bị bỏ qua`:'Đã làm xong các bước còn lại'}; sửa LỖI ở trên rồi chạy lại "npm run setup".`:done} Chạy app trong một cửa sổ, ở thư mục dự án:
+  ${npm} start${windows?'   (hoặc bấm đúp start.cmd)':''}
+Lệnh này chạy cả dịch vụ PDF giữ bố cục (cổng ${layoutPort}) lẫn trang web, rồi mở trình duyệt; giữ cửa sổ đó mở trong lúc dùng, bấm Ctrl+C để tắt.
 Sau đó: tạo tài khoản ở /#account, mở /study, nhập "Tên nội dung", dán khóa Gemini API của bạn và chọn tệp để dịch.
 `);

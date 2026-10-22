@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import {deflateSync,crc32} from 'node:zlib';
 import {readFileSync} from 'node:fs';
 import {createRequire} from 'node:module';
-import {bookSources,planBook,coverageNote,checkLocalSource,assembleBook,concatenateParts,readPageLabels,missingPdfNote} from '../frontend/book-assembly.js';
+import {bookSources,planBook,coverageNote,checkLocalSource,assembleBook,concatenateParts,readPageLabels,missingPdfNote,blankPages} from '../frontend/book-assembly.js';
 
 // The CommonJS build: the package's ES build imports JSON without import attributes, which Node refuses.
 const PDFLib=createRequire(import.meta.url)('@cantoo/pdf-lib'),{PDFDocument,StandardFonts,PDFName,PDFNumber,PDFHexString,PDFString,PDFNull,PDFDict}=PDFLib;
@@ -57,6 +57,24 @@ test('The page plan takes every page of each original in chapter order; the most
  // Page counts come from the stored or picked original when the parts do not know it; pages outside the file are reported.
  const unknown=bookSources([part('a',[4,12],{totalPages:null})]).sources;assert.throws(()=>planBook(unknown),/Chưa biết số trang/);
  const counted=planBook(unknown,new Map([[SHA_A,10]]));assert.equal(counted.total,10);assert.equal(counted.translated,1);assert.match(counted.warnings[0],/trang 12 nằm ngoài tệp gốc 10 trang/);
+});
+
+test('A blank page inside a whole-book part comes from the part but counts as kept, as Xưởng dịch counts it',async()=>{
+ // Cover 1, pages 2–3 translated, 4 blank, 5–6 translated: one chunk part 2–6 ("Đã dịch xong cả quyển: 4/4 trang").
+ const jobs=[{id:'j',storyId:'book-1',sourceSha256:SHA_A,pageStates:'cddbdd'},{id:'other',storyId:'book-2',sourceSha256:SHA_A,pageStates:'bbbbbb'},{id:'bad',storyId:'book-1',sourceSha256:'x',pageStates:'b'}];
+ const blank=blankPages(jobs,'book-1');assert.deepEqual([...blank.keys()],[SHA_A]);assert.deepEqual([...blank.get(SHA_A)],[4]);
+ assert.equal(blankPages(jobs,'').size,0);assert.equal(blankPages(null,'book-1').size,0);
+ const part={id:'p',title:'Trang 2–6',mime:'application/pdf',file:'/f/p',sha256:SHA_A,filename:'sach.pdf',totalPages:6,pages:[2,3,4,5,6]},{sources}=bookSources([part]);
+ const plan=planBook(sources,new Map(),blank);
+ assert.deepEqual(plan.entries.map(entry=>`${entry.page}:${entry.from}${entry.blank?':blank':''}`),['1:original','2:translated','3:translated','4:translated:blank','5:translated','6:translated']);
+ assert.equal(plan.translated,4);assert.equal(coverageNote(plan),'Đã dịch 4/6 trang; các trang còn lại giữ nguyên bản gốc.');
+ assert.equal(planBook(sources).translated,5,'without the job, ownership alone counts');
+ // Assembled: the blank page is still the part's page; an unreadable part gives back only the pages it had counted.
+ const original=await translatedPart([1,2,3,4,5,6],' goc'),rendered=await translatedPart([2,3,4,5,6]);
+ const result=await assembleBook({PDFLib,pdfjs:null,title:'Sách',sources:bookSources([{...part}]).sources,blank,loadSource:async()=>original,loadPart:async()=>rendered});
+ assert.equal(result.pages,6);assert.equal(result.plan.translated,4);assert.deepEqual(await pageTexts(result.bytes),['Ban dich trang 1 goc','Ban dich trang 2','Ban dich trang 3','Ban dich trang 4','Ban dich trang 5','Ban dich trang 6']);
+ const broken=await assembleBook({PDFLib,pdfjs:null,title:'Sách',sources:bookSources([{...part}]).sources,blank,loadSource:async()=>original,loadPart:async()=>new Uint8Array([1,2,3])});
+ assert.equal(broken.plan.translated,0);assert.match(coverageNote(broken.plan),/^Đã dịch 0\/6 trang/u);
 });
 
 test('Of two parts translating a page, the newer translation wins even after the older part is renamed or moved',()=>{

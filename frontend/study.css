@@ -119,6 +119,8 @@
 .page-grid [data-state=working],.page-legend [data-state=working]:before{background:#d9a441}
 .page-grid [data-state=working]{animation:page-working 1.4s ease-in-out infinite}
 .page-grid [data-state=done],.page-legend [data-state=done]:before{background:#6f8f55}
+.page-grid [data-state=nopdf],.page-legend [data-state=nopdf]:before{background:repeating-linear-gradient(135deg,#6f8f55 0 3px,#e0b052 3px 6px)}
+.page-legend li[hidden]{display:none}
 .page-grid [data-state=blank],.page-legend [data-state=blank]:before{background:#fff;box-shadow:inset 0 0 0 1px #c3cab8}
 .page-grid [data-state=cover],.page-legend [data-state=cover]:before{background:#9b7a45}
 .page-grid [data-state=skipped],.page-legend [data-state=skipped]:before{background:repeating-linear-gradient(135deg,#e3e5dc 0 2px,#fff 2px 4px)}

@@ -56,7 +56,7 @@ const textSession=(path,method)=>path==='/api/my/study/history'&&method==='GET'?
 // Every blob address handed to a download link, and every address revoked, with the time since the page started.
 const DOWNLOAD_LOG=()=>{window.__downloads=[];window.__revoked=[];const click=HTMLAnchorElement.prototype.click,revoke=URL.revokeObjectURL;HTMLAnchorElement.prototype.click=function(){if(this.download)window.__downloads.push(this.href);return click.call(this);};URL.revokeObjectURL=url=>{window.__revoked.push(url);return revoke.call(URL,url);};};
 
-describe('Xưởng dịch on the student\'s device, in Edge',{concurrency:true},()=>{
+describe('Xưởng dịch on the student\'s device, in Edge',{concurrency:4},()=>{
 test('A browser older than iOS/Safari 15.4 gets a notice on Xưởng dịch instead of a page that cannot work; a current one does not',{skip,timeout:60000},async()=>{
  // The notice is browser-check.js (a classic deferred script, as on the home page), loaded before the page's module.
  const html=readFileSync(new URL('../frontend/study.html',import.meta.url),'utf8'),check=html.indexOf('<script src="/browser-check.js" defer></script>'),module=html.indexOf('<script type="module" src="/study.js"></script>');

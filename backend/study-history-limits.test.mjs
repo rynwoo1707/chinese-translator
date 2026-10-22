@@ -32,7 +32,7 @@ test('A save made from an older revision of a session is refused without writing
  const key=sqlite.prepare('SELECT state_key FROM study_sessions').get().state_key,before=await (await env.FILES.get(key)).text();
  // The stale tab still believes it is at revision 1 and has done only one part.
  const stale=await call(save(state,{revision:1}),{id:first.id});assert.equal(stale.status,409);
- assert.deepEqual(await stale.json(),{error:'Bản dịch này vừa được lưu từ một thẻ hoặc thiết bị khác. Hãy tải lại bản dịch từ Lịch sử dịch rồi tiếp tục, để không ghi đè phần đã dịch.',code:'history_conflict',revision:2,updatedAt:sqlite.prepare('SELECT updated_at FROM study_sessions').get().updated_at});
+ assert.deepEqual(await stale.json(),{error:'Bản dịch này vừa được lưu từ một tab hoặc thiết bị khác. Hãy tải lại bản dịch từ Lịch sử dịch rồi tiếp tục, để không ghi đè phần đã dịch.',code:'history_conflict',revision:2,updatedAt:sqlite.prepare('SELECT updated_at FROM study_sessions').get().updated_at});
  assert.equal(await (await env.FILES.get(key)).text(),before);assert.deepEqual({...sqlite.prepare('SELECT status,translated_parts,revision FROM study_sessions').get()},{status:'complete',translated_parts:2,revision:2});
  // A browser from before revisions sends none and saves as it always did; the list and the session report the revision.
  assert.equal((await call(save({...state,translationParts:['Một.','Hai.'],done:2}),{id:first.id})).status,200);
@@ -49,6 +49,25 @@ test('An account\'s history is held to a number of items, a size and new items a
  assert.equal((await call(save(state),{id:one.id})).status,200,'an existing item still saves');
  assert.equal((await call(null,{id:one.id,method:'DELETE'})).status,200);assert.equal((await call(save(state))).status,201,'deleting frees room');
  assert.equal(sqlite.prepare('SELECT COUNT(*) AS n FROM study_sessions').get().n,2);
+});
+
+test('New items saved at once cannot all pass the room: only those that fit are kept, and the others leave nothing behind',async t=>{
+ // Eight complete items of about 0.6 MB (each would start a book) sent together, against 1 MB: one fits.
+ const {call,sqlite,env}=setup(t,{MAX_HISTORY_MB_PER_USER:'1',MAX_HISTORY_PER_USER:'0',DAILY_HISTORY_PER_USER:'0'});
+ const answers=await Promise.all(Array.from({length:8},(_,n)=>call(save(textState([`${'长'.repeat(95000)}${n}。`])))));
+ assert.deepEqual(answers.map(answer=>answer.status).sort(),[201,413,413,413,413,413,413,413]);
+ for(const answer of answers.filter(answer=>answer.status===413))assert.equal((await answer.json()).code,'history_full');
+ const kept=sqlite.prepare('SELECT id FROM study_sessions').all().map(row=>row.id);assert.equal(kept.length,1);
+ assert.equal(sqlite.prepare('SELECT COUNT(*) AS n FROM stories').get().n,1,'a refused item starts no book');
+ assert.deepEqual([...new Set(env.FILES.keys(`study/${reader.id}/`).map(key=>key.split('/')[2]))],kept,'only the kept item has files');
+ // The number of items is held the same way.
+ const small=save(textState(['第一段。'])),items=setup(t,{MAX_HISTORY_PER_USER:'2',MAX_HISTORY_MB_PER_USER:'0',DAILY_HISTORY_PER_USER:'0'});
+ assert.deepEqual((await Promise.all(Array.from({length:5},()=>items.call(small)))).map(answer=>answer.status).sort(),[201,201,413,413,413]);
+ assert.equal(items.sqlite.prepare('SELECT COUNT(*) AS n FROM study_sessions').get().n,2);
+ // A first save sent twice at once under its own id (as a whole-book chunk is): the second is an update, not a new item.
+ const last=setup(t,{MAX_HISTORY_PER_USER:'1',MAX_HISTORY_MB_PER_USER:'0',DAILY_HISTORY_PER_USER:'0'}),id=crypto.randomUUID();
+ assert.deepEqual((await Promise.all([last.call({...small,id}),last.call({...small,id})])).map(answer=>answer.status),[201,201]);
+ assert.deepEqual(last.sqlite.prepare('SELECT id,revision FROM study_sessions').all().map(row=>({...row})),[{id,revision:2}]);
 });
 
 test('The size limit counts what each item stores and lets an item shrink; the daily limit counts only new items',async t=>{

@@ -114,9 +114,9 @@ cd deploy/pdf-layout && docker compose up -d --build && docker image prune -f
 ```
 
 - Build lại khi một trong các tệp sau thay đổi: `services/pdf-layout/`, `package.json`, `package-lock.json`, `frontend/pdf-box-layout.js`, `frontend/math-text.js`.
-- Lúc container khởi động lại, các lượt đang chạy sẽ lỗi. Lượt dịch cả quyển tự chờ rồi thử lại; ở chế độ chọn trang, trang tự thử lại 3 lần (mỗi lần chờ khoảng 30 giây) rồi mới để người dùng bấm dịch lại.
+- Lúc container khởi động lại, các lượt đang chạy sẽ lỗi. Lượt dịch cả quyển tự chờ rồi thử lại; ở chế độ chọn trang, trang tự thử lại 3 lần (mỗi lần chờ khoảng 30 giây) rồi mới để người dùng bấm dịch lại. Từ lượt sửa thứ ba (23/10/2026), các lượt dịch vụ không làm được như vậy được trả lại hạn mức ngày của học sinh.
 - **Thứ tự cập nhật:** deploy Worker (phần B) trước hoặc cùng lúc với dịch vụ PDF. Hai bên dùng chung bộ kiểm tra tài liệu (`frontend/pdf-box-layout.js`); dịch vụ mới chạy với Worker cũ có thể khiến mọi trang scan báo "Ảnh trang PDF không hợp lệ.".
-- **Kiểm tra hai bên khớp nhau:** `/health` của dịch vụ báo `version.layout` (mã băm của bộ kiểm tra tài liệu) và `version.service` (mã băm mã nguồn của image). `npm run deploy` cho Worker biết mã bố cục của nó, nên `https://<Worker>/api/health?deep=1` báo `"layoutMatch":true` khi khớp, và `"status":"mismatch"` (mã 503) khi lệch. Kiểm tra sau deploy của `npm run deploy` cũng cảnh báo khi image chạy bản mã nguồn khác commit vừa deploy.
+- **Kiểm tra hai bên khớp nhau:** `/health` của dịch vụ báo `version.layout` (mã băm của bộ kiểm tra tài liệu) và `version.service` (mã băm mã nguồn của image). `npm run deploy` cho Worker biết mã bố cục của nó, nên `https://<Worker>/api/health?deep=1` báo `"layoutMatch":true` khi khớp, và `"status":"mismatch"` (mã 503) khi lệch. Kiểm tra sau deploy của `npm run deploy` cũng cảnh báo khi image chạy bản mã nguồn khác commit vừa deploy. Một image cũ mà cùng bộ kiểm tra bố cục vẫn báo `"layoutMatch":true`: lượt sửa thứ ba (23/10/2026) là trường hợp đó (đổi `extract.py`, `engine.mjs`, `server.mjs`, `healthcheck.mjs`, `Dockerfile` mà không đổi bộ kiểm tra), nên chỉ có cảnh báo "Dịch vụ PDF đang chạy bản …" nhắc build lại; các bản sửa của bộ tách trang, việc kiểm phông và việc làm mới bố cục chỉ có sau khi build lại.
 
 **Bản vá hằng tháng** (Chromium, MuPDF, Python và các gói Debian trong image). Lệnh build thường dùng lại lớp `apt-get` cũ trong cache, nên bản vá chỉ vào image khi build với `--pull --no-cache`:
 
@@ -150,15 +150,15 @@ docker compose up -d --no-build pdf-layout
 1. Sửa `.env`, rồi chạy `docker compose up -d` (container `pdf-layout` được tạo lại).
 2. Ngay sau đó chạy `npx wrangler secret put PDF_LAYOUT_SERVICE_TOKEN` với cùng giá trị.
 
-Giữa hai bước, các thao tác PDF báo "Unauthorized".
+Giữa hai bước, dịch vụ từ chối Worker (401): học sinh thấy "Dịch vụ PDF đang tạm ngừng. Hãy thử lại sau ít phút; nếu lỗi kéo dài, hãy báo quản trị viên." (Worker trả 503 `pdf_unavailable`, `Retry-After: 30`, không tính vào hạn mức ngày), Workers Logs có dòng `{"event":"pdf_service_refused","operation":…,"status":401}`, và `/api/health?deep=1` báo `"unauthorized"`. Trước lượt sửa thứ ba, học sinh thấy thẳng chữ "Unauthorized" (400, không có mã).
 
 ### A.6 Giới hạn và cách cấu hình
 
 | Mục | Giá trị |
 |---|---|
-| Thời gian | Caddy chờ phản hồi tối đa 300 s; Worker chờ 280 s; tách trang (Python) dừng ở 240 s; một lần xuất PDF (Chromium và ghép trang) dừng ở 250 s. Trước mức 240 s, `extract.py` tự thôi bắt đầu trang mới khi sắp quá khoảng 170 s (`PDF_EXTRACT_SECONDS`) và trả các trang đã xong kèm "Lượt này xử lý X/Y trang đã chọn…". Muốn đổi thì đặt `PDF_EXTRACT_SECONDS` trong `.env` (một số, nhỏ hơn 240): compose chuyển nó vào container, mặc định 170 |
+| Thời gian | Caddy chờ phản hồi tối đa 300 s; Worker chờ 280 s; tách trang (Python) dừng ở 240 s; một lần xuất PDF (Chromium và ghép trang) dừng ở 250 s. Trước mức 240 s, `extract.py` tự thôi bắt đầu trang mới khi sắp quá khoảng 170 s (`PDF_EXTRACT_SECONDS`) và trả các trang đã xong kèm "Lượt này xử lý X/Y trang đã chọn…". Muốn đổi thì đặt `PDF_EXTRACT_SECONDS` trong `.env` (một số dương, nhỏ hơn 240): compose chuyển nó vào container, mặc định 170. Từ lượt sửa thứ ba, `0`, số âm hay chữ không phải số đều dùng 170 (trước đó `0` làm mọi lượt chỉ trả trang đầu, chữ làm mọi lượt lỗi). Làm mới bố cục của một bản dịch cũ (header `X-PDF-All-Pages: 1`, cần đủ mọi trang) được dùng 225 s thay cho 170 s; không xong thì Worker trả 413 kèm lời khuyên dịch lại thành lượt nhỏ hơn |
 | Kích thước | Caddy nhận thân yêu cầu tới 48 MB. Dịch vụ tự giới hạn PDF 25 MiB và JSON 40 MiB: quá giới hạn thì nó vẫn đọc hết thân yêu cầu rồi trả 413 với `"code":"too_large"` và câu "Dữ liệu gửi tới dịch vụ PDF lớn hơn 25 MB (hoặc 40 MB)…" (Worker báo `pdf_too_large`), chỉ cắt kết nối khi người gửi vượt thêm 64 MiB. JSON hỏng hay header `X-PDF-Pages` hỏng nhận 400 bằng tiếng Việt |
-| Đồng thời | `PDF_LAYOUT_JOBS` việc mỗi container (mặc định 2). Worker chia các chỗ đó cho cả trang web: tối đa `PDF_LAYOUT_SLOTS` lượt cùng lúc (var của Worker, khai báo `"2"` trong khối `"vars"` của `wrangler.jsonc`, đặt bằng `PDF_LAYOUT_JOBS`; muốn đổi thì sửa giá trị đó, ví dụ `"3"`, rồi deploy lại), mỗi tài khoản tối đa một lượt. Khi đầy, Worker trả 503 `pdf_service_busy` kèm `Retry-After: 20` mà không gọi dịch vụ; lượt dịch cả quyển tự chờ rồi thử lại (tối đa khoảng nửa giờ) |
+| Đồng thời | `PDF_LAYOUT_JOBS` việc mỗi container (mặc định 2). Worker chia các chỗ đó cho cả trang web: tối đa `PDF_LAYOUT_SLOTS` lượt cùng lúc (var của Worker, khai báo `"2"` trong khối `"vars"` của `wrangler.jsonc`, đặt bằng `PDF_LAYOUT_JOBS`; muốn đổi thì sửa giá trị đó, ví dụ `"3"`, rồi deploy lại), mỗi tài khoản tối đa một lượt. Khi đầy, Worker trả 503 `pdf_service_busy` kèm `Retry-After: 20` mà không gọi dịch vụ; trang tự chờ rồi thử lại (chọn trang: 15 lần; dịch cả quyển: tối đa khoảng nửa giờ). Từ lượt sửa thứ ba, Worker giữ chỗ trước khi đọc tệp tải lên, nên câu trả lời bận đến ngay mà không phải nhận tới 25 MB, và trình duyệt hỏi `GET /api/my/study/pdf-layout/capacity` (một lần đọc D1, không giữ chỗ) trước khi tải lên lại. Đổi lại, một chỗ bị giữ suốt lúc tệp đang được tải lên |
 | Việc nặng | Tách trang quá thời gian, hết bộ nhớ, kết quả quá lớn hoặc tiến trình chết: Worker trả 413 (`pdf_timeout`, `pdf_memory`, `pdf_too_large`, `pdf_crash`) và lượt dịch cả quyển tự thử lại với nửa số trang; ở chế độ chọn trang, học sinh được khuyên chọn ít trang hơn (3–5 trang) |
 | Người gọi rời đi | Khi Worker ngắt kết nối (học sinh đóng tab, Worker hết 280 s), dịch vụ dừng việc ngay (dừng Python, đóng Chromium) và nhường chỗ. Chỗ của Worker (lưu trong D1) tự hết hạn sau tối đa 1 phút |
 | Tài nguyên | Mặc định 2 CPU và 3g RAM. Đổi bằng `PDF_LAYOUT_CPUS` và `PDF_LAYOUT_MEMORY` trong `.env`; máy 1 CPU phải đặt `PDF_LAYOUT_CPUS=1` (và `PDF_LAYOUT_JOBS=1`, `PDF_LAYOUT_SLOTS=1`) |
@@ -166,7 +166,7 @@ Giữa hai bước, các thao tác PDF báo "Unauthorized".
 | Sức khỏe | `healthcheck.mjs` gọi `/health` kèm token mỗi 15 giây; `docker compose ps` hiện `healthy`. Docker không tự khởi động lại container chỉ vì unhealthy, nên sau 4 lần lỗi liên tiếp (`PDF_HEALTH_RESTART_AFTER`, 0 là tắt) chính bước kiểm tra dừng dịch vụ và `restart: unless-stopped` khởi động lại |
 | Nhật ký | `docker compose logs --tail 200 pdf-layout` hoặc `caddy`. Mỗi dịch vụ giữ tối đa 3 tệp 10 MB. Caddy ghi `Authorization` thành `REDACTED` |
 | OCR | Cùng dữ liệu `chi_sim` và `eng` (@tesseract.js-data 4.0.0_best_int) với `npm test` và bản Windows |
-| Phông chữ | Liberation Serif (gói `fonts-liberation2`): cùng độ rộng chữ với Times New Roman mà mọi phép đo độ vừa ô trên Windows đã dùng, đủ mọi chữ Việt. DejaVu Serif chỉ bù các ký hiệu Liberation thiếu. Image không build được nếu thiếu Liberation Serif; `/health` báo phông đang dùng. Muốn phông khác thì đặt `PDF_FONT_PATH` cho container |
+| Phông chữ | Liberation Serif (gói `fonts-liberation2`): cùng độ rộng chữ với Times New Roman mà mọi phép đo độ vừa ô trên Windows đã dùng, đủ mọi chữ Việt. DejaVu Serif chỉ bù các ký hiệu Liberation thiếu. Image không build được nếu thiếu Liberation Serif; `/health` báo phông đang dùng. Từ lượt sửa thứ ba, dịch vụ chỉ nêu phông khi tệp có thật: không có tệp nào thì build in "PDF font: none" rồi dừng, `/health` báo `"font":null`, `/font` và mọi lần xuất trả 500 `code:"font"` (Worker: 503 `pdf_unavailable`, "Dịch vụ PDF đang thiếu phông chữ…"). Muốn phông khác thì đặt `PDF_FONT_PATH` cho container |
 
 Đã có reverse proxy khác (ví dụ nginx)? Chỉ chạy dịch vụ: `docker compose up -d pdf-layout`. Thêm `docker-compose.override.yml` mở `127.0.0.1:8091:8091` cho dịch vụ đó, và giữ đúng các giới hạn ở trên: timeout ≥ 300 s, thân yêu cầu ≥ 45 MB, không giữ kết nối keep-alive tới dịch vụ.
 
@@ -177,8 +177,8 @@ Giữa hai bước, các thao tác PDF báo "Unauthorized".
 | Caddy báo `challenge failed`, `NXDOMAIN` hoặc không lấy được chứng chỉ | DNS chưa trỏ đúng; bản ghi đang bật proxy cam; cổng 80/443 bị chặn | Sửa DNS (DNS only), mở cổng, rồi `docker compose restart caddy` |
 | Worker báo "…không phản hồi đúng (mã 524)" | Bản ghi DNS đang qua proxy Cloudflare | Chuyển sang DNS only |
 | Worker báo "…(mã 502)" | Container `pdf-layout` không chạy hoặc đang khởi động lại | `docker compose ps`, rồi `docker compose logs pdf-layout` |
-| "Unauthorized" | Token ở `.env` khác secret của Worker | Đặt giống hệt ở cả hai nơi (mục A.5) |
-| "Not found" | `PDF_LAYOUT_SERVICE_URL` có thêm đường dẫn | Chỉ dùng gốc `https://pdf.example.com` |
+| Học sinh gặp "Dịch vụ PDF đang tạm ngừng. Hãy thử lại sau ít phút; nếu lỗi kéo dài, hãy báo quản trị viên." trong khi `docker compose ps` vẫn `healthy`; Workers Logs có `"event":"pdf_service_refused"` với `"status":401` (bản trước lượt sửa thứ ba: học sinh thấy "Unauthorized") | Token ở `.env` khác secret của Worker | Đặt giống hệt ở cả hai nơi (mục A.5) |
+| Như dòng trên nhưng `"status":404` (bản trước: "Not found") | `PDF_LAYOUT_SERVICE_URL` có thêm đường dẫn, hoặc trỏ sai host | Chỉ dùng gốc `https://pdf.example.com` |
 | `pdf-layout` khởi động lại liên tục, nhật ký có "Đặt PDF_LAYOUT_SERVICE_TOKEN tối thiểu 24 ký tự." | Token quá ngắn | Sinh lại bằng `openssl rand -hex 32` |
 | `range of CPUs is from 0.01 to 1.00` | Máy chủ chỉ có 1 CPU | Đặt `PDF_LAYOUT_CPUS=1` trong `.env` |
 | `pdf-layout` unhealthy, nhật ký có `Killed` hoặc `SIGKILL` | Thiếu RAM | Tăng `PDF_LAYOUT_MEMORY`, hoặc chọn ít trang hơn mỗi lượt |
@@ -187,7 +187,8 @@ Giữa hai bước, các thao tác PDF báo "Unauthorized".
 | `/api/health?deep=1` báo `"status":"mismatch"` | Worker và dịch vụ chạy hai commit có bộ kiểm tra bố cục khác nhau | Cập nhật dịch vụ cho cùng commit với Worker (mục A.5) |
 | `/api/health?deep=1` báo `"unauthorized"`, `"unreachable"` hoặc `"timeout"` | Token khác nhau; máy chủ, DNS hoặc Caddy không chạy | Đặt lại token (mục A.5); `docker compose ps`, `docker compose logs caddy` |
 | `pdf-layout` khởi động lại sau khoảng mỗi phút | Bước kiểm tra sức khỏe lỗi liên tiếp nên tự khởi động lại | `docker compose logs pdf-layout`; tạm đặt `PDF_HEALTH_RESTART_AFTER=0` trong `.env` để tìm lỗi |
-| `docker compose build` dừng ngay sau dòng `PDF font: …` (mã 1) | Phông xuất PDF tìm được không phải `LiberationSerif-Regular.ttf`: gói `fonts-liberation2` không cài được hoặc đổi chỗ để tệp | Đọc lỗi của bước `apt-get` phía trên; nếu Debian đổi đường dẫn tệp, sửa `LINUX_FONTS` trong `services/pdf-layout/engine.mjs` rồi build lại |
+| `docker compose build` dừng ngay sau dòng `PDF font: …` (mã 1); từ lượt sửa thứ ba cũng sau `PDF font: none` | Phông xuất PDF tìm được không phải `LiberationSerif-Regular.ttf`, hoặc không có tệp phông nào: gói `fonts-liberation2` không cài được hoặc đổi chỗ để tệp | Đọc lỗi của bước `apt-get` phía trên; nếu Debian đổi đường dẫn tệp, sửa `LINUX_FONTS` trong `services/pdf-layout/engine.mjs` rồi build lại |
+| Học sinh gặp "Dịch vụ PDF đang thiếu phông chữ để dựng bản PDF tiếng Việt, nên chưa xuất được PDF…" (Worker: 503 `pdf_unavailable`); `/health` báo `"font":null`; `npm run deploy` cảnh báo "Dịch vụ PDF không báo phông chữ xuất PDF…" | Container không có tệp phông: `PDF_FONT_PATH` đặt cho container trỏ tới tệp không có, hoặc image được dựng khác `Dockerfile` này | Bỏ hay sửa `PDF_FONT_PATH`, build lại image (mục A.5). Nhật ký `docker compose logs pdf-layout` có dòng `[pdf-layout] /font …` nêu các tệp đã tìm |
 | `/api/health?deep=1` báo `"status":"error"` kèm `"code"` | Dịch vụ trả mã HTTP đó cho `/health` (ví dụ Caddy trả 502 khi container chưa chạy) | `docker compose ps`, `docker compose logs pdf-layout caddy` |
 | Học sinh hay gặp "Xuất PDF tiếng Việt vượt thời gian cho phép của dịch vụ…" hoặc "Tách PDF vượt thời gian cho phép…" | Máy chủ quá tải (2 việc trên máy yếu, swap đầy) hoặc PDF quá nặng | `docker stats` và `free -h` lúc có việc; tăng CPU/RAM, hoặc giảm `PDF_LAYOUT_JOBS` và `PDF_LAYOUT_SLOTS` |
 | Học sinh gặp "Dịch vụ PDF chưa mở được trình duyệt để dựng bản PDF tiếng Việt…" khi xuất PDF (Worker: 503 `pdf_unavailable`) | Chromium trong container không khởi động được | `docker compose logs pdf-layout`: dòng `[pdf-layout] /render …` ghi lỗi gốc trong ngoặc (thiếu tệp trình duyệt, `CHROMIUM_EXECUTABLE_PATH` sai, "Failed to launch the browser process"). Build lại image (mục A.5); kiểm tra RAM và `shm_size` |
@@ -200,7 +201,8 @@ Không có gì tự báo khi dịch vụ PDF ngừng, nên đặt một dịch v
 
 - `https://<Worker>/api/health?deep=1`: báo động khi mã khác 200. Mã 503 nghĩa là D1 lỗi (`"database":"error"`) hoặc Worker không dùng được dịch vụ PDF (`"pdfService":{"status":…}`). Câu trả lời không chứa token, URL hay nội dung lỗi; mỗi isolate của Worker (một bản đang chạy trên một máy của Cloudflare) hỏi dịch vụ tối đa một lần mỗi 30 giây, dù có bao nhiêu lần kiểm tra. Kiểm tra bằng `HEAD` cũng được: chỉ trả mã 200 hoặc 503.
 - `https://pdf.example.com/health`: mong đợi mã 401 (dịch vụ đòi token). Kiểm tra này đi thẳng tới Caddy, nên vẫn báo khi Worker hoạt động bình thường mà máy chủ PDF không vào được. Bật thêm cảnh báo hết hạn chứng chỉ TLS nếu dịch vụ theo dõi có.
-- Trên Cloudflare: bật Notifications cho Worker để biết khi tỉ lệ lỗi tăng; xem lỗi trực tiếp bằng `npx wrangler tail`. Lỗi mà các trang gặp trong trình duyệt của người dùng là những dòng `"event":"client_error"` trong Workers Logs (nội dung lỗi đã lọc, tệp và dòng, đường dẫn trang, họ trình duyệt; ONBOARDING mục 5.9). Chưa có gì tự báo động theo số dòng này: xem lại mỗi tuần, và ngay sau mỗi lần deploy.
+- `/api/health?deep=1` vẫn `ok` (mã 200) khi dịch vụ không có tệp phông, chỉ `"font":null`, trong khi mọi lần xuất PDF lỗi; nếu dịch vụ theo dõi kiểm được nội dung, cho nó tìm chữ `LiberationSerif` trong câu trả lời.
+- Trên Cloudflare: bật Notifications cho Worker để biết khi tỉ lệ lỗi tăng; xem lỗi trực tiếp bằng `npx wrangler tail`. Dòng `"event":"pdf_service_refused"` (từ lượt sửa thứ ba; kèm `operation` và `status`) nghĩa là dịch vụ từ chối Worker: token hai phía khác nhau (401) hay URL sai (404), mục A.7. Lỗi mà các trang gặp trong trình duyệt của người dùng là những dòng `"event":"client_error"` trong Workers Logs (nội dung lỗi đã lọc, tệp và dòng, đường dẫn trang, họ trình duyệt; ONBOARDING mục 5.9). Chưa có gì tự báo động theo số dòng này: xem lại mỗi tuần, và ngay sau mỗi lần deploy.
 - Trên máy chủ: `docker compose ps` phải hiện `healthy`; `docker compose logs --since 1h pdf-layout | grep "stopped: the caller left"` cho biết bao nhiêu lượt bị bỏ dở.
 
 ## B. Deploy Worker bằng `npm run deploy`
@@ -266,7 +268,7 @@ Script chạy theo thứ tự sau và dừng ở bước đầu tiên không đ�
 5. **Deploy:** `wrangler deploy --strict`, gắn tag là mã commit, kèm var `PDF_LAYOUT_VERSION` (mã băm bộ kiểm tra bố cục của commit này, để `/api/health?deep=1` so với dịch vụ PDF).
 6. **Kiểm tra bản mới:**
    - `/api/health` báo đúng commit.
-   - `/api/health?deep=1`: Worker gọi được dịch vụ PDF và hai bên dùng cùng bộ kiểm tra bố cục (lệch là lỗi). Script cảnh báo khi image của dịch vụ chạy bản mã nguồn khác commit này, hoặc không xuất PDF bằng Liberation Serif.
+   - `/api/health?deep=1`: Worker gọi được dịch vụ PDF và hai bên dùng cùng bộ kiểm tra bố cục (lệch là lỗi). Script cảnh báo khi image của dịch vụ chạy bản mã nguồn khác commit này, không xuất PDF bằng Liberation Serif, hoặc (từ lượt sửa thứ ba) không báo phông nào: image thiếu tệp phông, nên mọi lần xuất sẽ lỗi, hoặc là bản cũ.
    - Các tệp `/vendor/` là tệp thật, không phải trang chủ trả thay.
    - `/api/library` và `/api/me` trả lời; `/api/me` cho biết chế độ đăng ký đang bật.
    - Trang chủ có Content-Security-Policy.
@@ -308,15 +310,15 @@ Remove-Item Env:HOATRI_ADMIN_TOKEN
   - chặn commit nhầm `.dev.vars`, `.env`, khóa Google, khóa riêng tư, `samples/`, `.wrangler/`;
   - `npm ci`, `prepare:vendor -- --require-paddle` (mô hình PaddleOCR lấy từ `backend/paddle-models/`, không tải mạng; thiếu PaddleOCR thì job đỏ), PyMuPDF và dữ liệu OCR;
   - `npm test` với `backend/test-support/no-paid-api.mjs` nạp trước;
-    - Test máy PDF dùng Chromium của máy chạy CI và phông Liberation Serif như image: job cài `fonts-liberation2` cùng `fonts-dejavu-core` (không có `fonts-liberation2` thì dùng `fonts-liberation`), rồi đỏ nếu `fontPath()` của `services/pdf-layout/engine.mjs` không ra `LiberationSerif-Regular.ttf`.
+    - Test máy PDF dùng Chromium của máy chạy CI và phông Liberation Serif như image: job cài `fonts-liberation2` cùng `fonts-dejavu-core` (không có `fonts-liberation2` thì dùng `fonts-liberation`), rồi đỏ nếu `fontPath()` của `services/pdf-layout/engine.mjs` không ra `LiberationSerif-Regular.ttf`, hoặc (từ lượt sửa thứ ba) tệp đó không có (`test -f`; `fontPath()` khi đó là `null` và bước in "PDF font: none"). Trước đó bước này qua được cả khi không có tệp phông nào.
     - Các test giao diện chỉ dành cho Edge (`book-ui`, `study-ui-*`, `reader-phone-ui`, `old-browsers`…, danh sách ở ONBOARDING mục 7) được bỏ qua.
-    - Job đỏ nếu một test cần Python bị bỏ qua (kể cả `pdf-extract-text-layer` mới), vì khi đó bước cài Python đã hỏng.
+    - Job đỏ nếu một test cần Python bị bỏ qua (kể cả `pdf-extract-text-layer` và `pdf-extract-shapes` của lượt sửa thứ ba), vì khi đó bước cài Python đã hỏng.
   - `wrangler deploy --dry-run`.
 - **pdf-image:**
   - kiểm `docker-compose.yml` và `Caddyfile`;
   - build `services/pdf-layout/Dockerfile`;
   - chạy container với cùng giới hạn như compose, rồi kiểm tra:
-    - nó tự báo healthy, và `/health` báo `"font":"LiberationSerif-Regular.ttf"`;
+    - nó tự báo healthy, và `/health` báo `"font":"LiberationSerif-Regular.ttf"` (từ lượt sửa thứ ba, `/health` chỉ báo tên này khi tệp có thật, nên kiểm tra này mới có ý nghĩa);
     - nó không chạy bằng root;
     - nó đòi token;
     - `smoke.mjs` chạy bên trong container đạt.
@@ -375,6 +377,15 @@ Các lần chạy dưới đây không gọi Gemini và không chạm vào Cloud
 - `docker compose config` cho `PDF_EXTRACT_SECONDS` là `"170"`. `security.txt` được phục vụ như tệp tĩnh: suy ra từ mã nguồn wrangler 4.131.1 (thư mục bắt đầu bằng dấu chấm vẫn được tải lên, kiểu `text/plain; charset=utf-8`), chưa chạy `wrangler dev`.
 - `node backend/deploy.mjs --check --skip-tests` trên repo này dừng ở bước 1 đúng như mong đợi: `database_id` còn `local-db`, chỗ trống trong `security.txt` và hai trang pháp lý, tệp chưa commit, commit chưa có trên `origin/handoff/2026-10-16`. Không gọi Cloudflare.
 
+**Lượt sửa thứ ba (23/10/2026), trên máy Windows, không Docker, không gọi Gemini** (do các lượt sửa ghi lại; người cập nhật runbook này không chạy lại):
+
+- `server.mjs` thật ở `127.0.0.1` với `extract.py` mới, rồi `smoke.mjs`: đạt cả sáu bước, hai lần.
+- `server.mjs` và `healthcheck.mjs` gọi qua một thư mục junction: dịch vụ trả `/health`, còn `healthcheck.mjs` thoát 1 khi không có dịch vụ. Với mã trước đó, `server.mjs` thoát 0 ngay mà không mở cổng và `healthcheck.mjs` thoát 0. `npm run deploy` gọi qua junction cũng chạy (trước đó không in gì).
+- Lệnh `node -e` của bước kiểm phông trong `Dockerfile`, chạy tay: thoát 1 khi không có tệp hay khi tệp là DejaVu Serif, thoát 0 khi có Liberation Serif. Lệnh của `Dockerfile` cũ thoát 0 cả khi đường dẫn Liberation không có tệp.
+- Test HTTP của dịch vụ (`backend/pdf-layout-service.test.mjs`, engine thật, không mở trình duyệt): thiếu tệp phông thì `/health` báo `"font":null`, `/font` và `/render` trả 500 `code:"font"`; header `X-PDF-All-Pages: 1` cho lượt đó `PDF_EXTRACT_SECONDS=225`. Với `extract.py` thật (bản của `864cbf3`, vì bản mới khi đó đang được sửa) và `PDF_EXTRACT_SECONDS=0.000001`, lượt thường trả 1 trang, lượt có header trả đủ 4 trang.
+- Test của Worker (`backend/pdf-layout.test.mjs`): trả lời bận (429, 503) mà không đọc byte nào của thân yêu cầu; `GET /capacity`; dịch vụ trả 401, 403, 404 thành 503 `pdf_unavailable` và hạn mức ngày được trả lại; lần xuất trùng một lần lưu khác trả 409 và không ghi gì.
+- Không chạy trong lượt này: các test xuất PDF bằng Edge của `pdf-layout-service` và `pdf-engine-browser` (máy còn dưới 1,2 GB đĩa trống lúc đó), `docker build`, CI trên GitHub.
+
 Chưa kiểm chứng:
 
 - Image có `fonts-liberation2`, bước kiểm tra phông khi build và `healthcheck.mjs` chưa build lần nào (máy bàn giao không chạy Docker); job `pdf-image` của CI sẽ là lần đầu. Việc tự khởi động lại container sau 4 lần kiểm tra lỗi cũng chưa chạy trên Docker thật.
@@ -387,7 +398,8 @@ Chưa kiểm chứng:
 - Bước `prepare:vendor -- --require-paddle` của CI (thay cho bước tải mô hình PaddleOCR có cache) chưa chạy trên GitHub. Chế độ bắt buộc này có test trong `npm test` (`backend/paddle-assets.test.mjs`: thiếu mô hình thì báo lỗi thay vì chỉ cảnh báo).
 - Cấp chứng chỉ thật và chạy trên máy chủ thật.
 - Deploy thật lên Cloudflare: D1, R2, secret, giới hạn của Workers Paid. Các kiểm tra mới của script (commit đã push, từ điển, `security.txt`, `http://` chuyển sang `https://`) mới chạy với Cloudflare và git giả lập trong `backend/deploy.test.mjs`.
-- Các bước phông của CI (`fonts-liberation2` trên Ubuntu 24.04 của GitHub, `/health` báo Liberation Serif trong job `pdf-image`) chưa chạy trên GitHub.
+- Các bước phông của CI (`fonts-liberation2` trên Ubuntu 24.04 của GitHub, `test -f` của lượt sửa thứ ba, `/health` báo Liberation Serif trong job `pdf-image`) chưa chạy trên GitHub.
+- Của lượt sửa thứ ba: lần ghi `state.json` có điều kiện của bước xuất PDF (R2 `onlyIf.etagMatches`) mới chạy với R2 giả trong test, chưa với R2 thật hay miniflare; việc Worker trả 429/503 mà không đọc thân yêu cầu chưa thử trên Cloudflare thật (trình duyệt dùng HTTP/1.1 có thể thấy kết nối bị cắt thay vì câu trả lời); `GET /capacity` chưa chạy trên D1 thật.
 - Các lệnh sao lưu và khôi phục ở mục B.5.
 
 ### B.5 Sao lưu và khôi phục dữ liệu (D1, R2)

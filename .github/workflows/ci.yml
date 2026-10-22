@@ -71,9 +71,10 @@ jobs:
           # fit was tuned with; DejaVu Serif fills in symbols. The engine itself must pick it (engine.mjs fontPath).
           sudo apt-get update -q
           sudo apt-get install -y -q --no-install-recommends fonts-liberation2 fonts-dejavu-core || sudo apt-get install -y -q --no-install-recommends fonts-liberation fonts-dejavu-core
-          font="$(node -e "import('./services/pdf-layout/engine.mjs').then(({fontPath})=>console.log(fontPath()))")"
-          echo "PDF font: $font"
-          case "$font" in */LiberationSerif-Regular.ttf) ;; *) echo "::error::The PDF engine would export with $font, not Liberation Serif"; exit 1;; esac
+          font="$(node -e "import('./services/pdf-layout/engine.mjs').then(({fontPath})=>console.log(fontPath()||''))")"
+          echo "PDF font: ${font:-none}"
+          case "$font" in */LiberationSerif-Regular.ttf) ;; *) echo "::error::The PDF engine would export with ${font:-no font file}, not Liberation Serif"; exit 1;; esac
+          test -f "$font" || { echo "::error::$font does not exist"; exit 1; }
           # book-ui.test.mjs measures layouts in Microsoft Edge as on Windows and skips without it; the image ships Edge.
           sudo rm -rf /opt/microsoft/msedge
 

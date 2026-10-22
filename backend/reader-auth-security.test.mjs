@@ -42,7 +42,7 @@ function browser(env,ip='198.51.100.1'){
 }
 const register=(client,email='lan@example.test',password=PASSWORD,name='Lan')=>client.send('/api/auth/register',{method:'POST',body:{name,email,password,acceptTerms:true}});
 const userId=(sqlite,email)=>sqlite.prepare('SELECT user_id FROM reader_credentials WHERE email_normalized=?').get(email).user_id;
-const failureLevel=async(sqlite,name)=>sqlite.prepare('SELECT level FROM auth_failures WHERE key=?').get(await auth.failureKey(name))?.level??0;
+const failureLevel=async(sqlite,name)=>sqlite.prepare('SELECT level FROM auth_failures WHERE key=?').get(await auth.failureKey({ADMIN_TOKEN:ADMIN},name))?.level??0;
 const clock=t=>{t.mock.timers.enable({apis:['Date'],now:NOW});return ms=>t.mock.timers.tick(ms);};
 // A stored password made as registration makes it, for accounts from before the rules.
 async function storedPassword(password){
@@ -355,6 +355,78 @@ test('Migration 0022 makes the table the counts use; without it (not applied yet
  const client=browser(env,'203.0.113.8'),statuses=[];for(let i=0;i<12;i++)statuses.push((await client.login('lan@example.test','doan-sai')).status);
  assert.deepEqual(statuses,Array(12).fill(401));assert.equal((await client.login('lan@example.test',PASSWORD)).status,200);
  assert.ok(lines.length>0&&lines.every(line=>JSON.parse(line).event==='auth_failure_error'));assert.ok(lines.every(line=>!line.includes('lan@example.test')&&!line.includes('203.0.113.8')));
+});
+
+test('With real, spread-out timing the 10th wrong password locks for a minute, at login and for the current password of a password change or an account deletion',async t=>{
+ // The real clock: every guess costs a PBKDF2, so by the 10th the count has drained a little below 10.
+ {
+  const {env}=environment(t),lan=browser(env),attacker=browser(env,'203.0.113.66');assert.equal((await register(lan)).status,201);
+  for(let i=0;i<10;i++)assert.equal((await attacker.login('lan@example.test',`doan-sai-${i}`)).status,401);
+  const locked=await attacker.login('lan@example.test',PASSWORD);
+  assert.equal(locked.status,429,'locked after the 10th');assert.equal(locked.headers.get('Retry-After'),'60');assert.equal(locked.json.scope,'failures');
+  for(let i=0;i<10;i++)assert.equal((await lan.send('/api/auth/password',{method:'POST',body:{currentPassword:`doan-${i}`,newPassword:'mot-mat-khau-moi-han'}})).status,403);
+  const change=await lan.send('/api/auth/password',{method:'POST',body:{currentPassword:PASSWORD,newPassword:'mot-mat-khau-moi-han'}});
+  assert.equal(change.status,429,'a password change too');assert.equal(change.headers.get('Retry-After'),'60');
+ }
+ {
+  const {env}=environment(t),an=browser(env);assert.equal((await register(an,'an@example.test')).status,201);
+  for(let i=0;i<10;i++)assert.equal((await an.send('/api/me',{method:'DELETE',body:{confirm:'XÓA',password:`doan-${i}`}})).status,403);
+  const deletion=await an.send('/api/me',{method:'DELETE',body:{confirm:'XÓA',password:PASSWORD}});
+  assert.equal(deletion.status,429,'an account deletion too');assert.equal(deletion.headers.get('Retry-After'),'60');assert.equal((await an.me()).authenticated,true);
+ }
+ // Guesses 40 seconds apart, ten in six minutes: nine never lock; the 10th does, for a minute, and then it is over.
+ const {env}=environment(t),tick=clock(t),lan=browser(env),attacker=browser(env,'203.0.113.66'),typist=browser(env,'198.51.100.77');
+ assert.equal((await register(lan)).status,201);
+ for(let i=0;i<9;i++){if(i)tick(40000);assert.equal((await typist.login('lan@example.test','go-nham-roi')).status,401);}
+ tick(40000);assert.equal((await typist.login('lan@example.test',PASSWORD)).status,200,'nine wrong passwords do not lock');
+ for(let i=0;i<10;i++){if(i)tick(40000);assert.equal((await attacker.login('lan@example.test',`doan-sai-${i}`)).status,401);}
+ const locked=await attacker.login('lan@example.test',PASSWORD);assert.equal(locked.status,429);assert.equal(locked.headers.get('Retry-After'),'60');
+ tick(61000);assert.equal((await attacker.login('lan@example.test',PASSWORD)).status,200,'a minute later the right password signs in');
+});
+
+test('A reset link lifts what locked the account: its counts are cleared and the browser gets a device mark, as a password change gives one',async t=>{
+ const {sqlite,env}=environment(t);clock(t);const lan=browser(env);assert.equal((await register(lan)).status,201);
+ const uid=userId(sqlite,'lan@example.test');
+ // Wrong passwords from fifty networks lock the address for every browser without a mark: here Lan's, after she
+ // cleared its cookies, with the right password.
+ for(let i=0;i<50;i++)assert.equal((await browser(env,`203.0.113.${i+1}`).login('lan@example.test','doan-sai')).status,401);
+ const home=browser(env,'198.51.100.5');assert.equal((await home.login('lan@example.test',PASSWORD)).status,429);
+ const issued=await (await worker.fetch(new Request(`${origin}/api/users/${uid}/password-reset`,{method:'POST',headers:{Authorization:`Bearer ${ADMIN}`,Origin:origin}}),env,{})).json();
+ const opened=await home.send('/api/auth/password-reset/open',{method:'POST',body:{token:new URLSearchParams(issued.resetUrl.split('?')[1]).get('token')}});
+ const reset=await home.send('/api/auth/password-reset',{method:'POST',body:{token:opened.json.token,password:'tre-xanh-mua-ha'}});
+ assert.equal(reset.status,200);assert.deepEqual(reset.json,{ok:true});
+ assert.match(reset.cookies[0],/^cat_hien_session=[^;]+; Path=\/; HttpOnly; SameSite=Lax; Max-Age=2592000; Secure$/u);
+ assert.match(reset.cookies[1],/^cat_hien_device=[A-Za-z0-9_-]{22}\.[A-Za-z0-9_-]{43}; Path=\/api\/auth\/; HttpOnly; SameSite=Strict; Max-Age=31536000; Secure$/u);
+ assert.equal(await failureLevel(sqlite,'login-email:lan@example.test'),0,'the count of the address is cleared');
+ assert.equal(await failureLevel(sqlite,'login-network:203.0.113.1'),1,'a network\'s count is not the account\'s to clear');
+ // The guesses go on: a browser without the mark waits again, hers signs in with the new password.
+ for(let i=0;i<50;i++)assert.equal((await browser(env,`192.0.2.${i+1}`).login('lan@example.test','doan-tiep')).status,401);
+ assert.equal((await browser(env,'192.0.2.200').login('lan@example.test','tre-xanh-mua-ha')).status,429);
+ assert.equal((await home.send('/api/auth/logout',{method:'POST'})).status,204);
+ assert.equal((await home.login('lan@example.test','tre-xanh-mua-ha')).status,200,'her browser has the mark of the new password');
+});
+
+test('Counts are removed about a day after the last wrong password, even when no new count starts',async t=>{
+ const {sqlite,env}=environment(t),tick=clock(t),lan=browser(env),phone=browser(env,'203.0.113.10');
+ assert.equal((await register(lan)).status,201);
+ const rows=()=>sqlite.prepare('SELECT COUNT(*) AS n FROM auth_failures').get().n,day=24*60*60*1000;
+ // A typo, then the right password: the count of the address on that network is cleared, the address's and the network's stay.
+ assert.equal((await phone.login('lan@example.test','go-nham-roi')).status,401);assert.equal((await phone.login('lan@example.test',PASSWORD)).status,200);assert.equal(rows(),2);
+ tick(day-60000);assert.equal((await lan.login('lan@example.test',PASSWORD)).status,200);assert.equal(rows(),2,'kept for a day');
+ tick(2*60000);assert.equal((await lan.login('lan@example.test',PASSWORD)).status,200);assert.equal(rows(),0,'gone with the next sign-in');
+ // On a quiet day the rows go when a page asks who is signed in.
+ assert.equal((await browser(env,'203.0.113.11').login('lan@example.test','go-nham-roi')).status,401);assert.equal(rows(),3);
+ tick(day+60000);assert.equal((await browser(env).me()).authenticated,false);assert.equal(rows(),0);
+});
+
+test('Counts are keyed by an HMAC only the server can make: no address or email can be recovered or confirmed from the table',async t=>{
+ const {sqlite,env}=environment(t);assert.equal((await register(browser(env))).status,201);
+ assert.equal((await browser(env,'198.51.100.77').login('lan@example.test','doan-sai')).status,401);
+ const names=['login:lan@example.test|198.51.100.77','login-network:198.51.100.77','login-email:lan@example.test'];
+ const keys=sqlite.prepare('SELECT key FROM auth_failures').all().map(row=>row.key).sort();
+ for(const name of names)assert.ok(!keys.includes(await auth.hashToken(`auth-failure:${name}`)),`${name}: not a plain SHA-256 anyone can recompute`);
+ assert.deepEqual(keys,(await Promise.all(names.map(name=>auth.failureKey(env,name)))).sort(),'the server finds them again');
+ assert.ok(!keys.includes(await auth.failureKey({ADMIN_TOKEN:'b9'.repeat(32)},names[1])),'another server secret gives other keys');
 });
 
 test('Counts of a day ago are cleared when a new count starts',async t=>{
