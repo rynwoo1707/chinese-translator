@@ -1,10 +1,10 @@
 // Deleting an account: the student from the account page (DELETE /api/me), or an admin (DELETE /api/users/:id), who
 // can also lock and unlock one (PATCH /api/users/:id {disabled}) and create a password reset link for it
-// (POST /api/users/:id/password-reset). Everything private goes: history, study books, originals and translations,
-// requests and their files, sessions, password reset links. Books published to the shared library stay, without the
-// owner's name.
+// (POST /api/users/:id/password-reset). Everything private goes: history, study books, whole-book runs, originals and
+// translations, requests and their files, sessions, password reset links. Books published to the shared library stay,
+// without the owner's name.
 import {json,crossOrigin,originRefused,logEvent} from './http.js';
-import {currentReader,checkPassword,clearSessionCookie,signedInWithin,createPasswordReset} from './reader-auth.js';
+import {currentReader,verifyPassword,failuresLocked,failureKey,clearSessionCookie,signedInWithin,createPasswordReset} from './reader-auth.js';
 import {rateLimit} from './rate-limit.js';
 import {removeKeys,removePrefix} from './study-history.js';
 
@@ -51,11 +51,17 @@ export async function deleteAccount(env,userId){
   const rows=async sql=>(await db.prepare(sql).bind(userId).all()).results||[];
   stories=await rows("SELECT id,cover_key FROM stories WHERE owner_user_id=?1 AND visibility='private'");chapters=await rows(`SELECT file_key,text_key FROM chapters WHERE story_id IN (${PRIVATE_STORIES})`);
   jobs=await rows(`SELECT id,file_key,source_key,translation_key FROM jobs WHERE story_id IN (${PRIVATE_STORIES})`);requests=await rows('SELECT file_key FROM requests WHERE user_id=?1 AND file_key IS NOT NULL');
+  // The wrong-password counts kept for the account itself (reader-auth.js): its signed-in checks and its email (a
+  // Google-only account's too: passwords typed for it are counted as for any email). Those of a network, or of an email
+  // with a network or a browser, are hashed with what they count and drain within a day.
+  const email=(await rows('SELECT COALESCE(c.email_normalized,LOWER(TRIM(u.email))) AS email FROM reader_users u LEFT JOIN reader_credentials c ON c.user_id=u.id WHERE u.id=?1'))[0]?.email,failures=await Promise.all([`password:${userId}`,`login-email:${email||userId}`].map(failureKey));
   // One transaction, each statement guarded: if a run took a lease since the check above, nothing changes. Rows are
   // removed child first, so the result does not depend on foreign keys being enforced.
-  const guarded=sql=>db.prepare(`${sql} AND NOT ${BUSY}`).bind(userId,now);
+  const guarded=(sql,...more)=>db.prepare(`${sql} AND NOT ${BUSY}`).bind(userId,now,...more);
   results=await db.batch([
    guarded('DELETE FROM study_sessions WHERE user_id=?1'),
+   // Whole-book runs: the title, file name and glossary of a private book.
+   guarded('DELETE FROM book_jobs WHERE user_id=?1'),
    guarded('DELETE FROM requests WHERE user_id=?1'),
    guarded(`DELETE FROM chapters WHERE story_id IN (${PRIVATE_STORIES})`),
    guarded(`DELETE FROM jobs WHERE story_id IN (${PRIVATE_STORIES})`),
@@ -65,8 +71,9 @@ export async function deleteAccount(env,userId){
    guarded('DELETE FROM reader_password_resets WHERE user_id=?1'),
    guarded('DELETE FROM reader_credentials WHERE user_id=?1'),
    // Daily counts and leases keyed by the account id; the per-IP registration count stays, it is not about this account.
-   guarded("DELETE FROM rate_limits WHERE key IN ('upload:'||?1,'pdf-extract:'||?1,'pdf-render:'||?1,'pdf-source:'||?1)"),
+   guarded("DELETE FROM rate_limits WHERE key IN ('upload:'||?1,'pdf-extract:'||?1,'pdf-render:'||?1,'pdf-source:'||?1,'history:'||?1)"),
    guarded("DELETE FROM service_leases WHERE key='pdf:'||?1"),
+   guarded('DELETE FROM auth_failures WHERE key IN (?3,?4)',...failures),
    guarded('DELETE FROM reader_users WHERE id=?1')
   ]);
  }catch(error){await unblock();throw error;}
@@ -87,10 +94,13 @@ export async function accountRoute(request,env,url,path){
  const limit=await rateLimit(env,[{binding:'AUTH_LIMITER',key:`account:${reader.id}`}]);if(limit)return limit;
  const body=await request.json();
  if(!confirmed(body?.confirm))return json({error:'Hãy nhập đúng chữ XÓA để xác nhận.',code:'confirm_required'},400);
- // An account with a password confirms with it; a Google-only account with a recent sign-in.
- const password=await checkPassword(env,reader.id,body?.password);
- if(password==='wrong')return body?.password?json({error:'Mật khẩu không đúng.',code:'wrong_password'},403):json({error:'Hãy nhập mật khẩu hiện tại để xóa tài khoản.',code:'password_required'},400);
- if(password==='none'&&!await signedInWithin(request,env,REAUTH_MS))return json({error:'Hãy đăng xuất rồi đăng nhập lại bằng Google, sau đó xóa tài khoản trong vòng 10 phút.',code:'reauth_required'},403);
+ // An account with a password confirms with it (wrong answers are counted as at login); a Google-only account with a
+ // recent sign-in.
+ const password=await verifyPassword(env,reader.id,body?.password);
+ if(password.status==='missing')return json({error:'Hãy nhập mật khẩu hiện tại để xóa tài khoản.',code:'password_required'},400);
+ if(password.status==='locked')return failuresLocked(password.lock);
+ if(password.status==='wrong')return json({error:'Mật khẩu không đúng.',code:'wrong_password'},403);
+ if(password.status==='none'&&!await signedInWithin(request,env,REAUTH_MS))return json({error:'Hãy đăng xuất rồi đăng nhập lại bằng Google, sau đó xóa tài khoản trong vòng 10 phút.',code:'reauth_required'},403);
  if(await deleteAccount(env,reader.id)==='busy')return json({error:'Một tài liệu của bạn đang được xử lý. Hãy thử lại sau vài phút.',code:'busy'},409);
  return new Response(null,{status:204,headers:{'Set-Cookie':clearSessionCookie(url),'Cache-Control':'no-store'}});
 }

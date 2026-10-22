@@ -1,4 +1,6 @@
 // Metadata only; keys are sent as headers and are never cached or returned.
+import {geminiRejection} from './gemini-errors.js';
+import {UserError} from './http.js';
 export const isStudyModel=id=>typeof id==='string'&&/^gemini-\d+(?:\.\d+)?-flash(?:-lite)?(?:-(?:preview(?:-[\d-]+)?|001))?$/u.test(id);
 export async function listStudyModels(apiKey){
  if(typeof apiKey!=='string'||apiKey.length<20||apiKey.length>500||/[\r\n\0]/u.test(apiKey))throw new Error('Khóa Gemini API không hợp lệ.');
@@ -6,7 +8,9 @@ export async function listStudyModels(apiKey){
  for(let i=0;i<5;i++){
   const url=new URL('https://generativelanguage.googleapis.com/v1beta/models');url.searchParams.set('pageSize','1000');if(token)url.searchParams.set('pageToken',token);
   const response=await fetch(url,{headers:{'x-goog-api-key':apiKey},signal:AbortSignal.timeout(20000)});
-  if(!response.ok)throw new Error([400,401,403].includes(response.status)?`Gemini không xác thực được khóa hoặc quyền API (${response.status}). Hãy kiểm tra khóa đang dùng.`:`Không lấy được danh sách model Gemini (${response.status}). Hãy thử lại sau.`);
+  // The same codes as a translation (gemini-errors.js): a region Google does not serve is not the key's fault.
+  if([400,401,403].includes(response.status)){const error=await geminiRejection(response);throw error.code==='gemini_request'?new UserError(`Gemini không trả danh sách model cho khóa này (${response.status}). Hãy thử lại sau ít phút.`,400,'gemini_error'):error;}
+  if(!response.ok)throw new Error(`Không lấy được danh sách model Gemini (${response.status}). Hãy thử lại sau.`);
   const result=await response.json();
   for(const m of result.models||[]){const id=String(m.name||'').replace(/^models\//u,'');if(isStudyModel(id)&&m.supportedGenerationMethods?.includes('generateContent'))models.set(id,{id,name:String(m.displayName||id)});}
   token=result.nextPageToken||'';if(!token)break;

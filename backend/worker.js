@@ -5,9 +5,9 @@ import {adminContent} from './admin-content.js';
 import {preparePdf,getPdfManifest,assembleBook} from './pdf-pipeline.js';
 import {savePreparedPdfPage} from './pdf-page-upload.js';
 import {studyRoute,studyModelConfig,localTranslationReview} from './study-translation.js';
-import mammoth from 'mammoth/mammoth.browser.js';
+import {extractDocxText} from './document-limits.js';
 import {PROMPT_VERSION,recognizeDocument,translateAndVerify,chunks,withThinking,USAGE_KEYS} from './ai.js';
-import {cleanExtractedPdfText,cleanReaderText} from './pdf-cleaning.js';
+import {cleanExtractedPdfText,cleanReaderText,readerText} from './pdf-cleaning.js';
 import {authRoute,currentReader} from './reader-auth.js';
 import {nextBookTranslationPart,splitBookTranslation} from './book-sections.js';
 import {saveGeminiApiKey,clearGeminiApiKey,geminiKeyStatus,withRuntimeGeminiKey} from './runtime-config.js';
@@ -15,13 +15,15 @@ import {listStudyModels} from './gemini-models.js';
 import {fileDisposition} from './download-filename.js';
 import {readerTerms} from './reader-glossary.js';
 import {saveCover} from './covers.js';
-import {json,withSecurityHeaders,limitBody,crossOrigin,originRefused,errorResponse,isLoopback,logEvent,routeLabel} from './http.js';
+import {json,withSecurityHeaders,limitBody,crossOrigin,originRefused,errorResponse,isLoopback,logEvent,routeLabel,insecureRequest,UserError} from './http.js';
 import {sitePage} from './site-pages.js';
 import {healthRoute} from './health.js';
 import {accountRoute,adminAccountRoute} from './account.js';
 import {rateLimit,dailyMax} from './rate-limit.js';
 import {SAMPLE_PREFIX,validSlug,isSampleBook,libraryRows,readChapters,libraryPublicRoute,libraryAdminRoute,bookPagesReady,rangedPdfResponse} from './library-books.js';
 import {removeFile} from './study-history.js';
+import {adminListRoute} from './admin-lists.js';
+import {CLIENT_ERROR_PATH,clientErrorRoute} from './client-error.js';
 const id=()=>crypto.randomUUID();
 // Published parts and covers are reached from the reader, never meant as search results of their own.
 function noindex(response){try{response.headers.set('X-Robots-Tag','noindex');return response;}catch{const copy=new Response(response.body,response);copy.headers.set('X-Robots-Tag','noindex');return copy;}}
@@ -31,6 +33,18 @@ function required(value,max=200){if(typeof value!=='string'||!value.trim()||valu
 // Empty means the column default, "Chưa cập nhật".
 function cleanAuthor(value){const author=String(value??'').normalize('NFC').trim();if(author.length>200||/[\u0000-\u001f\u007f]/u.test(author))throw new Error('Tên tác giả tối đa 200 ký tự, trên một dòng.');return author;}
 const UNKNOWN_AUTHOR='Chưa cập nhật';
+// A book's terms are one D1 value (a row holds at most 2 MB): an admin edit is refused past these, and the terms a book
+// learns while it is translated are kept up to them, the terms it already had first.
+const MAX_TERMS=5000,MAX_GLOSSARY_BYTES=1_000_000,utf8Bytes=text=>new TextEncoder().encode(text).length;
+export function boundedGlossary(glossary,current){
+ let kept={};try{const value=JSON.parse(current||'{}');if(value&&typeof value==='object'&&!Array.isArray(value))kept=value;}catch{}
+ const out={};let bytes=2,count=0;
+ for(const key of [...Object.keys(kept).filter(key=>Object.hasOwn(glossary||{},key)),...Object.keys(glossary||{}).filter(key=>!Object.hasOwn(kept,key))]){
+  const size=utf8Bytes(JSON.stringify(key)+JSON.stringify(glossary[key]))+2;if(count>=MAX_TERMS||bytes+size>MAX_GLOSSARY_BYTES)break;
+  out[key]=glossary[key];bytes+=size;count++;
+ }
+ return out;
+}
 // Students' own study books: their visibility and author belong to the student's workspace, never to the admin.
 const NOT_STUDY_BOOK="COALESCE(source_url,'') NOT LIKE 'study:%' AND COALESCE(source_url,'') NOT LIKE 'study-book:%'";
 // A short ADMIN_TOKEN can be guessed, so it opens nothing outside this machine; setup generates 64 hex characters.
@@ -38,6 +52,14 @@ const MIN_ADMIN_TOKEN=32;
 const adminTokenUsable=(env,url)=>String(env.ADMIN_TOKEN||'').length>=MIN_ADMIN_TOKEN||Boolean(env.ADMIN_TOKEN)&&isLoopback(url.hostname);
 async function isAdmin(request,env,url){const token=request.headers.get('Authorization')?.replace(/^Bearer /,'')||'';if(!adminTokenUsable(env,url)||!token)return false;const enc=new TextEncoder();const a=new Uint8Array(await crypto.subtle.digest('SHA-256',enc.encode(token))),b=new Uint8Array(await crypto.subtle.digest('SHA-256',enc.encode(env.ADMIN_TOKEN)));let d=0;for(let i=0;i<a.length;i++)d|=a[i]^b[i];return d===0;}
 async function canReadStory(request,env,storyId,admin=false){const story=await env.DB.prepare('SELECT id,visibility,owner_user_id,source_url FROM stories WHERE id=?').bind(storyId).first();if(!story)return null;if(story.visibility!=='private'||admin)return story;const reader=await currentReader(request,env);return reader&&reader.id===story.owner_user_id?story:null;}
+// A link someone's browser opens later (the admin's request list): only an http(s) address with a host, as the URL
+// parser reads it. javascript:, data: and the like are never stored or copied, so no stored link can run script even
+// if the pages' CSP is loosened one day. '' when there is none, null when it is not such a link.
+export function webLink(value){
+ const text=String(value??'').trim();if(!text)return '';
+ if(!/^https?:\/\//iu.test(text))return null;
+ try{const url=new URL(text);return ['http:','https:'].includes(url.protocol)&&url.hostname?url.href:null;}catch{return null;}
+}
 function validRequestFile(file){const ext=String(file?.name||'').split('.').pop().toLowerCase();const types={pdf:'application/pdf',epub:'application/epub+zip',azw3:'application/vnd.amazon.ebook',docx:'application/vnd.openxmlformats-officedocument.wordprocessingml.document',txt:'text/plain',png:'image/png',jpg:'image/jpeg',jpeg:'image/jpeg',webp:'image/webp'};return {ext,mime:types[ext]};}
 export async function sha256Hex(data){return [...new Uint8Array(await crypto.subtle.digest('SHA-256',data))].map(x=>x.toString(16).padStart(2,'0')).join('');}
 async function prepareJobRows(env,sid,{source,parts,filename,mime,fileKey,firstId,warnings=[],progress='',sha256=null}){
@@ -53,13 +75,14 @@ export async function acceptReaderRequest(requestId,env){
  try{
   if(item.file_key){const firstId=id(),file=await env.FILES.get(item.file_key);if(!file)throw new Error('Tệp người dùng đã tải lên không còn tồn tại.');const data=await file.arrayBuffer();if(data.byteLength>25*1024*1024)throw new Error('Tệp yêu cầu vượt quá 25 MB.');const ext=String(item.filename||'').split('.').pop().toLowerCase();
    if(ext==='txt')source=decodeText(data);
-   else if(ext==='docx')source=(await mammoth.extractRawText({arrayBuffer:data})).value;
+   else if(ext==='docx')source=await extractDocxText(data);
    else if(ext==='epub'){const book=extractEpub(data);source=book.source;parts=book.parts;warnings=book.warnings;progress=`Đã đọc EPUB · ${book.chapterCount} phần theo thứ tự sách`;}
    else if(ext==='azw3'){const book=await extractAzw3(data);source=book.source;parts=book.parts;warnings=book.warnings;progress=`Đã đọc AZW3/KF8 · ${book.chapterCount} phần theo thứ tự sách`;}
    if(['txt','docx','epub','azw3'].includes(ext)&&!source.trim())throw new Error('Tệp yêu cầu không có văn bản để dịch.');if(new TextEncoder().encode(source).length>25*1024*1024)throw new Error('Văn bản trích xuất vượt quá 25 MB.');
    uploadKey=`uploads/${firstId}`;await env.FILES.put(uploadKey,data,{httpMetadata:{contentType:item.mime||'application/octet-stream'}});prepared=await prepareJobRows(env,sid,{source,parts,filename:item.filename,mime:item.mime,fileKey:uploadKey,firstId,warnings,progress,sha256:await sha256Hex(data)});
   }
-  const statements=[env.DB.prepare('INSERT INTO stories(id,title,genre,source_url,owner_user_id,visibility) VALUES(?,?,?,?,?,?)').bind(sid,item.title,'Chuyên khảo · Nghiên cứu',item.source_url||null,item.user_id||null,visibility)];
+  // A request stored before links were checked may hold another kind of address: the book never takes it.
+  const statements=[env.DB.prepare('INSERT INTO stories(id,title,genre,source_url,owner_user_id,visibility) VALUES(?,?,?,?,?,?)').bind(sid,item.title,'Chuyên khảo · Nghiên cứu',webLink(item.source_url)||null,item.user_id||null,visibility)];
   statements.push(...prepared.rows.map(row=>row.statement),env.DB.prepare("UPDATE requests SET status='accepted',story_id=? WHERE id=? AND story_id IS NULL").bind(sid,requestId));await env.DB.batch(statements);return {story_id:sid,job_id:prepared.rows[0]?.id||null,job_ids:prepared.rows.map(row=>row.id),has_file:!!item.file_key};
  }catch(error){if(uploadKey)await env.FILES.delete(uploadKey);for(const key of prepared.storedKeys)await env.FILES.delete(key);throw error;}
 }
@@ -120,14 +143,16 @@ export async function processJob(jobId,env){
   const stored=await storeJobText(env,jobId,cp.source,book);
   const nextStatus=assembled?'review':done?'assembling':stage;
   await env.DB.prepare("UPDATE jobs SET source=?,translation=?,source_key=?,translation_key=?,warnings=?,status=?,progress=?,error=NULL,prompt_tokens=?,output_tokens=?,total_tokens=?,ai_requests=?,ai_cache_hits=?,model=?,prompt_version=?,translated_at=CASE WHEN ?='review' THEN COALESCE(translated_at,CURRENT_TIMESTAMP) ELSE translated_at END WHERE id=?").bind(stored.source,stored.translation,stored.sourceKey,stored.translationKey,JSON.stringify(cp.warnings),nextStatus,progress,cp.usage?.prompt||0,cp.usage?.output||0,cp.usage?.total||0,cp.usage?.requests||0,cp.usage?.cacheHits||0,env.GEMINI_MODEL||'gemini-2.5-flash',PROMPT_VERSION,nextStatus,jobId).run();
-  if(assembled&&cp.context)await env.DB.prepare('UPDATE stories SET context=?,glossary=? WHERE id=?').bind(cp.context,JSON.stringify(cp.glossary),story.id).run();
+  if(assembled&&cp.context)await env.DB.prepare('UPDATE stories SET context=?,glossary=? WHERE id=?').bind(cp.context,JSON.stringify(boundedGlossary(cp.glossary,story.glossary)),story.id).run();
  }catch(e){const message=['TimeoutError','AbortError'].includes(e.name)?'Gemini phản hồi quá lâu. Tiến độ đã được lưu; bấm Tiếp tục dịch để thử lại phần hiện tại.':e.message;await env.DB.prepare("UPDATE jobs SET status='failed',error=? WHERE id=?").bind(message,jobId).run();}
  finally{await env.DB.prepare('UPDATE jobs SET lease_until=0 WHERE id=?').bind(jobId).run();}
 }
-// Every API answer passes here: health first (no login, no body), then the origin and size checks that hold for all
-// routes, then the routes. Whatever a route throws becomes a JSON error; internal ones are logged with the request's ray.
+// Every API answer passes here: health first (no login, no body), browser error reports, then the origin and size
+// checks that hold for all other routes, then the routes. Whatever a route throws becomes a JSON error; internal ones are
+// logged with the request's ray.
 export default {async fetch(request,env,ctx){
  const url=new URL(request.url),path=url.pathname;
+ const insecure=insecureRequest(request,url);if(insecure)return withSecurityHeaders(insecure);
  if(!path.startsWith('/api/')){
   try{return await sitePage(request,env,url);}
   catch(error){logEvent('page_error',{route:routeLabel(path),name:error?.name||typeof error,message:String(error?.message||'').slice(0,300)});return env.ASSETS.fetch(request);}
@@ -135,6 +160,8 @@ export default {async fetch(request,env,ctx){
  let body;
  try{
   const health=await healthRoute(request,env,path);if(health)return withSecurityHeaders(health);
+  // A browser's error report: no session, its own 2 KB limit and origin check, and always 204 (client-error.js).
+  if(path===CLIENT_ERROR_PATH&&request.method==='POST')return withSecurityHeaders(await clientErrorRoute(request,env,url));
   if(crossOrigin(request,url))return withSecurityHeaders(originRefused());
   body=limitBody(request,path);if(body instanceof Response)return withSecurityHeaders(body);
   return withSecurityHeaders(await route(body.request,env,ctx,url,path));
@@ -155,14 +182,15 @@ async function route(request,env,ctx,url,path){
   }
   if(path==='/api/library'&&method==='GET')return json(await libraryRows(env,GENRES));
   if(path==='/api/my/requests'&&method==='GET'){const reader=await currentReader(request,env);if(!reader)return json({error:'Hãy đăng nhập Google để xem yêu cầu của bạn.'},401);return json((await env.DB.prepare('SELECT id,title,source_url,notes,status,visibility,filename,story_id,created_at FROM requests WHERE user_id=? ORDER BY created_at DESC').bind(reader.id).all()).results);}
-  if(path==='/api/my/library'&&method==='GET'){const reader=await currentReader(request,env);if(!reader)return json({error:'Hãy đăng nhập để xem thư viện cá nhân.'},401);return json((await env.DB.prepare('SELECT s.id,s.title,s.author,s.genre,s.cover_key,s.source_url,s.visibility,COUNT(c.id) AS chapters,(SELECT status FROM jobs j WHERE j.story_id=s.id ORDER BY j.created_at DESC LIMIT 1) AS translation_status FROM stories s LEFT JOIN chapters c ON c.story_id=s.id WHERE s.owner_user_id=? GROUP BY s.id ORDER BY s.created_at DESC').bind(reader.id).all()).results);}
+  if(path==='/api/my/library'&&method==='GET'){const reader=await currentReader(request,env);if(!reader)return json({error:'Hãy đăng nhập để xem Thư viện riêng.'},401);return json((await env.DB.prepare('SELECT s.id,s.title,s.author,s.genre,s.cover_key,s.source_url,s.visibility,COUNT(c.id) AS chapters,(SELECT status FROM jobs j WHERE j.story_id=s.id ORDER BY j.created_at DESC LIMIT 1) AS translation_status FROM stories s LEFT JOIN chapters c ON c.story_id=s.id WHERE s.owner_user_id=? GROUP BY s.id ORDER BY s.created_at DESC').bind(reader.id).all()).results);}
   const glossaryMatch=path.match(/^\/api\/glossary\/([^/]+)$/);
   if(glossaryMatch&&method==='GET'){
    if(!await canReadStory(request,env,glossaryMatch[1],admin))return json({error:'Không tìm thấy tài liệu hoặc bạn không có quyền đọc.'},404);
    return json({terms:readerTerms(await env.DB.prepare('SELECT genre,glossary FROM stories WHERE id=?').bind(glossaryMatch[1]).first())});
   }
-  // Each part also says whether the book is a sample and which pages of its original it translates.
-  if(path.startsWith('/api/read/')&&method==='GET'){const sid=path.split('/').pop(),story=await canReadStory(request,env,sid,admin);if(!story)return json({error:'Không tìm thấy tài liệu hoặc bạn không có quyền đọc.'},404);const chapters=await readChapters(env,sid),sample=isSampleBook(story)?1:0;for(const chapter of chapters){chapter.content=cleanReaderText(await fullText(env,chapter.text_key,chapter.content));delete chapter.text_key;chapter.sample=sample;}return json(chapters);}
+  // Each part also says whether the book is a sample and which pages of its original it translates. A part is shown as
+  // it was saved: publishing cleaned the pipeline's page markers already, and a student's own text is never cut.
+  if(path.startsWith('/api/read/')&&method==='GET'){const sid=path.split('/').pop(),story=await canReadStory(request,env,sid,admin);if(!story)return json({error:'Không tìm thấy tài liệu hoặc bạn không có quyền đọc.'},404);const chapters=await readChapters(env,sid),sample=isSampleBook(story)?1:0;for(const chapter of chapters){chapter.content=readerText(await fullText(env,chapter.text_key,chapter.content));delete chapter.text_key;chapter.sample=sample;}return json(chapters);}
   const publicFile=path.match(/^\/api\/chapter-file\/([^/]+)$/);
   if(publicFile&&method==='GET'){
    const chapter=await env.DB.prepare('SELECT c.file_key,c.story_id,c.title FROM chapters c WHERE c.id=?').bind(publicFile[1]).first();
@@ -187,8 +215,8 @@ async function route(request,env,ctx,url,path){
   if(path==='/api/requests'&&method==='POST'){
    const reader=await currentReader(request,env);if(!reader)return json({error:'Hãy đăng nhập trước khi gửi yêu cầu dịch tài liệu.'},401);
    const fast=await rateLimit(env,[{binding:'HEAVY_LIMITER',key:`upload:${reader.id}`}]);if(fast)return fast;
-   const form=await request.formData(),title=required(form.get('title')),notes=String(form.get('notes')||'').slice(0,2000),source=String(form.get('source_url')||'').trim().slice(0,1000),visibility=form.get('visibility')==='public'?'public':'private',file=form.get('file');
-   if(source&&!/^https?:\/\//i.test(source))return json({error:'Liên kết phải bắt đầu bằng http:// hoặc https://'},400);
+   const form=await request.formData(),title=required(form.get('title')),notes=String(form.get('notes')||'').slice(0,2000),source=webLink(String(form.get('source_url')||'').trim().slice(0,1000)),visibility=form.get('visibility')==='public'?'public':'private',file=form.get('file');
+   if(source===null)return json({error:'Liên kết phải là một địa chỉ web bắt đầu bằng http:// hoặc https://'},400);
    const hasFile=file&&typeof file!=='string'&&file.size>0;if(!hasFile&&!source)return json({error:'Hãy tải lên một tệp hoặc nhập liên kết nguyên tác.'},400);
    const type=hasFile?validRequestFile(file):null;if(hasFile){if(file.size>25*1024*1024)throw new Error('Tệp yêu cầu tối đa 25 MB.');if(!type.mime)throw new Error('Chỉ hỗ trợ PDF, EPUB, AZW3, DOCX, TXT, JPG, PNG hoặc WebP.');}
    // Counted once the request is valid, so a rejected form never uses up the day's requests.
@@ -203,16 +231,14 @@ async function route(request,env,ctx,url,path){
   if(path==='/api/settings/gemini-key'&&method==='DELETE')return json(await clearGeminiApiKey(env));
   const contentResponse=await adminContent(request,env,path);if(contentResponse)return contentResponse;
   const sourcesResponse=await libraryAdminRoute(request,env,path);if(sourcesResponse)return sourcesResponse;
-  if(path==='/api/stories'&&method==='GET')return json((await env.DB.prepare('SELECT s.*,u.name AS owner_name,u.email AS owner_email,COUNT(c.id) AS chapters FROM stories s LEFT JOIN reader_users u ON u.id=s.owner_user_id LEFT JOIN chapters c ON c.story_id=s.id GROUP BY s.id ORDER BY s.created_at DESC').all()).results);
+  // /api/stories, /api/user-library and /api/jobs (paged light rows) and one story's or job's detail.
+  const listResponse=await adminListRoute(request,env,url,path);if(listResponse)return listResponse;
   if(path==='/api/users'&&method==='GET')return json((await env.DB.prepare(`SELECT u.id,u.email,u.name,u.picture,u.created_at,u.updated_at,u.disabled_at,u.terms_version,u.terms_accepted_at,
    (SELECT COUNT(*) FROM requests r WHERE r.user_id=u.id) AS requests,
    (SELECT COUNT(*) FROM requests r WHERE r.user_id=u.id AND r.status='pending') AS pending_requests,
    (SELECT COUNT(*) FROM stories s WHERE s.owner_user_id=u.id) AS books,
    CASE WHEN EXISTS(SELECT 1 FROM reader_credentials rc WHERE rc.user_id=u.id) THEN 'local' ELSE 'google' END AS provider
    FROM reader_users u ORDER BY u.created_at DESC`).all()).results);
-  if(path==='/api/user-library'&&method==='GET')return json((await env.DB.prepare(`SELECT s.*,u.email AS owner_email,u.name AS owner_name,COUNT(c.id) AS chapters
-   FROM stories s JOIN reader_users u ON u.id=s.owner_user_id LEFT JOIN chapters c ON c.story_id=s.id
-   GROUP BY s.id ORDER BY u.created_at DESC,s.created_at DESC`).all()).results);
   if(path==='/api/stories'&&method==='POST'){
    const multipart=request.headers.get('Content-Type')?.includes('multipart/form-data');
    const form=multipart?await request.formData():null,b=form?Object.fromEntries(form):await request.json(),sid=id();
@@ -274,8 +300,9 @@ async function route(request,env,ctx,url,path){
     const author=cleanAuthor(b.author)||UNKNOWN_AUTHOR,updated=await env.DB.prepare(`UPDATE stories SET author=? WHERE id=? AND ${NOT_STUDY_BOOK}`).bind(author,path.split('/').pop()).run();
     return updated.meta?.changes?json({ok:true,author}):json({error:'Không tìm thấy tài liệu trong kho Hoa Trí.'},404);
    }
-   if(!b.glossary||typeof b.glossary!=='object'||Array.isArray(b.glossary)||Object.entries(b.glossary).some(([k,v])=>k.length>100||typeof v!=='string'||v.length>100))throw new Error('Bảng tên phải là các cặp tên Trung–Việt.');await env.DB.prepare('UPDATE stories SET glossary=? WHERE id=?').bind(JSON.stringify(b.glossary),path.split('/').pop()).run();return json({ok:true});}
-  if(path==='/api/jobs'&&method==='GET')return json((await env.DB.prepare('SELECT j.*,s.title AS story_title,s.genre FROM jobs j JOIN stories s ON s.id=j.story_id ORDER BY j.created_at DESC').all()).results);
+   if(!b.glossary||typeof b.glossary!=='object'||Array.isArray(b.glossary)||Object.entries(b.glossary).some(([k,v])=>k.length>100||typeof v!=='string'||v.length>100))throw new Error('Bảng tên phải là các cặp tên Trung–Việt.');
+   const glossary=JSON.stringify(b.glossary);if(Object.keys(b.glossary).length>MAX_TERMS||utf8Bytes(glossary)>MAX_GLOSSARY_BYTES)throw new UserError(`Bảng tên tối đa ${new Intl.NumberFormat('vi-VN').format(MAX_TERMS)} cặp và 1 MB.`,413,'glossary_too_large');
+   await env.DB.prepare('UPDATE stories SET glossary=? WHERE id=?').bind(glossary,path.split('/').pop()).run();return json({ok:true});}
   if(path==='/api/jobs'&&method==='POST'){
    const form=await request.formData(),sid=form.get('story_id'),file=form.get('file');let source=String(form.get('text')||''),parts=null,warnings=[],progress='';
    if(!await env.DB.prepare('SELECT id FROM stories WHERE id=?').bind(sid).first())throw new Error('Vui lòng chọn hồ sơ tài liệu.');
@@ -285,7 +312,7 @@ async function route(request,env,ctx,url,path){
     if(file.size>25*1024*1024||file.size===0)throw new Error('Tài liệu phải từ 1 byte đến 25 MB.');filename=file.name;
     const ext=file.name.split('.').pop().toLowerCase();const types={epub:'application/epub+zip',azw3:'application/vnd.amazon.ebook',pdf:'application/pdf',png:'image/png',jpg:'image/jpeg',jpeg:'image/jpeg',webp:'image/webp',docx:'application/vnd.openxmlformats-officedocument.wordprocessingml.document',txt:'text/plain'};
     if(!types[ext])throw new Error('Định dạng chưa hỗ trợ. Với .doc cũ, hãy lưu thành .docx hoặc PDF.');mime=types[ext];const data=await file.arrayBuffer();sha256=await sha256Hex(data);
-    if(ext==='docx'){const extracted=await mammoth.extractRawText({arrayBuffer:data});source=extracted.value;}if(ext==='txt')source=decodeText(data);if(ext==='epub'){const book=extractEpub(data);source=book.source;parts=book.parts;warnings=book.warnings;progress=`Đã đọc EPUB · ${book.chapterCount} phần theo thứ tự sách`;}if(ext==='azw3'){const book=await extractAzw3(data);source=book.source;parts=book.parts;warnings=book.warnings;progress=`Đã đọc AZW3/KF8 · ${book.chapterCount} phần theo thứ tự sách`;}if(ext==='pdf'&&form.get('parsed_text')){source=cleanExtractedPdfText(String(form.get('parsed_text')));progress=`Đã trích xuất và làm sạch lớp chữ · ${Number(form.get('pdf_pages'))||0} trang`;}if(ext==='pdf'&&form.get('pdf_mode')==='scan')progress=`Đã nhận diện PDF scan · đang nhận ${Number(form.get('pdf_pages'))||0} trang ảnh tối ưu`;
+    if(ext==='docx')source=await extractDocxText(data);if(ext==='txt')source=decodeText(data);if(ext==='epub'){const book=extractEpub(data);source=book.source;parts=book.parts;warnings=book.warnings;progress=`Đã đọc EPUB · ${book.chapterCount} phần theo thứ tự sách`;}if(ext==='azw3'){const book=await extractAzw3(data);source=book.source;parts=book.parts;warnings=book.warnings;progress=`Đã đọc AZW3/KF8 · ${book.chapterCount} phần theo thứ tự sách`;}if(ext==='pdf'&&form.get('parsed_text')){source=cleanExtractedPdfText(String(form.get('parsed_text')));progress=`Đã trích xuất và làm sạch lớp chữ · ${Number(form.get('pdf_pages'))||0} trang`;}if(ext==='pdf'&&form.get('pdf_mode')==='scan')progress=`Đã nhận diện PDF scan · đang nhận ${Number(form.get('pdf_pages'))||0} trang ảnh tối ưu`;
     if(['txt','docx','epub','azw3'].includes(ext)&&!source.trim())throw new Error('Tài liệu không có văn bản để dịch.');if(new TextEncoder().encode(source).length>25*1024*1024)throw new Error('Văn bản trích xuất tối đa 25 MB.');
     key=`uploads/${firstId}`;await env.FILES.put(key,data,{httpMetadata:{contentType:mime}});
    }else if(!source.trim())throw new Error('Hãy chọn tài liệu hoặc nhập văn bản.');
@@ -336,19 +363,25 @@ async function route(request,env,ctx,url,path){
     if(b.confirmed!==true)throw new Error('Cần xác nhận đã đối chiếu nội dung.');
     // Jobs uploaded before fingerprints existed get one when published, so students can be matched to them.
     if(!job.source_sha256&&job.file_key){const original=await env.FILES.get(job.file_key);if(original)await env.DB.prepare('UPDATE jobs SET source_sha256=? WHERE id=?').bind(await sha256Hex(await original.arrayBuffer()),jid).run();}
-    const readerText=cleanReaderText(await fullText(env,job.translation_key,job.translation));if(!readerText)throw new Error('Bản dịch không còn nội dung học thuật sau khi loại bỏ dữ liệu kỹ thuật của PDF.');
-    const sections=splitBookTranslation(readerText);
+    const published=cleanReaderText(await fullText(env,job.translation_key,job.translation));if(!published)throw new Error('Bản dịch không còn nội dung học thuật sau khi loại bỏ dữ liệu kỹ thuật của PDF.');
+    const sections=splitBookTranslation(published);
     if(sections.length){const last=await env.DB.prepare('SELECT COALESCE(MAX(position),0) AS position FROM chapters WHERE story_id=?').bind(job.story_id).first(),base=Number(last?.position)||0,statements=[];for(const section of sections){const chapterId=id(),textKey=section.content.length>20000?`reader/${chapterId}.txt`:null;if(textKey)await env.FILES.put(textKey,section.content);statements.push(env.DB.prepare('INSERT INTO chapters(id,story_id,job_id,title,content,text_key,position) VALUES(?,?,?,?,?,?,?)').bind(chapterId,job.story_id,jid,section.title,textKey?section.content.slice(0,20000):section.content,textKey,base+section.number));}statements.push(env.DB.prepare("UPDATE jobs SET status='published',error=NULL,progress='Đã được quản trị viên đối chiếu và xuất bản',reviewed_at=CURRENT_TIMESTAMP,published_at=CURRENT_TIMESTAMP WHERE id=?").bind(jid));await env.DB.batch(statements);return json({ok:true,chapters:sections.length});}
-    const chapterId=id(),textKey=job.translation_key?`reader/${chapterId}.txt`:null,sequence=Number(String(job.filename||'').match(/^(\d+)\s*·/)?.[1])||null;if(textKey)await env.FILES.put(textKey,readerText);
-    await env.DB.batch([env.DB.prepare('INSERT INTO chapters(id,story_id,job_id,title,content,text_key,position) VALUES(?,?,?,?,?,?,?)').bind(chapterId,job.story_id,jid,required(b.title),textKey?readerText.slice(0,20000):readerText,textKey,sequence),env.DB.prepare("UPDATE jobs SET status='published',error=NULL,progress='Đã được quản trị viên đối chiếu và xuất bản',reviewed_at=CURRENT_TIMESTAMP,published_at=CURRENT_TIMESTAMP WHERE id=?").bind(jid)]);return json({ok:true,chapters:1});
+    const chapterId=id(),textKey=job.translation_key?`reader/${chapterId}.txt`:null,sequence=Number(String(job.filename||'').match(/^(\d+)\s*·/)?.[1])||null;if(textKey)await env.FILES.put(textKey,published);
+    await env.DB.batch([env.DB.prepare('INSERT INTO chapters(id,story_id,job_id,title,content,text_key,position) VALUES(?,?,?,?,?,?,?)').bind(chapterId,job.story_id,jid,required(b.title),textKey?published.slice(0,20000):published,textKey,sequence),env.DB.prepare("UPDATE jobs SET status='published',error=NULL,progress='Đã được quản trị viên đối chiếu và xuất bản',reviewed_at=CURRENT_TIMESTAMP,published_at=CURRENT_TIMESTAMP WHERE id=?").bind(jid)]);return json({ok:true,chapters:1});
    }
    if(!action&&method==='PATCH'){
     if(job.lease_until>Date.now()||['splitting','prepared','ocr','translating','assembling','published'].includes(job.status)||(job.status==='failed'&&await env.FILES.get(`processing/${jid}.json`)))throw new Error('Không thể sửa bản dịch ở trạng thái hiện tại.');const b=await request.json();
     if(job.source_key||job.translation_key)throw new Error('Văn bản dài: tải bản đầy đủ để biên tập, rồi dùng Tải bản đọc lên để đăng. Không lưu đè từ bản xem trước.');
-    const source=required(b.source,500000),translation=typeof b.translation==='string'?b.translation.trim():'';if(translation.length>1000000)throw new Error('Bản dịch vượt giới hạn cho phép.');await env.DB.prepare('UPDATE jobs SET source=?,translation=?,status=?,error=NULL,progress=? WHERE id=?').bind(source,translation,translation?'review':'uploaded',translation?'Đã lưu bản biên tập':'Sẵn sàng dịch',jid).run();await env.FILES.delete(`processing/${jid}.json`);return json({ok:true});
+    const source=required(b.source,500000),translation=typeof b.translation==='string'?b.translation.trim():'';if(translation.length>1000000)throw new Error('Bản dịch vượt giới hạn cho phép.');
+    // Long text goes to storage with a preview in the row, as a translated job's does: a D1 row holds at most 2 MB.
+    const stored=await storeJobText(env,jid,source,translation);
+    try{await env.DB.prepare('UPDATE jobs SET source=?,translation=?,source_key=?,translation_key=?,status=?,error=NULL,progress=? WHERE id=?').bind(stored.source,stored.translation,stored.sourceKey,stored.translationKey,translation?'review':'uploaded',translation?'Đã lưu bản biên tập':'Sẵn sàng dịch',jid).run();}
+    catch(error){for(const key of [stored.sourceKey,stored.translationKey])if(key)await env.FILES.delete(key);throw error;}
+    await env.FILES.delete(`processing/${jid}.json`);return json({ok:true,long:Boolean(stored.sourceKey||stored.translationKey)});
    }
   }
-  if(path==='/api/requests'&&method==='GET')return json((await env.DB.prepare('SELECT r.*,u.email AS reader_email,u.name AS reader_name FROM requests r LEFT JOIN reader_users u ON u.id=r.user_id ORDER BY r.created_at DESC').all()).results);
+  // A link stored before links were checked, of another kind than http(s), is answered as none.
+  if(path==='/api/requests'&&method==='GET')return json((await env.DB.prepare('SELECT r.*,u.email AS reader_email,u.name AS reader_name FROM requests r LEFT JOIN reader_users u ON u.id=r.user_id ORDER BY r.created_at DESC').all()).results.map(row=>row.source_url&&webLink(row.source_url)===null?{...row,source_url:null}:row));
   const acceptRequest=path.match(/^\/api\/requests\/([^/]+)\/accept$/);if(acceptRequest&&method==='POST')return json(await acceptReaderRequest(acceptRequest[1],env),201);
   const requestFile=path.match(/^\/api\/requests\/([^/]+)\/file$/);if(requestFile&&method==='GET'){const item=await env.DB.prepare('SELECT file_key,filename,mime FROM requests WHERE id=?').bind(requestFile[1]).first(),file=item?.file_key?await env.FILES.get(item.file_key):null;if(!file)return json({error:'Yêu cầu này không có tệp nguồn.'},404);return new Response(file.body,{headers:{'Content-Type':item.mime||'application/octet-stream','Content-Disposition':"attachment; filename*=UTF-8''"+encodeURIComponent(item.filename||'nguyen-tac'),'X-Content-Type-Options':'nosniff'}});}
   if(/^\/api\/requests\/[^/]+$/.test(path)&&method==='PATCH'){const b=await request.json();if(!['accepted','done','pending'].includes(b.status))throw new Error('Trạng thái không hợp lệ.');const storyId=typeof b.story_id==='string'&&b.story_id?b.story_id:null;await env.DB.prepare('UPDATE requests SET status=?,story_id=COALESCE(?,story_id) WHERE id=?').bind(b.status,storyId,path.split('/').pop()).run();return json({ok:true});}

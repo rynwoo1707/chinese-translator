@@ -28,10 +28,12 @@ function mockGeneration(t,result={blocks:corrected(),warnings:[]}){
  });
  return calls;
 }
+// Manifests are stored as ASCII JSON bytes (asciiJsonBytes); values a test puts itself are strings.
+const storedText=value=>typeof value==='string'?value:new TextDecoder().decode(value);
 class MemoryFiles{
  constructor(){this.values=new Map();this.reads=[];this.writes=[];}
  async put(key,value,options){this.values.set(key,value);this.writes.push({key,value,options});}
- async get(key){this.reads.push(key);const value=this.values.get(key);return value===undefined?null:{body:value,json:async()=>JSON.parse(value)};}
+ async get(key){this.reads.push(key);const value=this.values.get(key);return value===undefined?null:{body:value,json:async()=>JSON.parse(storedText(value)),text:async()=>storedText(value)};}
 }
 function environment(){
  const FILES=new MemoryFiles();
@@ -80,31 +82,36 @@ test('Block OCR sends no separate crop for a formula labeled inside the paragrap
  assert.equal(result.blocks[1].text,'向量 @@PDF_INLINE_0@@ 的模 @@PDF_INLINE_1@@。');
 });
 
-test('Block OCR rejects missing, duplicate and unknown result IDs instead of assigning text by position',async t=>{
+// The machine OCR text each test block keeps when its reading fails (its sourceHint, formula token once).
+const machine={'p4-b0':'Tesseract 猜错 SPACE vector','p4-b1':'向量 @@PDF_INLINE_0@@ 的模。'};
+const kept=(id,ocrKept)=>({id,text:machine[id],ocrKept});
+
+test('Block OCR never assigns text by position: a missing, doubled or unknown answer leaves its block the machine text',async t=>{
  let answer;let calls=0;
  t.mock.method(globalThis,'fetch',async()=>{calls++;return generationResponse({blocks:answer,warnings:[]});});
- for(const [invalid,message] of [
-  [[corrected()[0]],/đọc thiếu/u],
-  [[corrected()[0],corrected()[0]],/trùng đoạn p4-b0/u],
-  [[corrected()[0],{id:'p999-b0',text:'Invented block'}],/mã đoạn lạ "p999-b0"/u]
- ]){answer=invalid;await assert.rejects(()=>recognizePdfBlocks(aiEnv,blocks()),message);}
- assert.equal(calls,3);
+ for(const [invalid,expected] of [
+  [[corrected()[0]],[corrected()[0],kept('p4-b1','unread')]],
+  [[corrected()[0],corrected()[0]],[kept('p4-b0','unread'),kept('p4-b1','unread')]],
+  [[corrected()[0],{id:'p999-b0',text:'Invented block'}],[corrected()[0],kept('p4-b1','unread')]],
+  [{not:'a list'},[kept('p4-b0','unread'),kept('p4-b1','unread')]]
+ ]){answer=invalid;assert.deepEqual((await recognizePdfBlocks(aiEnv,blocks())).blocks,expected,JSON.stringify(invalid));}
+ assert.equal(calls,4,'one call each: a failed block is never asked for again here');
 });
 
-test('A refused OCR answer still reports the billed call, whatever check refused it',async t=>{
- let answer;t.mock.method(globalThis,'fetch',async()=>generationResponse({blocks:answer,warnings:[]}));
+test('An OCR answer that fails a check keeps the machine text of the blocks concerned, names them and reports the billed call',async t=>{
+ let answer;t.mock.method(globalThis,'fetch',async()=>generationResponse({blocks:answer,warnings:['Ảnh hơi mờ.']}));
  const spent={prompt:23,output:17,thinking:0,total:40,requests:1,cacheHits:0},three=[...blocks(),{id:'p4-b2',source:'第三段文字。',image:png,box:[20,180,220,240],fontSize:12}];
- for(const [invalid,input,message] of [
-  [[corrected()[0]],blocks(),/đọc thiếu/u],
-  [[corrected()[0],corrected()[0]],blocks(),/trùng đoạn/u],
-  [[corrected()[0],{id:'p999-b0',text:'Invented block'}],blocks(),/mã đoạn lạ/u],
-  [[corrected()[0],{id:'p4-b1',text:'向量 a=b 的模。'}],blocks(),/công thức/u],
-  [[{id:'p4-b0',text:''},{id:'p4-b1',text:' '},{id:'p4-b2',text:'第三段文字。'}],three,/không đọc được chữ ở 2\/3 đoạn/u],
-  // Two strips read into each other's blocks.
-  [[{id:'p4-b0',text:'向量的模长度。'},{id:'p4-b1',text:'Tesseract 猜错 SPACE vector'}],[{...blocks()[0]},{...blocks()[1],source:'向量的模长度。',inlines:[]}],/gán lẫn chữ/u]
+ for(const [invalid,input,codes,note] of [
+  [[corrected()[0],{id:'p4-b1',text:'向量 a=b 的模。'}],blocks(),[undefined,'formula'],/^Trang 4 · đoạn 1: bản đọc của Gemini làm mất hoặc thừa mã công thức\. Đoạn này giữ chữ OCR máy/u],
+  // Most of a call back empty: each empty strip keeps its machine text; the strip that was read keeps its reading.
+  [[{id:'p4-b0',text:''},{id:'p4-b1',text:' '},{id:'p4-b2',text:'第三段文字。'}],three,['empty','empty',undefined],/^Trang 4 · đoạn 0, Trang 4 · đoạn 1: Gemini không thấy chữ trong ảnh\. Các đoạn này giữ chữ OCR máy/u],
+  // Two strips read into each other's blocks: neither reading is kept.
+  [[{id:'p4-b0',text:'向量的模长度。'},{id:'p4-b1',text:'Tesseract 猜错 SPACE vector'}],[{...blocks()[0]},{...blocks()[1],source:'向量的模长度。',inlines:[]}],['mixed','mixed'],/lẫn chữ giữa các đoạn/u]
  ]){
-  answer=invalid;let error=null;try{await recognizePdfBlocks(aiEnv,input);}catch(caught){error=caught;}
-  assert.ok(error,String(message));assert.match(error.message,message);assert.deepEqual(error.usage,spent,String(message));
+  answer=invalid;const result=await recognizePdfBlocks(aiEnv,input);
+  assert.deepEqual(result.blocks.map(block=>block.ocrKept),codes,JSON.stringify(invalid));assert.match(result.warnings[0],note);assert.equal(result.warnings.at(-1),'Ảnh hơi mờ.');
+  assert.deepEqual(result.usage,spent);
+  for(const [index,block] of result.blocks.entries())if(block.ocrKept)assert.equal(block.text,input[index].source.trim(),'the machine text, never the failed reading');
  }
 });
 
@@ -112,21 +119,40 @@ test('Block OCR keeps the machine OCR text of a strip Gemini reads as empty and 
  let answer;t.mock.method(globalThis,'fetch',async()=>generationResponse({blocks:answer,warnings:['Ảnh mờ.']}));
  answer=[{id:'P4-B0 ',text:corrected()[0].text},{id:'p4-b1',text:'  '}];
  const result=await recognizePdfBlocks(aiEnv,blocks());
- assert.deepEqual(result.blocks,corrected());assert.match(result.warnings[0],/đoạn p4-b1/u);assert.equal(result.warnings[1],'Ảnh mờ.');
+ assert.deepEqual(result.blocks,[corrected()[0],kept('p4-b1','empty')]);assert.match(result.warnings[0],/^Trang 4 · đoạn 1: Gemini không thấy chữ trong ảnh/u);assert.equal(result.warnings[1],'Ảnh mờ.');
  // A hint without any letter or digit becomes the unreadable mark, still carrying the block's formula token once.
  const marks=blocks();marks[1].source='. , @@PDF_INLINE_0@@';answer=[corrected()[0],{id:'p4-b1',text:''}];
  assert.equal((await recognizePdfBlocks(aiEnv,marks)).blocks[1].text,'[□] @@PDF_INLINE_0@@');
 });
 
-test('Block OCR requires every supplied formula token exactly once and forbids invented formula tokens',async t=>{
+test('Block OCR keeps the machine text of a block whose reading loses, repeats or invents a formula token',async t=>{
  let answer;
  t.mock.method(globalThis,'fetch',async()=>generationResponse({blocks:answer,warnings:[]}));
  for(const text of ['向量 a=b 的模。','@@PDF_INLINE_0@@ @@PDF_INLINE_0@@','@@PDF_INLINE_0@@ @@PDF_INLINE_99@@']){
-  answer=[corrected()[0],{id:'p4-b1',text}];await assert.rejects(()=>recognizePdfBlocks(aiEnv,blocks()));
+  answer=[corrected()[0],{id:'p4-b1',text}];assert.deepEqual((await recognizePdfBlocks(aiEnv,blocks())).blocks,[corrected()[0],kept('p4-b1','formula')],text);
  }
  answer=[{id:'p4-b0',text:'中文 @@PDF_INLINE_0@@'},{...corrected()[1]}];
- await assert.rejects(()=>recognizePdfBlocks(aiEnv,blocks()));
+ assert.deepEqual((await recognizePdfBlocks(aiEnv,blocks())).blocks,[kept('p4-b0','formula'),corrected()[1]]);
  answer=corrected();assert.deepEqual((await recognizePdfBlocks(aiEnv,blocks())).blocks,corrected());
+});
+
+test('A refused, cut-off or unreadable OCR call keeps the machine text of every block of the call and reports what it cost; quota and key errors still fail',async t=>{
+ let reply;const calls=[];t.mock.method(globalThis,'fetch',async(url,options)=>{calls.push(String(url));return reply();});
+ const billed=(finishReason,total=500)=>()=>Response.json({candidates:[{finishReason}],usageMetadata:{promptTokenCount:total,candidatesTokenCount:0,totalTokenCount:total}});
+ for(const [finishReason,code,note] of [['RECITATION','refused',/trùng khớp nguyên văn với nội dung có bản quyền/u],['SAFETY','refused',/bộ lọc an toàn/u],['OTHER','refused',/Gemini không trả bản đọc\./u],['MAX_TOKENS','truncated',/bị cắt vì vượt giới hạn độ dài/u]]){
+  reply=billed(finishReason);const result=await recognizePdfBlocks(aiEnv,blocks());
+  assert.deepEqual(result.blocks,[kept('p4-b0',code),kept('p4-b1',code)],finishReason);
+  assert.equal(result.warnings.length,1);assert.match(result.warnings[0],/^Trang 4 · đoạn 0, Trang 4 · đoạn 1: /u);assert.match(result.warnings[0],note);
+  assert.equal(result.usage.total,500);assert.equal(result.usage.requests,1);assert.doesNotMatch(result.warnings[0],/Gemini từ chối|Khóa Gemini/u);
+ }
+ // An answer that stays unreadable is retried by generate (each attempt billed), then kept as machine text.
+ calls.length=0;reply=()=>Response.json({candidates:[{finishReason:'STOP',content:{parts:[{text:'không phải JSON'}]}}],usageMetadata:{promptTokenCount:10,candidatesTokenCount:5,totalTokenCount:15}});
+ const malformed=await recognizePdfBlocks(aiEnv,blocks());assert.deepEqual(malformed.blocks.map(block=>block.ocrKept),['malformed','malformed']);assert.equal(malformed.usage.requests,3);assert.equal(calls.length,3);
+ // A quota, a refused key or an overloaded Gemini is not about these images: nothing is kept and the call fails.
+ reply=()=>Response.json({error:{details:[{'@type':'type.googleapis.com/google.rpc.QuotaFailure',violations:[{quotaId:'GenerateRequestsPerMinutePerProjectPerModel'}]},{'@type':'type.googleapis.com/google.rpc.RetryInfo',retryDelay:'60s'}]}},{status:429});
+ await assert.rejects(()=>recognizePdfBlocks(aiEnv,blocks()),error=>error.code==='quota_minute');
+ reply=()=>Response.json({error:{message:'API key not valid'}},{status:400});
+ await assert.rejects(()=>recognizePdfBlocks(aiEnv,blocks()),error=>error.code==='gemini_key');
 });
 
 test('Block OCR validates image type, duplicate input IDs, six-image limit and 4 MB limit before model calls',async t=>{
@@ -160,20 +186,28 @@ test('OCR route uses only stored owner OCR blocks and the student key, updates t
  assert.equal(JSON.parse(calls[0].body.contents[0].parts[0].text).sourceHint,original.source);
  assert.doesNotMatch(JSON.stringify(calls),/server-key|attacker hint|attacker image/u);
  assert.equal(FILES.writes.length,writesBefore+1);assert.equal(FILES.writes.at(-1).key,manifestKey(reader));
- assert.doesNotMatch(JSON.stringify(FILES.writes),/student-ocr-key|server-key/u);assert.doesNotMatch(JSON.stringify(result),/student-ocr-key|server-key/u);
+ assert.doesNotMatch(FILES.writes.map(write=>storedText(write.value)).join('\n'),/student-ocr-key|server-key/u);assert.doesNotMatch(JSON.stringify(result),/student-ocr-key|server-key/u);
 });
 
-test('OCR route marks the document corrected only after every OCR block succeeds and persists no API key',async t=>{
+// The rule: a scanned block is handled once an OCR call returned for it, read by Gemini or kept with its machine text
+// because its reading failed (ocrKept); both are stored as ocrCorrected, so no client asks for it again by itself. The
+// document is corrected (ocrCorrectedVersion 1) once every block of its scanned pages is handled. A call that fails for
+// another reason (quota, key, network) handles nothing.
+test('OCR route marks the document corrected once every OCR block is handled, a block kept after a failed reading included, and persists no API key',async t=>{
  const {env,FILES}=environment();await FILES.put(manifestKey(reader),JSON.stringify(document()));
- let selected=0;
- t.mock.method(globalThis,'fetch',async()=>generationResponse({blocks:[corrected()[selected]],warnings:['Đã đối chiếu ảnh.']}));
+ let answer=[corrected()[0]];
+ t.mock.method(globalThis,'fetch',async()=>generationResponse({blocks:answer,warnings:['Đã đối chiếu ảnh.']}));
  let response=await ocrRoute(env,body({blockIds:['p4-b0']})),result=await response.json();
  assert.equal(result.document.ocrCorrectedVersion,0);assert.equal(result.document.pages[0].blocks[0].ocrCorrected,true);
- selected=1;response=await ocrRoute(env,body({blockIds:['p4-b1']}));result=await response.json();
- assert.equal(result.document.ocrCorrectedVersion,1);assert.equal(result.document.pages[1].blocks[0].ocrCorrected,undefined);
- const saved=JSON.parse(FILES.values.get(manifestKey(reader)));assert.deepEqual(saved,result.document);
- assert.deepEqual(saved.ocrWarnings,['Đã đối chiếu ảnh.','Đã đối chiếu ảnh.']);
- assert.doesNotMatch(JSON.stringify(FILES.writes),/student-ocr-key|server-key/u);
+ // The second block's reading drops its formula: it keeps its machine text, is named, and the document is complete.
+ answer=[{id:'p4-b1',text:'向量 a=b 的模。'}];response=await ocrRoute(env,body({blockIds:['p4-b1'],slim:true}));result=await response.json();
+ assert.equal(response.status,200);assert.equal(result.ocrCorrectedVersion,1);
+ assert.deepEqual(result.blocks.map(({id,source,ocrCorrected})=>({id,source,ocrCorrected})),[{id:'p4-b1',source:machine['p4-b1'],ocrCorrected:true}]);
+ assert.match(result.warnings[0],/^Trang 4 · đoạn 1: bản đọc của Gemini làm mất hoặc thừa mã công thức/u);assert.deepEqual(result.ocrWarnings,['Đã đối chiếu ảnh.',result.warnings[0],'Đã đối chiếu ảnh.']);
+ const saved=JSON.parse(storedText(FILES.values.get(manifestKey(reader))));
+ assert.equal(saved.ocrCorrectedVersion,1);assert.equal(saved.pages[0].blocks[1].source,machine['p4-b1']);assert.equal(saved.pages[0].blocks[1].text,'向量 a = b 的模。');
+ assert.equal(saved.pages[1].blocks[0].ocrCorrected,undefined,'a native-text page is not OCR');assert.deepEqual(saved.ocrWarnings,result.ocrWarnings);
+ assert.doesNotMatch(FILES.writes.map(write=>storedText(write.value)).join('\n'),/student-ocr-key|server-key/u);
 });
 
 test('OCR route cannot read another student asset or select native-text and foreign block IDs',async t=>{
@@ -197,13 +231,42 @@ test('OCR route validates supplied key, Flash model and block selection before g
  assert.equal(calls,0);assert.equal(FILES.writes.length,writesBefore);
 });
 
-test('OCR route never persists partial corrected state when the model loses an ID or formula token',async t=>{
- const {env,FILES}=environment(),prior=JSON.stringify(document());await FILES.put(manifestKey(reader),prior);const writesBefore=FILES.writes.length;
+test('OCR route stores the readings that pass and the machine text of a block whose answer was lost or lost its formula, never the bad reading',async t=>{
+ const {env,FILES}=environment();await FILES.put(manifestKey(reader),JSON.stringify(document()));const writesBefore=FILES.writes.length;
  let answer=[corrected()[0]];
  t.mock.method(globalThis,'fetch',async()=>generationResponse({blocks:answer,warnings:[]}));
- await assert.rejects(()=>ocrRoute(env,body()));
- answer=[corrected()[0],{id:'p4-b1',text:'向量 a=b 的模。'}];await assert.rejects(()=>ocrRoute(env,body()));
- assert.equal(FILES.writes.length,writesBefore);assert.equal(FILES.values.get(manifestKey(reader)),prior);
+ const stored=()=>JSON.parse(storedText(FILES.values.get(manifestKey(reader)))).pages[0].blocks.map(({source,ocrCorrected})=>({source,ocrCorrected}));
+ let response=await ocrRoute(env,body());assert.equal(response.status,200);assert.match((await response.json()).warnings[0],/^Trang 4 · đoạn 1: Gemini không trả bản đọc dùng được/u);
+ assert.deepEqual(stored(),[{source:corrected()[0].text,ocrCorrected:true},{source:machine['p4-b1'],ocrCorrected:true}]);
+ answer=[corrected()[0],{id:'p4-b1',text:'向量 a=b 的模。'}];response=await ocrRoute(env,body());assert.equal(response.status,200);
+ assert.deepEqual(stored(),[{source:corrected()[0].text,ocrCorrected:true},{source:machine['p4-b1'],ocrCorrected:true}]);
+ assert.equal(FILES.writes.length,writesBefore+2);assert.doesNotMatch(storedText(FILES.values.get(manifestKey(reader))),/a=b 的模/u);
+});
+
+test('OCR route keeps a refused call\'s blocks as machine text and reports its tokens; a quota error stores nothing',async t=>{
+ const {env,FILES}=environment();await FILES.put(manifestKey(reader),JSON.stringify(document()));let reply;
+ t.mock.method(globalThis,'fetch',async()=>reply());
+ reply=()=>Response.json({error:{details:[{'@type':'type.googleapis.com/google.rpc.QuotaFailure',violations:[{quotaId:'GenerateRequestsPerDayPerProjectPerModel'}]}]}},{status:429});
+ const writes=FILES.writes.length;await assert.rejects(()=>ocrRoute(env,body()),error=>error.code==='quota_day');assert.equal(FILES.writes.length,writes);
+ reply=()=>Response.json({candidates:[{finishReason:'RECITATION'}],usageMetadata:{promptTokenCount:1800,candidatesTokenCount:0,totalTokenCount:1800}});
+ const response=await ocrRoute(env,body({slim:true})),result=await response.json();
+ assert.equal(response.status,200);assert.equal(result.usage.total,1800);assert.equal(result.ocrCorrectedVersion,1);
+ assert.deepEqual(result.blocks.map(({id,source,ocrCorrected})=>({id,source,ocrCorrected})),[{id:'p4-b0',source:machine['p4-b0'],ocrCorrected:true},{id:'p4-b1',source:machine['p4-b1'],ocrCorrected:true}]);
+ assert.match(result.warnings[0],/^Trang 4 · đoạn 0, Trang 4 · đoạn 1: Gemini không trả bản đọc vì trùng khớp nguyên văn với nội dung có bản quyền\. Các đoạn này giữ chữ OCR máy/u);
+});
+
+test('A block kept with its machine text carries the reason in the stored manifest and the slim answer until a later call reads it',async t=>{
+ const {env,FILES}=environment();await FILES.put(manifestKey(reader),JSON.stringify(document()));let reply;
+ t.mock.method(globalThis,'fetch',async()=>reply());
+ const stored=()=>JSON.parse(storedText(FILES.values.get(manifestKey(reader)))).pages[0].blocks.map(b=>b.ocrKept);
+ reply=()=>Response.json({candidates:[{finishReason:'SAFETY'}],usageMetadata:{promptTokenCount:900,candidatesTokenCount:0,totalTokenCount:900}});
+ let result=await (await ocrRoute(env,body({slim:true}))).json();
+ assert.deepEqual(result.blocks.map(b=>b.ocrKept),['refused','refused']);assert.deepEqual(stored(),['refused','refused']);
+ // An explicit re-read: the block read this time loses its mark, the one whose reading drops a formula gets its own.
+ reply=()=>generationResponse({blocks:[corrected()[0],{id:'p4-b1',text:'向量 a=b 的模。'}],warnings:[]});
+ result=await (await ocrRoute(env,body({slim:true}))).json();
+ assert.deepEqual(result.blocks.map(b=>b.ocrKept),[undefined,'formula']);assert.deepEqual(stored(),[undefined,'formula']);
+ assert.equal(result.blocks[0].source,corrected()[0].text);assert.equal(result.blocks[1].source,machine['p4-b1']);
 });
 
 test('OCR route recovers an unavailable Flash model using only the supplied student key',async t=>{
@@ -217,7 +280,7 @@ test('OCR route recovers an unavailable Flash model using only the supplied stud
  const response=await ocrRoute(env,body({model:'gemini-2.5-flash'})),result=await response.json();
  assert.equal(response.status,200);assert.equal(result.model,'gemini-3.6-flash');assert.equal(calls.length,3);
  assert.ok(calls.every(call=>call.options.headers['x-goog-api-key']===studentKey));
- assert.doesNotMatch(JSON.stringify(calls),/server-key/u);assert.doesNotMatch(JSON.stringify(FILES.writes),/student-ocr-key|server-key/u);
+ assert.doesNotMatch(JSON.stringify(calls),/server-key/u);assert.doesNotMatch(FILES.writes.map(write=>storedText(write.value)).join('\n'),/student-ocr-key|server-key/u);
 });
 
 test('Force-cloning a current extraction gives OCR correction a new private asset without altering saved history assets',async t=>{
@@ -239,7 +302,7 @@ test('Force-cloning a current extraction gives OCR correction a new private asse
  assert.equal(FILES.values.get(manifestKey(reader)),oldManifest);assert.equal(FILES.values.get(originalKey),original);
  const writes=FILES.writes.slice(writesBefore);assert.equal(writes.length,2);assert.ok(writes.every(write=>write.key.startsWith(`study/${reader.id}/pdf-layout/${result.assetId}/`)));
  assert.equal(calls.length,1);assert.equal(calls[0].options.headers['X-PDF-Pages'],'1-2');assert.equal(calls[0].body,original);
- assert.doesNotMatch(JSON.stringify(result),/student-ocr-key|service-secret/u);assert.doesNotMatch(JSON.stringify(writes),/student-ocr-key|service-secret/u);
+ assert.doesNotMatch(JSON.stringify(result),/student-ocr-key|service-secret/u);assert.doesNotMatch(writes.map(write=>storedText(write.value)).join('\n'),/student-ocr-key|service-secret/u);
 });
 
 test('Block OCR instruction states line, notation and visible-text rules for any subject and stays compact',async t=>{

@@ -81,6 +81,23 @@ test('An ADMIN_TOKEN shorter than 32 characters opens nothing except on this mac
  assert.deepEqual(await status(origin,ADMIN,undefined),{authenticated:false});
 });
 
+test('Only http(s) links with a host are stored for a request; a link of another kind is never copied to a book or listed',async t=>{
+ const {sqliteEnvironment,signedIn}=await import('./test-support/sqlite-d1.mjs'),{sqlite,env}=sqliteEnvironment(t,{vars:{ADMIN_TOKEN:ADMIN}}),reader=await signedIn(sqlite);
+ // A request saved before links were checked: accepting it makes a book without that link, and the admin list shows none.
+ sqlite.prepare('INSERT INTO requests(id,title,source_url,user_id) VALUES(?,?,?,?)').run('legacy','Cũ','javascript:alert(1)',reader.id);
+ const admin={Authorization:`Bearer ${ADMIN}`,Origin:origin},accepted=await call('/api/requests/legacy/accept',{method:'POST',headers:admin},env);
+ assert.equal(accepted.status,201);const {story_id}=await accepted.json();
+ assert.equal(sqlite.prepare('SELECT source_url FROM stories WHERE id=?').get(story_id).source_url,null);
+ const send=link=>{const form=new FormData();form.set('title','Sách cần dịch');form.set('source_url',link);return call('/api/requests',{method:'POST',headers:{Cookie:reader.cookie,Origin:origin},body:form},env);};
+ for(const link of ['javascript:alert(document.cookie)',' JavaScript:alert(1)','data:text/html,<script>alert(1)</script>','vbscript:msgbox(1)','ftp://example.test/a','//evil.example/x','/thu-vien','http:/thieu-gach.example','https://','http:// cach.example'])assert.equal((await send(link)).status,400,link);
+ assert.equal(sqlite.prepare("SELECT COUNT(*) AS n FROM requests WHERE id<>'legacy'").get().n,0);
+ for(const link of ['https://example.test/sach?id=1#chuong-2','HTTP://Example.TEST/a b']){const response=await send(link);assert.equal(response.status,201,link);}
+ assert.deepEqual(sqlite.prepare("SELECT source_url FROM requests WHERE id<>'legacy' ORDER BY rowid").all().map(row=>row.source_url),['https://example.test/sach?id=1#chuong-2','http://example.test/a%20b']);
+ const listed=await (await call('/api/requests',{headers:admin},env)).json();
+ assert.equal(listed.find(row=>row.id==='legacy').source_url,null);assert.deepEqual(listed.filter(row=>row.id!=='legacy').map(row=>row.source_url).sort(),['http://example.test/a%20b','https://example.test/sach?id=1#chuong-2']);
+ assert.doesNotMatch(JSON.stringify(listed),/javascript:/iu);
+});
+
 test('Logged routes keep their shape but lose ids and hashes',()=>{
  assert.equal(routeLabel('/api/my/study/history/5b1c9a2e-1111-4222-8333-444455556666'),'/api/my/study/history/:id');
  assert.equal(routeLabel(`/api/my/study/sources/${'ab'.repeat(32)}`),'/api/my/study/sources/:id');

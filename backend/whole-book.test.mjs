@@ -122,7 +122,8 @@ test('chunks are cut with pdf-lib from the original, page for page, and sent wit
 // one runner holds the job while it reports), an extractor that numbers pages from the chunk's offset, and the four
 // chunk steps of study.js reduced to their effect on the job. lose(body): the PATCH is applied but its answer is lost.
 const offline=()=>Object.assign(new Error('Không kết nối được máy chủ. Hãy kiểm tra mạng rồi thử lại sau vài giây.'),{status:0});
-function fakeAccount({total=45,cover=1,blank=[],processedLimit=Infinity,badPages=[],translateErrors=[],pageBytes=1000,lose=()=>false,down=()=>false}={}){
+// refuse({offset,count}): an error the PDF service answers instead of extracting that chunk, or nothing.
+function fakeAccount({total=45,cover=1,blank=[],processedLimit=Infinity,badPages=[],translateErrors=[],pageBytes=1000,lose=()=>false,down=()=>false,refuse=()=>null}={}){
  const job={id:'0b7e2a43-0000-4000-8000-000000000001',sourceSha256:'d'.repeat(64),filename:'sach.pdf',title:'Sách thử',storyId:null,totalPages:total,pageStates:book.initialPageStates(total,{cover}),chunkSize:20,status:'ready',pauseReason:null,usage:{prompt:0,output:0,thinking:0,total:0,requests:0},glossary:{史料:'sử liệu'},createdAt:'2026-10-18T10:00:00.000Z',runner:null,leaseSeconds:0};
  const calls=[],patches=[],extracts=[],state={job,translateErrors:[...translateErrors],counted:new Set(),lease:{runner:null,until:0}};
  const view=()=>{const held=state.lease.runner&&state.lease.until>Date.now();return {...state.job,runner:held?state.lease.runner:null,leaseSeconds:held?Math.ceil((state.lease.until-Date.now())/1000):0};};
@@ -142,6 +143,7 @@ function fakeAccount({total=45,cover=1,blank=[],processedLimit=Infinity,badPages
   if(path==='pdf-layout/extract'){
    const form=options.body,offset=Number(form.get('pageOffset')),count=Number(form.get('pages').split('-')[1]);extracts.push({offset,count,size:form.get('file').size,sha:form.get('sourceSha256')});
    // The service names the page it cannot render, in pages of the original (the Worker shifts chunk page numbers).
+   const refused=refuse({offset,count});if(refused)throw refused;
    const first=offset+1,bad=badPages.find(page=>page>offset&&page<=offset+count);if(bad)throw Object.assign(new Error(`Trang ${bad} quá lớn để render an toàn (2000×3000 pt).`),{status:400,data:{}});
    const pages=Array.from({length:Math.min(count,processedLimit)},(_,i)=>offset+i+1).map(number=>({number,blocks:blank.includes(number)?[]:[{id:`p${number}-b1`}]}));
    if(!pages.some(page=>page.blocks.length))throw Object.assign(new Error('Không tìm thấy block tiếng Trung cần dịch trong các trang đã chọn.'),{status:422,data:{code:'no_text',pages:pages.map(page=>page.number)}});
@@ -156,9 +158,9 @@ function fakeAccount({total=45,cover=1,blank=[],processedLimit=Infinity,badPages
   async translate(){const failure=state.translateErrors.shift();if(failure)throw failure;run.recordUsage({prompt:600,output:267,thinking:0,total:867,requests:1});return {complete:true,model:'gemini-2.5-flash-lite'};},
   async finish(){return {storyId:'book-1',glossary:{史料:'sử liệu',向量:'vectơ'}};}
  };
- const sleeps=[],source={cut:async pages=>new Uint8Array(pages.length*pageBytes)},reports=book.reportStore();
- const create=(options={})=>run=book.createBookRun({api,steps,source,reports,sleep:async(seconds,{stopped})=>{sleeps.push(seconds);return stopped();},...options});
- return {state,calls,patches,extracts,sessions,sleeps,steps,reports,create};
+ const sleeps=[],waits=[],source={cut:async pages=>new Uint8Array(pages.length*pageBytes)},reports=book.reportStore();
+ const create=(options={})=>run=book.createBookRun({api,steps,source,reports,sleep:async(seconds,{stopped,early})=>{sleeps.push(seconds);waits.push({seconds,early});return stopped();},...options});
+ return {state,calls,patches,extracts,sessions,sleeps,waits,steps,reports,create};
 }
 
 test('a whole run: chunks of 20 from the first pending page, blank pages free, one PATCH per chunk',async()=>{
@@ -368,4 +370,46 @@ test('one run per job: a second device stops before paying for anything, and a r
  run=taken.create({renewEvery:0});const lostLease=await run.run(taken.state.job);
  assert.equal(beats,1);assert.deepEqual([lostLease.status,lostLease.reason],['paused','busy']);assert.equal(taken.state.job.pageStates,'.....');
  assert.equal(taken.state.job.usage.total,500);assert.notEqual(taken.state.job.status,'paused','the job is the other device\'s to report');
+});
+
+// The PDF service's typed answers (backend/pdf-layout.js), as study.js api() hands them to a run.
+const pdfError=(status,code,message,retryAfter)=>Object.assign(new Error(message),{status,data:{error:message,code,...(retryAfter?{retryAfter}:{})},retryAfter:retryAfter||null});
+const serviceBusy=()=>pdfError(503,'pdf_service_busy','Dịch vụ PDF đang bận vì nhiều người dùng cùng lúc. Hãy thử lại sau khoảng 20 giây.',20);
+
+test('PDF service answers map to waiting, halving or a pause: busy is waited out long, too heavy halves the chunk',()=>{
+ assert.deepEqual(book.classifyError(serviceBusy(),'extract'),{reason:'pdf_busy',backoff:true,retries:book.SERVICE_BUSY_RETRIES,wait:20,early:false,jitter:true});
+ assert.equal(book.classifyError(serviceBusy(),'export').reason,'pdf_busy');assert.equal(book.SERVICE_BUSY_RETRIES,30);
+ for(const code of ['pdf_timeout','pdf_memory','pdf_too_large'])assert.deepEqual(book.classifyError(pdfError(413,code,'Tách PDF vượt thời gian cho phép. Hãy chọn ít trang hơn cho mỗi lượt.'),'extract'),{reason:'too_large',heavy:true},code);
+ assert.deepEqual(book.classifyError(pdfError(413,'pdf_crash','Dịch vụ PDF dừng đột ngột…'),'extract'),{reason:'too_large'});
+ assert.deepEqual(book.classifyError(pdfError(503,'pdf_unavailable','Dịch vụ PDF đang tạm ngừng.',30),'extract'),{reason:'network',backoff:true,retries:6,wait:30});
+ // This account's own other PDF call (another tab) is still the short wait of a limit.
+ assert.deepEqual(book.classifyError(pdfError(429,'pdf_busy','Tài khoản của bạn đang có một lượt xử lý PDF khác…',30),'extract'),{reason:'rate_limited',wait:30,retries:20});
+ assert.match(book.waitMessage('pdf_busy',20),/Dịch vụ PDF đang bận vì nhiều người dùng cùng lúc\. Tự thử lại sau 20 giây/u);
+ assert.match(book.pauseMessage('pdf_busy'),/Dịch vụ PDF vẫn bận.*Tiến độ đã lưu/u);
+});
+
+test('a run waits while the PDF service is busy, in a hidden tab too, and pauses only after about half an hour',async()=>{
+ let refusals=2;const account=fakeAccount({total:5,cover:0,refuse:()=>refusals-->0?serviceBusy():null});
+ const outcome=await account.create({random:()=>0}).run(account.state.job);
+ assert.equal(outcome.status,'done');assert.equal(account.state.job.pageStates,'ddddd');
+ assert.deepEqual(account.waits,[{seconds:20,early:false},{seconds:20,early:false}]);
+ // The waits grow to a minute and are spread a little (random), so the students it refused do not all come back at once.
+ const always=fakeAccount({total:5,cover:0,refuse:()=>serviceBusy()}),paused=await always.create({random:()=>1}).run(always.state.job);
+ assert.deepEqual([paused.status,paused.reason],['paused','pdf_busy']);assert.equal(always.state.job.pauseReason,'pdf_busy');assert.match(paused.message,/Dịch vụ PDF vẫn bận/u);
+ assert.equal(always.sleeps.length,book.SERVICE_BUSY_RETRIES);assert.deepEqual(always.sleeps.slice(0,5),[25,25,25,50,75]);assert.ok(always.sleeps.every(seconds=>seconds<=75));
+ const total=always.sleeps.reduce((sum,seconds)=>sum+seconds,0);assert.ok(total>=25*60&&total<=40*60,`${total} s`);
+ // An export refused as busy is tried again too, instead of being skipped.
+ let exportRefusals=1;const exporting=fakeAccount({total:5,cover:0});const finish=exporting.steps.finish;exporting.steps.finish=async job=>{if(exportRefusals-->0)throw serviceBusy();return finish(job);};
+ assert.equal((await exporting.create({random:()=>0}).run(exporting.state.job)).status,'done');assert.deepEqual(exporting.sleeps,[20]);
+});
+
+test('a chunk that runs out of time or memory in the service is retried with half the pages, and later chunks keep that size',async()=>{
+ const tooHeavy=({count})=>count>10?pdfError(413,'pdf_timeout','Tách PDF vượt thời gian cho phép. Hãy chọn ít trang hơn cho mỗi lượt.'):null;
+ const account=fakeAccount({total:45,cover:0,refuse:tooHeavy}),outcome=await account.create().run(account.state.job);
+ assert.equal(outcome.status,'done');assert.equal(account.state.job.pageStates,'d'.repeat(45));
+ assert.deepEqual(account.extracts.map(({offset,count})=>[offset,count]),[[0,20],[0,10],[10,10],[20,10],[30,10],[40,5]]);
+ // Out of memory alone on one page: that page is marked failed and the rest go on.
+ const memory=fakeAccount({total:3,cover:0,refuse:({offset,count})=>offset<=1&&offset+count>=2?pdfError(413,'pdf_memory','Không đủ bộ nhớ để xử lý các trang đã chọn. Hãy chọn ít trang hơn cho mỗi lượt.'):null}),notes=[];
+ assert.equal((await memory.create({ui:{warn:message=>notes.push(message)}}).run(memory.state.job)).status,'done');
+ assert.equal(memory.state.job.pageStates,'dfd');assert.match(notes[0],/^Trang 2: Không đủ bộ nhớ/u);
 });

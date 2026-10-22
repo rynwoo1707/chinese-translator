@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {translatePdfBlocks} from './pdf-block-translation.js';
+import {translatePdfBlocks,MAX_CALLS} from './pdf-block-translation.js';
 import {studyRoute} from './study-translation.js';
 import {errorResponse} from './http.js';
 
@@ -149,4 +149,76 @@ test('Student block endpoint respects an explicit PDF model and uses only the ta
  assert.equal(response.status,200);assert.equal(data.model,'gemini-2.5-flash');assert.equal(requests.length,1);assert.equal(requests[0].options.headers['x-goog-api-key'],'student-key-long-enough');assert.equal(storageCalls,0);
  assert.doesNotMatch(JSON.stringify(data),/student-key|server-key/);
  await assert.rejects(()=>studyRoute(request({blocks}),scoped,url,path),/Khóa Gemini API không hợp lệ/);assert.equal(requests.length,1);
+});
+
+// partial: true. Each fake answer is decided from the blocks the request carries, as Gemini sees them.
+function blockGemini(t,decide){
+ const requests=[];
+ t.mock.method(globalThis,'fetch',async(url,options)=>{const ids=JSON.parse(JSON.parse(options.body).contents[0].parts[0].text).blocks.map(b=>b.id);requests.push(ids);return decide(ids,requests.length);});
+ return requests;
+}
+const translations=ids=>gemini(result(ids.map(id=>({id,translation:`Bản dịch ${id}.`}))));
+const refusal=reason=>Response.json({candidates:[{finishReason:reason,content:{parts:[]}}],usageMetadata:{promptTokenCount:20,totalTokenCount:20}});
+const spent=(answered,refused=0)=>({prompt:20*(answered+refused),output:10*answered,thinking:0,total:30*answered+20*refused,requests:answered+refused,cacheHits:0});
+const line=n=>Array.from({length:n},(_,i)=>({id:`p1-b${i}`,source:`第${i}段。`}));
+
+test('Partial answers keep the good blocks when one keeps dropping a year, and report that block with its draft',async t=>{
+ const source=[{id:'p1-b1',source:'第一段。'},{id:'p1-b2',source:'1949年成立。'},{id:'p1-b3',source:'第三段。'}];
+ const requests=blockGemini(t,ids=>gemini(result(ids.map(id=>({id,translation:id==='p1-b2'?'Được thành lập.':`Đoạn ${id}.`})))));
+ const response=await translatePdfBlocks(env,{blocks:source,partial:true});
+ assert.deepEqual(requests,[['p1-b1','p1-b2','p1-b3'],['p1-b2']],'only the failing block is asked for again');
+ assert.deepEqual(response.blocks,[{id:'p1-b1',translation:'Đoạn p1-b1.'},{id:'p1-b3',translation:'Đoạn p1-b3.'}]);
+ assert.deepEqual(response.failedBlocks,[{id:'p1-b2',code:'block_check',message:'Block p1-b2 thiếu số hoặc dẫn chứng: 1949.',draft:'Được thành lập.'}]);
+ assert.deepEqual(response.usage,spent(2));
+ // Without partial the contract is unchanged: the batch fails after the same two calls.
+ await assert.rejects(()=>translatePdfBlocks(env,{blocks:source}),/thiếu số hoặc dẫn chứng: 1949/u);
+});
+
+test('A refusal of the batch is narrowed down to its block by halves; every other block is kept and every call counted',async t=>{
+ const requests=blockGemini(t,ids=>ids.includes('p1-b3')?refusal('RECITATION'):translations(ids));
+ const response=await translatePdfBlocks(env,{blocks:line(4),partial:true});
+ assert.deepEqual(requests,[['p1-b0','p1-b1','p1-b2','p1-b3'],['p1-b0','p1-b1'],['p1-b2','p1-b3'],['p1-b2'],['p1-b3']]);
+ assert.deepEqual(response.blocks.map(b=>b.id),['p1-b0','p1-b1','p1-b2']);
+ assert.deepEqual(response.failedBlocks.map(({id,code})=>({id,code})),[{id:'p1-b3',code:'gemini_refused'}]);assert.match(response.failedBlocks[0].message,/trùng khớp nguyên văn/u);
+ assert.deepEqual(response.usage,spent(2,3));
+ // A batch of one refused block answers 200 with nothing translated, not an error.
+ blockGemini(t,()=>refusal('SAFETY'));
+ const alone=await translatePdfBlocks(env,{blocks:line(1),partial:true});assert.deepEqual(alone.blocks,[]);assert.equal(alone.failedBlocks[0].code,'gemini_refused');
+});
+
+test('A quota error part-way keeps what was translated; one before anything was translated is thrown as before',async t=>{
+ const quota=()=>Response.json({error:{code:429,status:'RESOURCE_EXHAUSTED',details:[{'@type':'type.googleapis.com/google.rpc.QuotaFailure',violations:[{quotaId:'GenerateRequestsPerMinutePerProjectPerModel-FreeTier'}]},{'@type':'type.googleapis.com/google.rpc.RetryInfo',retryDelay:'40s'}]}},{status:429});
+ blockGemini(t,(ids,n)=>n===1?refusal('RECITATION'):n===2?translations(ids):quota());
+ const response=await translatePdfBlocks(env,{blocks:line(4),partial:true});
+ assert.deepEqual(response.blocks.map(b=>b.id),['p1-b0','p1-b1']);
+ assert.deepEqual(response.failedBlocks.map(({id,code,retryAfter})=>({id,code,retryAfter})),[{id:'p1-b2',code:'quota_minute',retryAfter:40},{id:'p1-b3',code:'quota_minute',retryAfter:40}]);
+ blockGemini(t,()=>quota());
+ await assert.rejects(()=>translatePdfBlocks(env,{blocks:line(2),partial:true}),error=>error.code==='quota_minute'&&error.retryAfter===40);
+});
+
+test('Splitting stops after MAX_CALLS calls, and IDs Gemini repeats, drops or invents fail only their own blocks',async t=>{
+ // One refused block among 48 is found within the budget.
+ let requests=blockGemini(t,ids=>ids.includes('p1-b47')?refusal('RECITATION'):translations(ids));
+ let response=await translatePdfBlocks(env,{blocks:line(48),partial:true});
+ assert.equal(requests.length,11);assert.deepEqual(response.failedBlocks.map(b=>b.id),['p1-b47']);assert.equal(response.blocks.length,47);
+ // Two of them need more calls than MAX_CALLS: the groups left over are reported, every other block is kept.
+ requests=blockGemini(t,ids=>ids.includes('p1-b0')||ids.includes('p1-b47')?refusal('RECITATION'):translations(ids));
+ response=await translatePdfBlocks(env,{blocks:line(48),partial:true});
+ assert.equal(requests.length,MAX_CALLS);const left=response.failedBlocks.map(b=>b.id);
+ assert.ok(left.includes('p1-b0')&&left.includes('p1-b47'));assert.ok(left.length<=12,`${left.length} blocks left`);assert.equal(response.blocks.length+left.length,48);
+ assert.ok(response.failedBlocks.every(b=>b.code==='gemini_refused'));
+ // p1-b0 twice, p1-b1 missing, p9-b9 unknown; the retry fixes both.
+ const fixed=blockGemini(t,(ids,n)=>n===1?gemini(result([{id:'p1-b0',translation:'Một.'},{id:'p1-b0',translation:'Hai.'},{id:'p9-b9',translation:'Lạ.'},{id:'p1-b2',translation:'Ba.'}])):translations(ids));
+ const salvaged=await translatePdfBlocks(env,{blocks:line(3),partial:true});
+ assert.deepEqual(fixed,[['p1-b0','p1-b1','p1-b2'],['p1-b0','p1-b1']]);
+ assert.deepEqual(salvaged.blocks,[{id:'p1-b0',translation:'Bản dịch p1-b0.'},{id:'p1-b1',translation:'Bản dịch p1-b1.'},{id:'p1-b2',translation:'Ba.'}]);assert.deepEqual(salvaged.failedBlocks,[]);
+});
+
+test('The study route passes partial through and answers 200 with failedBlocks',async t=>{
+ const path='/api/my/study/translate-blocks',url=new URL('https://example.test'+path);
+ const scoped={GEMINI_MODEL:'gemini-3.6-flash',DB:{prepare(){return {bind(){return this;},async first(){return {id:'student-1'};}};}}};
+ blockGemini(t,ids=>ids.includes('p1-b1')?refusal('SAFETY'):translations(ids));
+ const response=await studyRoute(new Request(url,{method:'POST',headers:{Cookie:'cat_hien_session=temporary',Origin:url.origin,'Content-Type':'application/json'},body:JSON.stringify({blocks:line(2),apiKey:'student-key-long-enough',mode:'economy',partial:true})}),scoped,url,path);
+ const data=await response.json();assert.equal(response.status,200);
+ assert.deepEqual(data.blocks.map(b=>b.id),['p1-b0']);assert.deepEqual(data.failedBlocks.map(b=>[b.id,b.code]),[['p1-b1','gemini_refused']]);assert.equal(data.usage.requests,3);
 });

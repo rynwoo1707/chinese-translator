@@ -1,6 +1,8 @@
 import {normalizeVietnameseText} from './vietnamese-text.js';
 import {validateBlockTranslations} from '../frontend/pdf-box-layout.js';
-import {logEvent,routeLabel} from './http.js';
+import {logEvent,routeLabel,UserError} from './http.js';
+import {rateLimit,dailyMax} from './rate-limit.js';
+import {readJsonShape} from './json-shape.js';
 // account.js imports this module too; its helpers are read when called, never while the modules load.
 import * as account from './account.js';
 
@@ -9,6 +11,13 @@ import {SUBJECT_LABELS as DOMAINS} from './subject-glossaries.js';
 const CHECKED_DOMAINS=new Set(['general','math','history']);
 const MODES=new Set(['economy','balanced','quality']);
 const MAX_SOURCE=2_000_000,MAX_TRANSLATION=3_000_000,PREVIEW=1200;
+// The parts of one session: a PDF range has one per block, and one extraction may hold up to 3,000 blocks
+// (frontend/pdf-box-layout.js); a text session has far fewer.
+export const MAX_PARTS=3000;
+// A book's terms (UTF-8 bytes of JSON in its D1 row) grow with every range added to it; past this size new terms are no
+// longer added. Every item an account saves can start a book, so this bounds what an account's history puts in D1.
+export const MAX_BOOK_GLOSSARY=131072;
+const MB=1024*1024,number=value=>new Intl.NumberFormat('vi-VN').format(value);
 const reply=(data,status=200)=>Response.json(data,{status,headers:{'Cache-Control':'no-store','X-Content-Type-Options':'nosniff'}});
 const stateKey=(userId,id)=>`study/${userId}/${id}/state.json`;
 const translationKey=(userId,id)=>`study/${userId}/${id}/translation.txt`;
@@ -21,21 +30,26 @@ const UUID=/^[a-f\d-]{36}$/iu;
 const STUDY_BOOK="(source_url LIKE 'study:%' OR source_url LIKE 'study-book:%')";
 // Reader glossaries are edited by hand elsewhere; a malformed value must not make json_patch fail a save.
 const jsonObject=column=>`CASE WHEN json_valid(${column}) THEN CASE WHEN json_type(${column})='object' THEN ${column} ELSE '{}' END ELSE '{}' END`;
+// A book's terms with another set merged in, unless that would pass MAX_BOOK_GLOSSARY: then the book keeps the terms it has.
+const boundedPatch=(base,patch)=>`CASE WHEN length(CAST(json_patch(${base},${patch}) AS BLOB))<=${MAX_BOOK_GLOSSARY} THEN json_patch(${base},${patch}) ELSE ${base} END`;
 const validSha=value=>typeof value==='string'&&/^[a-f\d]{64}$/u.test(value)?value:null;
 
 function cleanObject(value,limit=500){
  if(!value||typeof value!=='object'||Array.isArray(value))return {};
  return Object.fromEntries(Object.entries(value).filter(([key,item])=>!['__proto__','constructor','prototype'].includes(key)&&key.length<=100&&typeof item==='string'&&item.length<=100).slice(0,limit));
 }
-function validTextArray(value,maxItems=1000,maxTotal=MAX_TRANSLATION){
- if(!Array.isArray(value)||value.length>maxItems)return [];
+// A list of texts, refused with the reason when it cannot be saved as it is (never shortened or dropped in silence).
+function textArray(value,maxTotal,tooMany){
+ if(value===undefined||value===null)return [];
+ if(!Array.isArray(value))throw new UserError('Dữ liệu lịch sử bản dịch không hợp lệ. Hãy tải lại trang rồi thử lại.',400,'history_invalid');
+ tooMany(value.length);
  let total=0;const result=[];for(const item of value){const text=typeof item==='string'?item:'';total+=text.length;if(total>maxTotal)throw new Error('Lịch sử bản dịch vượt giới hạn lưu trữ.');result.push(text);}return result;
 }
 function normalizeState(body){
  const source=String(body.source||'');if(!source.trim()||source.length>MAX_SOURCE)throw new Error('Nguyên tác trong lịch sử phải từ 1 đến 2 triệu ký tự.');
- const parts=validTextArray(body.parts,1000,MAX_SOURCE),compact=value=>value.replace(/\s/gu,'');
+ const parts=textArray(body.parts,MAX_SOURCE,count=>{if(count>MAX_PARTS)throw new UserError(`Bản dịch có ${number(count)} phần, nhiều hơn mức ${number(MAX_PARTS)} phần của một lần lưu. Hãy chọn khoảng trang ngắn hơn rồi dịch lại.`,413,'too_many_parts');}),compact=value=>value.replace(/\s/gu,'');
  if(!parts.length||compact(parts.join(''))!==compact(source))throw new Error('Các phần dịch không khớp nguyên tác.');
- const translationParts=validTextArray(body.translationParts,parts.length,MAX_TRANSLATION),done=Math.max(0,Math.min(parts.length,Number.isInteger(body.done)?body.done:0));
+ const translationParts=textArray(body.translationParts,MAX_TRANSLATION,count=>{if(count>parts.length)throw new UserError(`Bản dịch có ${number(count)} phần trong khi nguyên tác có ${number(parts.length)} phần. Hãy tải lại trang rồi thử lại.`,400,'history_invalid');}),done=Math.max(0,Math.min(parts.length,Number.isInteger(body.done)?body.done:0));
  while(translationParts.length<parts.length)translationParts.push('');
  const translation=normalizeVietnameseText(translationParts.filter(Boolean).join('\n\n')).trim();
  const complete=done===parts.length&&parts.length>0&&translationParts.every(item=>item.trim());
@@ -49,6 +63,58 @@ function cleanTitle(value,filename){
 const cleanFilename=value=>{const filename=String(value||'').trim();if(filename.length>260||/[\r\n\0]/u.test(filename))throw new Error('Tên tệp không hợp lệ.');return filename;};
 async function existingSession(env,id,userId){return env.DB.prepare('SELECT * FROM study_sessions WHERE id=? AND user_id=?').bind(id,userId).first();}
 
+// Room for an account's history: accounts cost nothing to make, so neither the number of items nor what they store may
+// grow without bound. MAX_HISTORY_PER_USER (default 300 items), MAX_HISTORY_MB_PER_USER (default 500 MB of saved state
+// and text) and DAILY_HISTORY_PER_USER (default 150 new items a day) set it; 0 turns a limit off. A save that does not
+// grow an item, and every save of an item into the room it already has, always passes: deleting items frees room.
+const utf8Length=text=>{let bytes=0;for(let i=0;i<text.length;i++){const code=text.charCodeAt(i);if(code<0x80)bytes++;else if(code<0x800)bytes+=2;else if(code>=0xd800&&code<0xdc00){bytes+=4;i++;}else bytes+=3;}return bytes;};
+// Items saved before migration 0023 have no stored size: the state holds the source twice and the translation three times.
+const STORED_SIZE='CASE WHEN stored_bytes>0 THEN stored_bytes ELSE 6*source_characters+4*translation_characters END';
+const storedSize=row=>Number(row?.stored_bytes)>0?Number(row.stored_bytes):6*(Number(row?.source_characters)||0)+4*(Number(row?.translation_characters)||0);
+const sizeLabel=bytes=>bytes>=10*MB?`${number(Math.round(bytes/MB))} MB`:`${(bytes/MB).toFixed(1).replace('.',',')} MB`;
+async function historyRoom(env,userId,existing,bytes){
+ const maxItems=dailyMax(env,'MAX_HISTORY_PER_USER',300),maxBytes=dailyMax(env,'MAX_HISTORY_MB_PER_USER',500)*MB,previous=existing?storedSize(existing):0;
+ if(!maxItems&&!maxBytes||existing&&bytes<=previous)return null;
+ const row=await env.DB.prepare(`SELECT COUNT(*) AS items,COALESCE(SUM(${STORED_SIZE}),0) AS bytes FROM study_sessions WHERE user_id=?`).bind(userId).first();
+ const items=Number(row?.items)||0,used=Number(row?.bytes)||0,full=reason=>reply({error:`${reason} Hãy xóa trong Lịch sử dịch những bản dịch không cần nữa rồi thử lại.`,code:'history_full',items,maxItems,bytes:used,maxBytes},413);
+ if(!existing&&maxItems&&items>=maxItems)return full(`Lịch sử dịch của tài khoản đã có ${number(items)} bản dịch, mức tối đa cho mỗi tài khoản.`);
+ if(maxBytes&&used-previous+bytes>maxBytes)return full(`Lịch sử dịch của tài khoản đã chiếm ${sizeLabel(used)}; lưu bản dịch này (${sizeLabel(bytes)}) sẽ vượt mức ${sizeLabel(maxBytes)} cho mỗi tài khoản.`);
+ return null;
+}
+// The terms a save gives its book: the student's own first, then the learned ones, within MAX_BOOK_GLOSSARY.
+function bookTerms(state){
+ const all=JSON.stringify({...state.glossary,...state.manualGlossary});if(utf8Length(all)<=MAX_BOOK_GLOSSARY)return all;
+ const terms={};let bytes=2;
+ for(const [key,value] of [...Object.entries(state.manualGlossary),...Object.entries(state.glossary).filter(([key])=>!Object.hasOwn(state.manualGlossary,key))]){
+  const size=utf8Length(JSON.stringify(key)+JSON.stringify(value))+2;if(bytes+size>MAX_BOOK_GLOSSARY)break;terms[key]=value;bytes+=size;
+ }
+ return JSON.stringify(terms);
+}
+const CONFLICT='Bản dịch này vừa được lưu từ một thẻ hoặc thiết bị khác. Hãy tải lại bản dịch từ Lịch sử dịch rồi tiếp tục, để không ghi đè phần đã dịch.';
+// The history list comes newest first, HISTORY_PAGE items at a time. When more are left the answer carries
+// X-Next-Before, a cursor naming the last item (its updated_at and id, opaque to the browser); ?before=<cursor> answers
+// the items after it. Keyset paging: an item saved meanwhile moves to the top, so no item is listed twice or skipped.
+const HISTORY_PAGE=100;
+const pageCursor=row=>btoa(String.fromCharCode(...new TextEncoder().encode(JSON.stringify([String(row.updated_at),String(row.id)])))).replace(/\+/gu,'-').replace(/\//gu,'_').replace(/=+$/u,'');
+function readCursor(value){
+ try{
+  if(typeof value!=='string'||value.length>400||!/^[A-Za-z\d_-]+$/u.test(value))return null;
+  const [updatedAt,id,...rest]=JSON.parse(new TextDecoder('utf-8',{fatal:true}).decode(Uint8Array.from(atob(value.replace(/-/gu,'+').replace(/_/gu,'/')),c=>c.charCodeAt(0))));
+  return typeof updatedAt==='string'&&typeof id==='string'&&!rest.length&&updatedAt.length<=40&&id.length<=100?{updatedAt,id}:null;
+ }catch{return null;}
+}
+
+// What a history save and a book's page ranges read from a layout manifest: the blocks' ids, sources and formula tokens,
+// and the page numbers. The manifest's images (most of its up to ~15 MB) are streamed past, never held (json-shape.js).
+const MANIFEST_SHAPE={totalPages:true,sourceSha256:true,pages:[{number:true,blocks:[{id:true,source:true,inlines:[{token:true,text:true}]}]}]};
+const RANGE_SHAPE={totalPages:true,sourceSha256:true,pages:[{number:true}]};
+// What a save compares with the state saved before it: its translations, never its source.
+const PRIOR_STATE_SHAPE={pdfLayout:true,translationParts:true};
+// A stored object's JSON read with a shape, from its body as storage streams it (a test double may have only text or json).
+async function storedShape(object,shape){
+ if(object.body!==undefined&&object.body!==null)return readJsonShape(object.body,shape);
+ return readJsonShape(typeof object.text==='function'?await object.text():JSON.stringify(await object.json()),shape);
+}
 // Page numbers count pages of the uploaded file; a range can be a list (12-14, 37), so start/end bound it and pages lists
 // it in manifest order, which is also the page order of the rendered PDF.
 function manifestRange(manifest){
@@ -99,8 +165,8 @@ export async function listBooks(env,userId,bookId=null){
 }
 // Ranges were not recorded before migration 0013; the saved manifest still has them. Only placing a range pays for this read.
 export async function storedRange(env,userId,key){
- const stored=key?await env.FILES.get(key):null,state=stored?await stored.json():null,assetId=state?.pdfLayout?.assetId;if(!assetId||!UUID.test(assetId))return null;
- const asset=await env.FILES.get(`study/${userId}/pdf-layout/${assetId}/manifest.json`);return asset?manifestRange(await asset.json()):null;
+ const stored=key?await env.FILES.get(key):null,state=stored?await storedShape(stored,{pdfLayout:true}):null,assetId=state?.pdfLayout?.assetId;if(!assetId||!UUID.test(assetId))return null;
+ const asset=await env.FILES.get(`study/${userId}/pdf-layout/${assetId}/manifest.json`);return asset?manifestRange(await storedShape(asset,RANGE_SHAPE)):null;
 }
 export const rangeStatement=(env,userId,sessionId,range)=>env.DB.prepare('UPDATE study_sessions SET page_start=?,page_end=?,source_total_pages=?,source_sha256=COALESCE(source_sha256,?),source_pages=COALESCE(source_pages,?) WHERE id=? AND user_id=?').bind(range.start,range.end,range.total,range.sha256,range.pages?JSON.stringify(range.pages):null,sessionId,userId);
 async function backfillRanges(env,userId,parts,limit=12){
@@ -136,7 +202,7 @@ async function renameStatements(env,userId,session,title){
 async function moveSession(env,reader,existing,bookId){
  const target=await ownedBook(env,reader.id,bookId);if(!target)return reply({error:'Không tìm thấy sách đã chọn trong Thư viện riêng.'},404);
  if(!existing.library_chapter_id)return reply({error:'Chỉ gộp được bản dịch đã hoàn tất và có trong Thư viện riêng.'},409);
- const done=extra=>reply({id:existing.id,status:existing.status,libraryStoryId:target.id,libraryChapterId:existing.library_chapter_id,updatedAt:new Date().toISOString(),...extra});
+ const done=extra=>reply({id:existing.id,status:existing.status,libraryStoryId:target.id,libraryChapterId:existing.library_chapter_id,updatedAt:new Date().toISOString(),revision:Number(existing.revision)||0,...extra});
  if(existing.library_story_id===target.id)return done({removedBookId:null});
  const source=existing.library_story_id?await ownedBook(env,reader.id,existing.library_story_id):null;if(!source)return reply({error:'Bản dịch này không nằm trong sách học tập của bạn.'},409);
  const chapter=await env.DB.prepare('SELECT id,title,position FROM chapters WHERE id=? AND story_id=?').bind(existing.library_chapter_id,source.id).first();if(!chapter)return reply({error:'Không tìm thấy phần sách của bản dịch này.'},409);
@@ -148,7 +214,7 @@ async function moveSession(env,reader,existing,bookId){
  const covers=(await env.DB.prepare('SELECT id,cover_key,cover_page,cover_source_sha256 FROM stories WHERE id IN (?,?) AND owner_user_id=?').bind(source.id,target.id,reader.id).all()).results,sourceCover=covers.find(row=>row.id===source.id),targetCover=covers.find(row=>row.id===target.id);
  const results=await env.DB.batch([
   ...backfill,
-  env.DB.prepare(`UPDATE stories SET glossary=json_patch(${jsonObject('glossary')},COALESCE((SELECT ${jsonObject('old.glossary')} FROM stories old WHERE old.id=? AND old.owner_user_id=?),'{}')) WHERE id=? AND owner_user_id=?`).bind(source.id,reader.id,target.id,reader.id),
+  env.DB.prepare(`UPDATE stories SET glossary=${boundedPatch(jsonObject('glossary'),`COALESCE((SELECT ${jsonObject('old.glossary')} FROM stories old WHERE old.id=?1 AND old.owner_user_id=?2),'{}')`)} WHERE id=?3 AND owner_user_id=?2`).bind(source.id,reader.id,target.id),
   env.DB.prepare('UPDATE chapters SET story_id=?,title=?,position=? WHERE id=? AND story_id=?').bind(target.id,moving.title,position,chapter.id,source.id),
   ...arrangeStatements(env,target,order,moving),
   // A whole-book run adding to the emptied book adds its next chunks to the book it was merged into.
@@ -284,9 +350,13 @@ export async function studyHistoryRoute(request,env,path,reader){
  const suffix=path.slice('/api/my/study/history'.length),id=suffix.startsWith('/')?suffix.slice(1):'';
  if(suffix&&(!id||id.includes('/')||id.length>100))return reply({error:'Mã lịch sử không hợp lệ.'},400);
  if(request.method==='GET'&&!id){
-  const rows=(await env.DB.prepare(`SELECT id,title,filename,COALESCE(subject,domain) AS domain,mode,status,translated_parts,total_parts,source_characters,translation_characters,library_story_id,library_chapter_id,page_start,page_end,source_total_pages,source_sha256,created_at,updated_at
-   FROM study_sessions WHERE user_id=? ORDER BY updated_at DESC LIMIT 100`).bind(reader.id).all()).results;
-  return reply(rows);
+  const before=new URL(request.url).searchParams.get('before'),after=before===null?null:readCursor(before);
+  if(before!==null&&!after)return reply({error:'Vị trí trang Lịch sử dịch không hợp lệ. Hãy tải lại trang rồi thử lại.',code:'history_invalid'},400);
+  const rows=(await env.DB.prepare(`SELECT id,title,filename,COALESCE(subject,domain) AS domain,mode,status,translated_parts,total_parts,source_characters,translation_characters,library_story_id,library_chapter_id,page_start,page_end,source_total_pages,source_sha256,created_at,updated_at,revision
+   FROM study_sessions WHERE user_id=?1${after?' AND updated_at<=?2 AND (updated_at<?2 OR id<?3)':''} ORDER BY updated_at DESC,id DESC LIMIT ${HISTORY_PAGE+1}`).bind(reader.id,...(after?[after.updatedAt,after.id]:[])).all()).results;
+  const response=reply(rows.slice(0,HISTORY_PAGE));
+  if(rows.length>HISTORY_PAGE)response.headers.set('X-Next-Before',pageCursor(rows[HISTORY_PAGE-1]));
+  return response;
  }
  if(request.method==='GET'&&id){
   const row=await existingSession(env,id,reader.id);if(!row)return reply({error:'Không tìm thấy lịch sử dịch.'},404);
@@ -305,7 +375,7 @@ export async function studyHistoryRoute(request,env,path,reader){
   if(typeof body.title!=='string'||!body.title.trim())return reply({error:'Hãy nhập tên nội dung.'},400);
   const title=cleanTitle(body.title);
   await env.DB.batch([env.DB.prepare('UPDATE study_sessions SET title=?,updated_at=CURRENT_TIMESTAMP WHERE id=? AND user_id=?').bind(title,id,reader.id),...await renameStatements(env,reader.id,existing,title)]);
-  return reply({id,status:existing.status,libraryStoryId:existing.library_story_id,libraryChapterId:existing.library_chapter_id||null,updatedAt:new Date().toISOString()});
+  return reply({id,status:existing.status,libraryStoryId:existing.library_story_id,libraryChapterId:existing.library_chapter_id||null,updatedAt:new Date().toISOString(),revision:Number(existing.revision)||0});
  }
  if(!['POST','PUT'].includes(request.method))return reply({error:'Phương thức không được hỗ trợ.'},405);
  if(request.method==='POST'&&id||request.method==='PUT'&&!id)return reply({error:'Đường dẫn lưu lịch sử không hợp lệ.'},400);
@@ -316,17 +386,26 @@ export async function studyHistoryRoute(request,env,path,reader){
  if(named!==null&&(typeof named!=='string'||!UUID.test(named)))return reply({error:'Mã lịch sử không hợp lệ.'},400);
  const existing=saved||(named?await existingSession(env,named,reader.id):null);
  if(named&&!existing&&await env.DB.prepare('SELECT 1 AS taken FROM study_sessions WHERE id=?').bind(named).first())return reply({error:'Mã lịch sử này đã được dùng.'},409);
+ // revision (optional): the revision this save was made from, as the last save, GET or list answered it. Another tab or
+ // device saved since: nothing is written, and the browser reloads the session before it goes on.
+ if(body.revision!==undefined&&body.revision!==null){
+  if(!Number.isInteger(body.revision)||body.revision<0)return reply({error:'Phiên bản lịch sử không hợp lệ.',code:'history_invalid'},400);
+  if(existing&&body.revision!==(Number(existing.revision)||0))return reply({error:CONFLICT,code:'history_conflict',revision:Number(existing.revision)||0,updatedAt:existing.updated_at},409);
+ }
  const sessionId=id||named||crypto.randomUUID(),filename=cleanFilename(body.filename),title=cleanTitle(body.title,filename),domain=Object.hasOwn(DOMAINS,body.domain)?body.domain:'general',checkedDomain=CHECKED_DOMAINS.has(domain)?domain:'general',mode=MODES.has(body.mode)?body.mode:'economy',state=normalizeState(body.state||{});
  // Of two parts translating the same page, the whole-book PDF uses the newer translation, so that time is kept apart
  // from renames and moves. A PDF range compares with its saved state; any other save counts as a change.
  let range=bodyRange(body.pageRange),sameTranslation=false;
+ // An extraction stores its asset (manifest and original) before any session names it (pdf-layout.js). One whose first
+ // save never succeeds is named by no session and stays until the account is deleted, which clears study/<user>/;
+ // deleteSession removes an asset once no session or part names it.
  if(state.pdfLayout){
   const asset=await env.FILES.get(`study/${reader.id}/pdf-layout/${state.pdfLayout.assetId}/manifest.json`);if(!asset)return reply({error:'Không tìm thấy PDF trong tài khoản của bạn.'},404);
-  const manifest=await asset.json(),blocks=manifest.pages.flatMap(p=>p.blocks);range=manifestRange(manifest);
+  const manifest=await storedShape(asset,MANIFEST_SHAPE),blocks=manifest.pages.flatMap(p=>p.blocks);range=manifestRange(manifest);
   if(blocks.length!==state.parts.length||blocks.some((b,i)=>b.source!==state.parts[i]))throw new Error('Lịch sử block không khớp PDF gốc.');
   validateBlockTranslations(blocks,state.translationParts.map((translation,i)=>({id:blocks[i].id,translation})).filter(b=>b.translation.trim()),{complete:state.complete});
   state.translation=blocks.map((b,i)=>{let value=state.translationParts[i];for(const inline of b.inlines||[])value=value.replace(inline.token,inline.text);return value;}).filter(Boolean).join('\n\n');
-  if(existing){const priorObject=await env.FILES.get(existing.state_key),prior=priorObject?await priorObject.json():null;sameTranslation=prior?.pdfLayout?.assetId===state.pdfLayout.assetId&&JSON.stringify(prior.translationParts)===JSON.stringify(state.translationParts);if(sameTranslation&&prior.pdfLayout.exported){state.pdfLayout.exported=true;state.pdfLayout.renderVersion=Number(prior.pdfLayout.renderVersion)||0;}}
+  if(existing){const priorObject=await env.FILES.get(existing.state_key),prior=priorObject?await storedShape(priorObject,PRIOR_STATE_SHAPE):null;sameTranslation=prior?.pdfLayout?.assetId===state.pdfLayout.assetId&&JSON.stringify(prior.translationParts)===JSON.stringify(state.translationParts);if(sameTranslation&&prior.pdfLayout.exported){state.pdfLayout.exported=true;state.pdfLayout.renderVersion=Number(prior.pdfLayout.renderVersion)||0;}}
  }
  const pages={start:range?.start??existing?.page_start??null,end:range?.end??existing?.page_end??null,total:range?.total??existing?.source_total_pages??null,sha256:range?.sha256||validSha(body.sha256)||existing?.source_sha256||null,list:range?(range.pages?JSON.stringify(range.pages):null):existing?.source_pages??null};
  // A session joins its book once: after it owns a chapter, only an explicit move (PATCH bookId) changes its book.
@@ -335,10 +414,15 @@ export async function studyHistoryRoute(request,env,path,reader){
   if(body.bookId){book=await ownedBook(env,reader.id,body.bookId);if(!book)return reply({error:'Không tìm thấy sách đã chọn trong Thư viện riêng.'},404);}
   libraryStoryId=book?.id||null;
  }
+ const stateJson=JSON.stringify(state),storedBytes=utf8Length(stateJson)+(state.complete?utf8Length(state.translation):0);
+ const room=await historyRoom(env,reader.id,existing,storedBytes);if(room)return room;
+ // Counted once the save is valid and fits, so a refused save never uses up the day's new items.
+ if(!existing){const daily=await rateLimit(env,[{daily:`history:${reader.id}`,max:dailyMax(env,'DAILY_HISTORY_PER_USER',150),label:'lưu bản dịch mới'}]);if(daily)return daily;}
  const key=stateKey(reader.id,sessionId),translatedKey=translationKey(reader.id,sessionId),status=state.complete?'complete':state.done?'translating':'draft';
  const statements=[],content=state.translation.slice(0,20000);let newChapter=false;
  // The private library copy keeps the student's terms so the reader can show the Chinese original on tap; every range adds to the book's terms.
- const glossaryStatement=storyId=>env.DB.prepare(`UPDATE stories SET glossary=json_patch(${jsonObject('glossary')},?),genre=CASE WHEN (SELECT COUNT(*) FROM chapters WHERE chapters.story_id=stories.id)<=1 THEN ? ELSE genre END WHERE id=? AND owner_user_id=?`).bind(JSON.stringify({...state.glossary,...state.manualGlossary}),DOMAINS[domain],storyId,reader.id);
+ const terms=bookTerms(state);
+ const glossaryStatement=storyId=>env.DB.prepare(`UPDATE stories SET glossary=${boundedPatch(jsonObject('glossary'),'?1')},genre=CASE WHEN (SELECT COUNT(*) FROM chapters WHERE chapters.story_id=stories.id)<=1 THEN ?2 ELSE genre END WHERE id=?3 AND owner_user_id=?4`).bind(terms,DOMAINS[domain],storyId,reader.id);
  if(state.complete&&!chapterId){
   if(libraryStoryId&&!book)book=await ownedBook(env,reader.id,libraryStoryId);
   const part={id:crypto.randomUUID(),title,position:null,sessionId,filename,pageStart:pages.start,pageEnd:pages.end,totalPages:pages.total,sha256:pages.sha256};
@@ -360,7 +444,7 @@ export async function studyHistoryRoute(request,env,path,reader){
   }else{
    // A new book: later ranges can join it, so it is not tied to this session's id.
    libraryStoryId=crypto.randomUUID();chapterId=part.id;newChapter=true;
-   statements.push(env.DB.prepare("INSERT INTO stories(id,title,author,genre,source_url,owner_user_id,visibility,glossary) VALUES(?,?,?,?,?,?, 'private',?)").bind(libraryStoryId,title,'Bản dịch cá nhân',DOMAINS[domain],`study-book:${libraryStoryId}`,reader.id,JSON.stringify({...state.glossary,...state.manualGlossary})));
+   statements.push(env.DB.prepare("INSERT INTO stories(id,title,author,genre,source_url,owner_user_id,visibility,glossary) VALUES(?,?,?,?,?,?, 'private',?)").bind(libraryStoryId,title,'Bản dịch cá nhân',DOMAINS[domain],`study-book:${libraryStoryId}`,reader.id,terms));
    statements.push(env.DB.prepare('INSERT INTO chapters(id,story_id,title,content,text_key,mime,position) VALUES(?,?,?,?,?,?,?)').bind(chapterId,libraryStoryId,title,content,translatedKey,'text/plain',1));
   }
  }else if(state.complete&&chapterId){
@@ -373,15 +457,18 @@ export async function studyHistoryRoute(request,env,path,reader){
  }
  // The session references its book and chapter, so it is written after them in the transaction. A concurrent move changes
  // only the book of an existing chapter; keeping the stored book then avoids pointing back at a deleted story.
- statements.push(env.DB.prepare(`INSERT INTO study_sessions(id,user_id,title,filename,domain,subject,mode,status,state_key,source_preview,translation_preview,translated_parts,total_parts,source_characters,translation_characters,library_story_id,library_chapter_id,page_start,page_end,source_total_pages,source_sha256,source_pages,pdf_asset_id,translated_at)
-  VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,CASE WHEN ? THEN NULL ELSE CURRENT_TIMESTAMP END) ON CONFLICT(id) DO UPDATE SET translated_at=COALESCE(excluded.translated_at,study_sessions.translated_at,CURRENT_TIMESTAMP), title=excluded.title,filename=excluded.filename,domain=excluded.domain,subject=excluded.subject,mode=excluded.mode,status=excluded.status,state_key=excluded.state_key,source_preview=excluded.source_preview,translation_preview=excluded.translation_preview,translated_parts=excluded.translated_parts,total_parts=excluded.total_parts,source_characters=excluded.source_characters,translation_characters=excluded.translation_characters,library_story_id=CASE WHEN study_sessions.library_chapter_id IS NOT NULL AND study_sessions.library_chapter_id=excluded.library_chapter_id THEN study_sessions.library_story_id ELSE excluded.library_story_id END,library_chapter_id=excluded.library_chapter_id,page_start=excluded.page_start,page_end=excluded.page_end,source_total_pages=excluded.source_total_pages,source_sha256=excluded.source_sha256,source_pages=excluded.source_pages,pdf_asset_id=excluded.pdf_asset_id,updated_at=CURRENT_TIMESTAMP WHERE user_id=excluded.user_id`).bind(sessionId,reader.id,title,filename,checkedDomain,domain,mode,status,key,state.source.slice(0,PREVIEW),state.translation.slice(0,PREVIEW),state.done,state.parts.length,state.source.length,state.translation.length,libraryStoryId,chapterId,pages.start,pages.end,pages.total,pages.sha256,pages.list,state.pdfLayout?.assetId||null,sameTranslation?1:0));
+ statements.push(env.DB.prepare(`INSERT INTO study_sessions(id,user_id,title,filename,domain,subject,mode,status,state_key,source_preview,translation_preview,translated_parts,total_parts,source_characters,translation_characters,library_story_id,library_chapter_id,page_start,page_end,source_total_pages,source_sha256,source_pages,pdf_asset_id,translated_at,stored_bytes,revision)
+  VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,CASE WHEN ? THEN NULL ELSE CURRENT_TIMESTAMP END,?,1) ON CONFLICT(id) DO UPDATE SET revision=study_sessions.revision+1,stored_bytes=excluded.stored_bytes,translated_at=COALESCE(excluded.translated_at,study_sessions.translated_at,CURRENT_TIMESTAMP), title=excluded.title,filename=excluded.filename,domain=excluded.domain,subject=excluded.subject,mode=excluded.mode,status=excluded.status,state_key=excluded.state_key,source_preview=excluded.source_preview,translation_preview=excluded.translation_preview,translated_parts=excluded.translated_parts,total_parts=excluded.total_parts,source_characters=excluded.source_characters,translation_characters=excluded.translation_characters,library_story_id=CASE WHEN study_sessions.library_chapter_id IS NOT NULL AND study_sessions.library_chapter_id=excluded.library_chapter_id THEN study_sessions.library_story_id ELSE excluded.library_story_id END,library_chapter_id=excluded.library_chapter_id,page_start=excluded.page_start,page_end=excluded.page_end,source_total_pages=excluded.source_total_pages,source_sha256=excluded.source_sha256,source_pages=excluded.source_pages,pdf_asset_id=excluded.pdf_asset_id,updated_at=CURRENT_TIMESTAMP WHERE user_id=excluded.user_id`).bind(sessionId,reader.id,title,filename,checkedDomain,domain,mode,status,key,state.source.slice(0,PREVIEW),state.translation.slice(0,PREVIEW),state.done,state.parts.length,state.source.length,state.translation.length,libraryStoryId,chapterId,pages.start,pages.end,pages.total,pages.sha256,pages.list,state.pdfLayout?.assetId||null,sameTranslation?1:0,storedBytes));
  const written=[key,...(state.complete?[translatedKey]:[])];
- await env.FILES.put(key,JSON.stringify(state),{httpMetadata:{contentType:'application/json; charset=utf-8'}});
+ await env.FILES.put(key,stateJson,{httpMetadata:{contentType:'application/json; charset=utf-8'}});
  if(state.complete)await env.FILES.put(translatedKey,state.translation,{httpMetadata:{contentType:'text/plain; charset=utf-8'}});
  // An account deleted meanwhile keeps none of this: its rows cannot be written (or went with it), its files go here.
  try{await env.DB.batch(statements);}catch(error){if(!await accountKept(env,reader.id,written))return accountGone();throw error;}
+ // The revision this save made, which the next save from this tab names; read back, as a save from elsewhere may have
+ // landed in between.
+ const revision=Number((await env.DB.prepare('SELECT revision FROM study_sessions WHERE id=? AND user_id=?').bind(sessionId,reader.id).first())?.revision)||(existing?(Number(existing.revision)||0)+1:1);
  if(!await accountKept(env,reader.id,written))return accountGone();
  // The save is done: an export that no longer matches is only removed on a best-effort basis, never failing the save.
  if(state.pdfLayout&&!state.pdfLayout.exported)await removeFile(env,`study/${reader.id}/pdf-layout/${state.pdfLayout.assetId}/translated.pdf`);
- return reply({id:sessionId,status,libraryStoryId,libraryChapterId:chapterId,updatedAt:new Date().toISOString()},existing?200:201);
+ return reply({id:sessionId,status,libraryStoryId,libraryChapterId:chapterId,updatedAt:new Date().toISOString(),revision},existing?200:201);
 }

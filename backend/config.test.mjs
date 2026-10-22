@@ -104,6 +104,33 @@ test('CI uses no secrets, pins every action to a commit and runs the tests with 
  }
 });
 
+test('CI tests and checks the PDF service with its production font, Liberation Serif',()=>{
+ const workflow=read('.github/workflows/ci.yml').replace(/\r\n/gu,'\n');
+ const testJob=/^ {2}test:\n([\s\S]*?)^ {2}pdf-image:/mu.exec(workflow)?.[1]||'',imageJob=workflow.slice(workflow.indexOf('\n  pdf-image:'));
+ assert.match(testJob,/apt-get install[^\n]*\bfonts-liberation2\b/u,'the engine tests render with the image\'s font');
+ assert.match(testJob,/fontPath\(\)[\s\S]*?case "\$font" in \*\/LiberationSerif-Regular\.ttf\)/u,'and fail when the engine would pick another one');
+ assert.doesNotMatch(testJob,/DejaVu Serif is the PDF font/u);
+ assert.match(imageJob,/grep -qF '"font":"LiberationSerif-Regular\.ttf"'/u,'the built image reports Liberation Serif on /health');
+});
+
+test('Settings the Worker and the PDF service share are declared where they are read, at the defaults the code uses',async()=>{
+ const {slotCount}=await import('./pdf-slots.js'),{REGISTRATIONS_PER_NETWORK}=await import('./reader-auth.js'),{jobLimit}=await import('../services/pdf-layout/server.mjs');
+ const vars=config.vars||{},compose=read('deploy/pdf-layout/docker-compose.yml'),env=read('deploy/pdf-layout/env.example').replace(/\r\n/gu,'\n');
+ // Visible in wrangler.jsonc, at the values the code falls back to; the layout hash is never kept there.
+ assert.equal(vars.PDF_LAYOUT_SLOTS,'2');assert.equal(slotCount(vars),slotCount({}));
+ assert.equal(vars.DAILY_REGISTRATIONS_PER_IP,String(REGISTRATIONS_PER_NETWORK));
+ assert.ok(!Object.hasOwn(vars,'PDF_LAYOUT_VERSION'),'npm run deploy passes PDF_LAYOUT_VERSION itself');
+ // One service job per Worker slot.
+ assert.equal(Number(/PDF_LAYOUT_JOBS: \$\{PDF_LAYOUT_JOBS:-(\d+)\}/u.exec(compose)?.[1]),slotCount(vars));assert.equal(jobLimit(undefined),slotCount(vars));
+ // The extraction time budget reaches the container, at extract.py's default and below the engine's hard stop.
+ const budget=Number(/^ +PDF_EXTRACT_SECONDS: \$\{PDF_EXTRACT_SECONDS:-(\d+)\}$/mu.exec(compose)?.[1]);
+ const fallback=Number(/os\.getenv\("PDF_EXTRACT_SECONDS"\) or (\d+)/u.exec(read('services/pdf-layout/extract.py'))?.[1]),stop=Number(/TIMEOUT_MS=(\d+)/u.exec(read('services/pdf-layout/engine.mjs'))?.[1])/1000;
+ assert.equal(budget,fallback);assert.ok(budget>0&&budget<stop,`${budget} s, stopped at ${stop} s`);assert.match(env,/^# PDF_EXTRACT_SECONDS=170$/mu);
+ // PDF_LAYOUT_SLOTS belongs to the Worker (wrangler.jsonc), not to the service's .env.
+ assert.match(env,/PDF_LAYOUT_SLOTS, biến của Worker chứ không phải của tệp này: sửa nó trong khối "vars" của\n# wrangler\.jsonc ở repo rồi chạy npm run deploy\./u);
+ assert.doesNotMatch(env,/^#? ?PDF_LAYOUT_SLOTS=/mu);
+});
+
 test('PDF service deployment: HTTPS proxy with long timeouts and a large body limit, no published service port',()=>{
  const caddy=read('deploy/pdf-layout/Caddyfile'),compose=read('deploy/pdf-layout/docker-compose.yml');
  assert.ok(Number(/response_header_timeout\s+(\d+)s/u.exec(caddy)?.[1])>=300,'one job can take up to 280 s');

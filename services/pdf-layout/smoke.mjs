@@ -13,6 +13,7 @@ import {existsSync,readFileSync} from 'node:fs';
 import {mkdir,readFile,writeFile} from 'node:fs/promises';
 import {resolve} from 'node:path';
 import {fileURLToPath} from 'node:url';
+import {layoutVersion} from './version.mjs';
 
 const root=fileURLToPath(new URL('../../',import.meta.url));
 // Vietnamese text uses Latin punctuation; keeping the full-width marks would only exercise a CJK fallback font.
@@ -69,7 +70,10 @@ export async function smoke({origin,token,dir,wait=90,log=console.log}){
  const health=await waitForHealth(origin,token,wait);
  if(health.engine!=='pymupdf-puppeteer')fail(`/health trả engine "${health.engine}", cần "pymupdf-puppeteer".`);
  if(!open.status){const again=await request(origin,'/health',{timeout:15000});if(again.status!==401)fail(`/health không kèm token phải trả 401, nhận ${again.status}.`);}
- log(`OK  /health: 401 khi thiếu token, 200 khi có token (${health.engine}).`);
+ log(`OK  /health: 401 khi thiếu token, 200 khi có token (${health.engine}${health.version?`, bản ${health.version.service}`:''}${health.jobs?`, ${health.jobs} việc cùng lúc`:''}${health.font?`, phông ${health.font}`:''}).`);
+ // The service and this checkout should check documents with the same code (the Worker deployed from it does too).
+ const local=layoutVersion();
+ if(health.version?.layout&&local&&health.version.layout!==local)log(`CẢNH BÁO: dịch vụ dùng bộ kiểm tra bố cục ${health.version.layout}, mã nguồn trên máy này là ${local}: Worker và dịch vụ phải chạy cùng một commit (deploy/pdf-layout/README.md mục A.5).`);
  const font=await request(origin,'/font',{token});
  if(font.status!==200||!/@font-face/u.test(font.json?.css||''))fail(`/font trả ${problem(font)}`);
  log(`OK  /font: phông nhúng ${Math.round(font.json.css.length/1024)} KB.`);

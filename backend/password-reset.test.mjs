@@ -108,7 +108,10 @@ test('A weak password gets the registration message and leaves the link usable',
  assert.equal(registration.status,400);assert.deepEqual(registration.json,WEAK);
  for(const password of [undefined,'','ngan','1234567','x'.repeat(129)]){const weak=await reset(token,password);assert.equal(weak.status,400,String(password));assert.deepEqual(weak.json,WEAK,String(password));assert.equal(weak.cookie,undefined);}
  assert.equal(links(lan.id)[0].used_at,null,'the link still works');
- assert.equal((await reset(token,'12345678')).status,200,'8 characters are enough, as at registration');
+ // A password people pick most often is refused as at registration, and the link still works.
+ const common=await reset(token,'12345678');assert.equal(common.status,400);assert.equal(common.json.code,'password_pattern');assert.equal(common.cookie,undefined);
+ assert.equal(links(lan.id)[0].used_at,null);
+ assert.equal((await reset(token,'tre-xanh')).status,200,'8 characters are enough, as at registration');
 });
 
 test('Only an admin creates links; an unknown account gets 404, a Google-only or locked one 409',async t=>{

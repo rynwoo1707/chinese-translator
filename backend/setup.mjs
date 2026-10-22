@@ -102,8 +102,8 @@ step(5,'Trình duyệt và phông chữ để xuất PDF');
 // which `npm run dev:pdf-layout` reads. A value set in the shell or a still-valid value in .dev.vars is kept.
 const AUTO_BROWSERS=['C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe','C:/Program Files/Microsoft/Edge/Application/msedge.exe','/usr/bin/chromium','/usr/bin/chromium-browser'];
 const OTHER_BROWSERS=['C:/Program Files/Google/Chrome/Application/chrome.exe','C:/Program Files (x86)/Google/Chrome/Application/chrome.exe','/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge','/Applications/Google Chrome.app/Contents/MacOS/Google Chrome','/Applications/Chromium.app/Contents/MacOS/Chromium','/usr/bin/google-chrome','/usr/bin/google-chrome-stable','/usr/bin/microsoft-edge','/snap/bin/chromium'];
-const DEFAULT_FONT=windows?'C:/Windows/Fonts/times.ttf':'/usr/share/fonts/truetype/dejavu/DejaVuSerif.ttf';
-const OTHER_FONTS=['/System/Library/Fonts/Supplemental/Times New Roman.ttf','/Library/Fonts/Times New Roman.ttf','/usr/share/fonts/truetype/liberation/LiberationSerif-Regular.ttf','/usr/share/fonts/TTF/DejaVuSerif.ttf','/usr/share/fonts/dejavu/DejaVuSerif.ttf'];
+// The font list follows the PDF service's own order (Liberation Serif before DejaVu Serif on Linux): setup-font.mjs.
+const {fontCandidates,fontWarning}=await import('./setup-font.mjs'),FONTS=fontCandidates();
 function choose(key,auto,other){
  if(process.env[key])return {from:'env',value:process.env[key]};
  const kept=saved&&valueIn(saved,key);if(kept&&existsSync(kept))return {from:'file',value:kept};
@@ -119,9 +119,9 @@ if(python&&python.from!=='file')machine.PDF_PYTHON=python.executable;
 const browser=choose('CHROMIUM_EXECUTABLE_PATH',AUTO_BROWSERS,OTHER_BROWSERS);
 if(!browser)warnings.push('Không tìm thấy Edge, Chrome hoặc Chromium: dịch vụ PDF sẽ không xuất được PDF. Cài một trình duyệt rồi chạy lại "npm run setup", hoặc ghi CHROMIUM_EXECUTABLE_PATH=<đường dẫn> vào .dev.vars.');
 else{console.log(`Trình duyệt: ${browser.value}`);remember('CHROMIUM_EXECUTABLE_PATH',browser);}
-const font=choose('PDF_FONT_PATH',[DEFAULT_FONT],OTHER_FONTS);
-if(!font)warnings.push('Không tìm thấy phông Times New Roman/DejaVu Serif/Liberation Serif: dịch vụ PDF sẽ báo lỗi khi xuất. Cài một phông có chữ Việt (Linux: fonts-dejavu-core), hoặc ghi PDF_FONT_PATH=<tệp .ttf> vào .dev.vars.');
-else{console.log(`Phông chữ: ${font.value}`);remember('PDF_FONT_PATH',font);}
+const font=choose('PDF_FONT_PATH',FONTS.auto,FONTS.other),fontAdvice=fontWarning(font);
+if(font){console.log(`Phông chữ: ${font.value}`);remember('PDF_FONT_PATH',font);}
+if(fontAdvice)warnings.push(fontAdvice);
 
 step(6,'Cấu hình máy (.dev.vars, không đưa lên git)');
 let vars=saved;

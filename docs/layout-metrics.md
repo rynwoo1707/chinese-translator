@@ -1,6 +1,8 @@
 # Số đo bố cục PDF dịch
 
-Ngày đo: 2026-10-19. Mã dựng PDF `0bf0cefc9d8de3c5` (`services/pdf-layout/engine.mjs`, `frontend/pdf-box-layout.js`, `frontend/math-text.js`), `extract.py` hiện tại. Không gọi Gemini, không gọi API trả phí, **0 token**. Lệnh ở mục “Chạy lại” cho ra đúng các số dưới đây; hai lần chạy cho kết quả giống hệt.
+Ngày đo: 2026-10-19. Mã dựng PDF `0bf0cefc9d8de3c5` (`services/pdf-layout/engine.mjs`, `frontend/pdf-box-layout.js`, `frontend/math-text.js`), `extract.py` lúc đó. Không gọi Gemini, không gọi API trả phí, **0 token**. Lệnh ở mục “Chạy lại” cho ra đúng các số dưới đây; hai lần chạy cho kết quả giống hệt.
+
+**Sau ngày 22/10/2026:** `extract.py` đã đổi hai lần trong ngày (mục “Bộ tách trang 22/10/2026” và “Lượt sửa thứ hai cùng ngày”); trên 6 bộ scan thể loại, mọi chỉ số đo lại trước và sau lần đổi đầu đều giống hệt, lần đổi thứ hai chỉ chạm trang có lớp chữ, còn mẫu thật c01 được đo trên tệp PDF đã lưu. `frontend/math-text.js` được viết lại không dùng lookbehind, cho đúng cùng kết quả (so 20.000 chuỗi ngẫu nhiên); `engine.mjs` đổi phông trên Linux và cách dừng việc, không đổi cách dàn chữ trên Windows. Vì vậy các số dưới đây vẫn áp dụng, nhưng lệnh “Chạy lại” chưa được chạy lại sau các thay đổi đó (mã dựng nay khác `0bf0cefc9d8de3c5`).
 
 Tài liệu này thay các câu chưa đo như “giữ nguyên 90–95% bố cục” và “tiết kiệm hơn 80% thời gian”. Bố cục không có một con số chung: mỗi chỉ số dưới đây đo một việc, có định nghĩa và có giới hạn.
 
@@ -20,6 +22,8 @@ Tài liệu này thay các câu chưa đo như “giữ nguyên 90–95% bố c�
 - Bản dịch dài cỡ bản thật (1 chữ Việt/chữ Hán; bản dịch thật ở trên là 0,9): 110/131 đoạn (84%) giữ ≥85% cỡ chữ gốc thật, 0 đoạn tràn, 99,5% diện tích chữ Trung được thay, còn 1/3.462 chữ Hán văn bản, 5/5 hình giữ nguyên, 100% mực ngoài khung giữ nguyên.
 - Bản dịch dài hơn hẳn (1,3 chữ Việt/chữ Hán, cố ý nặng): 89/131 đoạn (68%) giữ ≥85% cỡ chữ gốc, vẫn 0 đoạn tràn.
 - Đoạn co dưới 85% chủ yếu là ô bảng (9/21) và dòng đầu trang (5/13). Thân bài chỉ 2/35 (ở tỷ lệ 1,0).
+
+**PDF có lớp chữ** (16 bộ trang tổng hợp in từ Edge, 23 trang, đo ngày 22/10/2026 bằng harness khác, xem mục cuối): với bộ tách mới, đoạn văn bị tách giảm 96 → 34, block gộp nhiều đoạn 62 → 4, đoạn co dưới 85% cỡ ước 314/631 → 135/558, thứ tự đọc 0,899 → 0,992, 0 đoạn tràn. Trang scan hai cột đọc đúng thứ tự hơn (0,57–0,65 → 0,77–0,95).
 
 ## Chạy lại
 
@@ -132,9 +136,9 @@ Phân bố tỷ lệ dựng/in (14 đoạn văn): ≥1: 3, 0,95–1: 3, 0,85–0
 - **Hình bị xóa nằm trong khung chữ.** Trang thật chưa có đáp án hình; vùng “hình giữ nguyên” là vùng bộ tách tự chọn. Biểu tượng cạnh chữ “探究” ở trang 5 bị khung đoạn che mất (ghi chú của người duyệt) mà không chỉ số nào bắt được.
 - **Chữ Hán đi theo ảnh công thức** (như “时” trong p5-b4): trên trang thật không đếm tự động.
 - **Thứ tự đọc, xuống dòng, tách đoạn sai, công thức nhận nhầm.** Harness fixture có các chỉ số riêng cho việc này (`tmp/pdf-layout/genre-fixtures/README.md`).
-- **PDF có lớp chữ (không phải scan).** Cả hai bộ đo đều là ảnh scan; đường tách chữ của PDF gốc có lớp chữ khác (xóa chữ bằng redaction).
-- **Phông chữ máy chủ.** Mọi số đo dựng trên Windows với Times New Roman. Máy chủ Linux dùng DejaVu Serif rộng hơn, nên chữ có thể co thêm hoặc tràn; chưa đo.
-- **Bố cục ngoài bộ thử**: hai cột, chữ dọc, trang nghiêng hay cong, ảnh chụp, nền màu.
+- **PDF có lớp chữ của sách thật.** Hai bộ đo chính đều là ảnh scan; đường tách chữ của PDF có lớp chữ khác (xóa chữ bằng redaction). PDF có lớp chữ mới được đo trên trang tổng hợp in từ Edge (mục “Bộ tách trang 22/10/2026”), chưa đo trên PDF của nhà xuất bản, Word, WPS hay LaTeX: không PDF thật nào trên máy gốc có chữ Trung trong lớp chữ.
+- **Phông chữ máy chủ.** Mọi số đo dựng trên Windows với Times New Roman. Từ 22/10/2026 máy chủ Linux dùng Liberation Serif, có cùng độ rộng chữ (đo bằng PyMuPDF trên 4 câu tiếng Việt: tỉ lệ 1,0000; DejaVu Serif, phông Linux trước đó, rộng hơn khoảng 26%). Các số này vì vậy nên đúng cho bản xuất trên máy chủ, nhưng chưa đo lại trên Linux.
+- **Bố cục ngoài bộ thử**: hai cột, chữ dọc, trang nghiêng, nền màu mới đo trên trang tổng hợp (mục “Bộ tách trang 22/10/2026”); trang cong, ảnh chụp bằng điện thoại chưa đo.
 - **Mẫu nhỏ**: 7 trang tổng hợp và 3 trang thật, chưa có khoảng tin cậy thống kê.
 - **Thời gian và chi phí token**: không đo vì không gọi Gemini; xem mục cuối.
 - **Đọc trên điện thoại**: không đo.
@@ -142,6 +146,7 @@ Phân bố tỷ lệ dựng/in (14 đoạn văn): ≥1: 3, 0,95–1: 3, 0,85–0
 ## Câu nên dùng trong báo cáo
 
 - Thay “giữ nguyên 90–95% bố cục” bằng: “Trên 3 trang scan thật của sách Toán, toàn bộ phần không phải chữ (hình, khung, đường kẻ) giữ nguyên, chỉ lệch nhiễu nén ảnh; 98,9% chữ Việt nằm đúng khung đoạn gốc, không đoạn nào tràn. Tiêu đề chương và chân trang (36 chữ Hán) chưa được dịch. 8/14 đoạn văn giữ ≥85% cỡ chữ in; 3 đoạn nhỏ hơn rõ, khoảng 80%.” Với bộ thử nhiều thể loại: “Trên 7 trang mẫu của 6 thể loại có đáp án chuẩn, với bản dịch thử dài 1 chữ Việt cho mỗi chữ Hán, 99,5% diện tích chữ Trung được thay, 0 đoạn tràn, 84% đoạn giữ ≥85% cỡ chữ gốc (thân bài 33/35).”
+- Với PDF có lớp chữ, chỉ nói: “Trên 23 trang tổng hợp in từ trình duyệt, với bản dịch thử dài 1 chữ Việt cho mỗi chữ Hán, 0 đoạn tràn và thứ tự đọc 99%; chưa đo trên PDF thật.”
 - Bỏ “tiết kiệm hơn 80% thời gian” cho tới khi chạy quy trình dưới đây. Có thể nói: “10 trang trong một lượt cần 7 thao tác trên Hoa Trí; số phút tiết kiệm chưa đo.”
 
 ## Thời gian tiết kiệm: chưa đo
@@ -169,10 +174,64 @@ Phân bố tỷ lệ dựng/in (14 đoạn văn): ≥1: 3, 0,95–1: 3, 0,85–0
 | 6 | Bấm “Bắt đầu dịch” | app tự tách trang, đọc lại ảnh, dịch theo lượt, lưu lịch sử, xuất PDF |
 | 7 | Bấm “Xuất PDF tiếng Việt” để tải về | |
 
-Tổng cộng 7 thao tác bắt buộc cho 10 trang, không đổi theo số trang trong giới hạn 20 trang. Chọn “Lĩnh vực”, thêm thuật ngữ, đổi bìa hay chọn sách là tùy chọn. Kiểm thử tự động `npm run test:pdf-layout` (`backend/benchmark-pdf-layout.mjs`) chạy chuỗi tương tự trên PDF 2 trang, không cần sửa phạm vi, Gemini được giả lập: mở trang, chọn tệp, nhập tên, chọn lĩnh vực, dán khóa, bấm dịch, tải PDF. Chế độ “Dịch cả quyển” đang làm nên chưa đếm.
+Tổng cộng 7 thao tác bắt buộc cho 10 trang, không đổi theo số trang trong giới hạn 20 trang. Chọn “Lĩnh vực”, thêm thuật ngữ, đổi bìa hay chọn sách là tùy chọn. Kiểm thử tự động `npm run test:pdf-layout` (`backend/benchmark-pdf-layout.mjs`) chạy chuỗi tương tự trên PDF 2 trang, không cần sửa phạm vi, Gemini được giả lập: mở trang, chọn tệp, nhập tên, chọn lĩnh vực, dán khóa, bấm dịch, tải PDF. Chế độ “Dịch cả quyển” chưa đếm.
 
 Cách thủ công ở bước 3 cần ít nhất 6 thao tác mỗi trang (xuất ảnh, đính kèm, dán câu lệnh, gửi, chép, dán), tức ít nhất 60 thao tác cho 10 trang, cộng thao tác chèn hình, công thức và chỉnh định dạng. Đây là số đếm theo quy trình mô tả, chưa phải số đo.
 
 ### Lượt gọi Gemini (đếm từ mã, không gọi)
 
 Theo cách app chia lượt (`ocrImageBatches`, `blockBatches`), mẫu c01 (3 trang scan, 27 đoạn) cần 1 lượt đọc ảnh (5 ảnh gộp, 2.400 KB) và 1 lượt dịch (2.139 ký tự nguồn): tổng 2 lượt gọi. Mỗi fixture (1–2 trang) cũng cần 1 + 1 lượt. Số token thật chưa đo; bước 4 của quy trình sẽ ghi lại.
+
+## Bộ tách trang 22/10/2026
+
+`services/pdf-layout/extract.py` đổi ngày 22/10/2026:
+
+- **PDF có lớp chữ:** các dòng của MuPDF được gộp thành đoạn văn (cùng cỡ, phông, độ đậm, màu; khoảng cách dòng đều theo chính đoạn đó; dòng trên chạy tới mép cột; dòng sau ở lề hoặc dưới dòng đầu thụt vào; không có dấu đầu dòng, đường kẻ, hình hay dòng lạ chen giữa; ô bảng và mục ngắn cạnh nhau không gộp). Block mang `indent` như block scan. Pinyin trên chữ Hán và dấu chấm nhấn dưới chữ không vào bản dịch. Trang được đọc theo hàng, theo cột khi có rãnh giữa các cột, và chữ dọc từ phải sang trái.
+- **Chữ người đọc thật sự thấy:** lớp chữ ẩn của bản scan có OCR (chế độ vẽ 3), chữ in dưới một ảnh phủ trang, chữ đã chuyển thành nét vẽ, lớp chữ không có bảng mã Unicode (chữ rác) đều đưa trang sang đường OCR hoặc được giữ ảnh gốc, kèm cảnh báo; trang có lớp chữ thật và ảnh nền lớn giữ lớp chữ (trước đây bị OCR).
+- **Trang scan:** dòng chấm nhiễu thấp hơn 3,5 pt trên băng tiêu đề không còn thành block, mỗi khung đủ cao cho một dòng cỡ chữ nhỏ nhất; trang hai cột được đọc từng cột.
+- **Giới hạn:** ngân sách thời gian khoảng 170 s mỗi lượt (`PDF_EXTRACT_SECONDS`), trả các trang đã xong; trang hỏng hay quá nhỏ báo đúng số trang bằng tiếng Việt.
+
+**Cách đo.** Harness tạm của lượt sửa (không nằm trong repo): tách mỗi bộ bằng `extract.py` trước và sau, so với đáp án chuẩn bằng `tmp/pdf-layout/genre-fixtures/lib/metrics.mjs`, rồi dựng bằng `engine.renderDocument` trên Windows (Times New Roman) với bản dịch giả 1,0 chữ Việt mỗi chữ Hán (`lib/fake-vi.mjs`). 0 lượt gọi Gemini. Ba bộ dữ liệu, đều tổng hợp và có đáp án chuẩn:
+
+- **Scan thể loại:** 6 bộ, 7 trang (bộ (a) ở trên).
+- **Trang khó:** 17 bộ, 69 trang dạng scan, do một lượt kiểm tra trước tạo (không nằm trong repo): nghiêng, hai cột, chữ dọc, chữ xoay, nền màu, bảng…
+- **PDF có lớp chữ:** 16 bộ, 23 trang: các trang HTML nguồn của hai bộ trên in thành PDF bằng Edge, ở giãn dòng gốc và ở giãn dòng 1,25 (các bộ `t-*`).
+
+Định nghĩa của harness (khác vài định nghĩa ở mục “Định nghĩa” phía trên):
+
+- **Đoạn bị tách:** đoạn chuẩn có ít nhất 3 chữ ở mỗi block trong ít nhất 2 block. **Block gộp đoạn:** block có ít nhất 2 chữ của mỗi đoạn trong ít nhất 2 đoạn chuẩn. **Lẫn vai trò:** block chứa chữ Hán của các đoạn chuẩn khác vai trò (tiêu đề với thân bài…). **Chồng nhau:** cặp block giao nhau hơn 2 pt². **Hình bị che:** hình có hơn 3% mực nằm trong khung block.
+- **Thụt đầu dòng đúng:** `indent` lệch không quá 3 pt so với đáp án, trên số đoạn chuẩn có thụt đầu dòng.
+- **Co dưới 85%:** cỡ chữ dựng chia cho cỡ chữ **bộ tách ước** nhỏ hơn 0,85 (không phải cỡ in như bảng phía trên).
+- **Thứ tự đọc:** độ dài dãy con chung dài nhất giữa chữ Hán của các block (theo thứ tự block) và chữ Hán của đáp án (theo thứ tự đọc), chia cho số chữ Hán mà block phủ; lấy trung bình theo bộ.
+- **Chữ Hán chưa dịch:** chữ Hán có tâm nằm ngoài mọi block, hoặc nằm trong ảnh công thức.
+
+| Bộ dữ liệu | Block | Đoạn bị tách | Block gộp đoạn | Lẫn vai trò | Chồng nhau | Hình bị che | Thụt đầu dòng đúng | Tràn | Co dưới 85% | Thứ tự đọc | Chữ Hán chưa dịch |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| Scan thể loại (7 trang) | 131 → 131 | 9 → 9 | 14 → 14 | 6 → 6 | 0 → 0 | 0 → 0 | 32/33 → 32/33 | 0 → 0 | 19 → 19 | 0,952 → 0,952 | 1 → 1 (/3.462) |
+| Trang khó (69 trang) | 1.113 → 1.130 | 81 → 69 | 115 → 96 | 34 → 34 | 3 → 3 | 3 → 3 | 369 → 383 (/412) | 0 → 0 | 171 → 140 | 0,739 → 0,858 | 94 → 94 (/47.606) |
+| PDF có lớp chữ (23 trang) | 631 → 558 | 96 → 34 | 62 → 4 | 3 → 3 | 13 → 1 | 4 → 4 | 0/108 → 95/107 | 2 → 0 | 314 → 135 | 0,899 → 0,992 | 0 → 7 (/11.519) |
+
+- Trên scan thể loại, mọi chỉ số giống hệt: bộ tách mới không đổi kết quả trên 7 trang scan này.
+- Thứ tự đọc từng bộ hai cột: PDF có lớp chữ 0,571 → 1 và 0,611 → 1; scan `twocol` 0,640 → 0,954, `skew-twocol` 0,608 → 0,928, `skew-twocol-fine` 0,598 → 0,926, `skew-twocol2` 0,589 → 0,822, `sweep-twocol1` 0,605 → 0,950, `sweep-twocol2` 0,571 → 0,777, `sweep-twocol3` 0,653 → 0,769. Chữ dọc: PDF có lớp chữ 0,334 → 1 (35 → 8 block); scan 0,076 → 0,076 (chưa sửa).
+- 7 chữ Hán chưa dịch của PDF có lớp chữ là tên bài và tác giả trong một cột dọc hẹp: nay giữ ảnh gốc kèm cảnh báo (trước đây bị dịch thành vài chữ mỗi dòng).
+- Đánh đổi có chủ ý: bảng không kẻ ô (`n-table`) thành một block mỗi ô (52 → 135 block, block gộp đoạn 35 → 0), nên nhiều ô co dưới 85% hơn (9 → 41; trước đây cả hàng là một block và bản dịch chạy qua ranh giới ô); hai bài tập trên cùng một hàng là hai block (đoạn bị tách tăng 3 ở hai bộ bài tập).
+- PDF thật trên máy gốc (đọc trong bộ nhớ, không chép): trên 60 trang đầu của 3 tệp, quyết định trang nào là scan giống hệt trước và sau (hai tệp toàn scan, tệp thứ ba có 6/60 trang scan; không tệp nào có chữ Trung trong lớp chữ). Trang 24 của sách Toán A1: bản cũ xuất lỗi "chữ Việt không vừa box" vì hai khung cao 2 pt sinh từ nhiễu trên băng tiêu đề; bản mới cho 14 block, xuất được, 0 tràn.
+- Thời gian tách mỗi bộ không tăng (PDF có lớp chữ: 0,4–1,3 s mỗi bộ).
+- Kết quả từng bộ nằm ngoài repo, trong thư mục tạm của lượt sửa; muốn đo lại phải dựng lại bộ PDF có lớp chữ và harness. Các quy tắc gộp đoạn là quy tắc kinh nghiệm chỉnh trên 16 bộ này, có thể cần chỉnh lại với PDF thật.
+
+### Lượt sửa thứ hai cùng ngày
+
+`extract.py` thêm ba quy tắc cho PDF có lớp chữ (chi tiết: `docs/pdf-layout-pipeline.md`, mục “Hình, công thức và scan”): công thức, số hay chữ Latin mà MuPDF tách khỏi dòng chữ Hán (cách khoảng 0,7–2 em) được gộp vào đoạn của dòng đó thành token công thức; bộ thủ Khang Hy và chữ Hán “tương thích” được đổi về chữ Hán thường; nét kẻ chạm viền ô hay nối với nét kẻ khác không còn là chỗ điền “____”. Đo bằng harness tạm của lượt sửa (không nằm trong repo, đã xóa), 0 lượt gọi Gemini, dựng bằng `engine.renderDocument` trên Windows với bản dịch giả 1,0 chữ Việt mỗi chữ Hán:
+
+- **16 bộ PDF có lớp chữ ở trên**, in lại bằng Edge từ cùng các trang HTML: nguồn và khung của mọi block trùng hệt trước và sau (558 block, 517 token công thức, 102 block có thụt đầu dòng; 0 tràn và 135/558 co dưới 85% ở cả hai). Bảng phía trên vì vậy không đổi.
+- **Biến thể căng của cùng các trang HTML** (đổi CSS, chỉ dùng cho lượt sửa này):
+
+| Biến thể | Block | Token công thức | Block có thụt đầu dòng | Co dưới 85% | Tràn | Ghi chú |
+|---|---:|---:|---:|---:|---:|---|
+| Công thức đặt cách chữ Hán 1,1 em (5 trang) | 191 → 156 | 91 → 212 | 13 → 19 | 66 → 38 | 0 → 0 | công thức trước đây nằm ngoài block nay thuộc đoạn của dòng |
+| Bảng kẻ sát chữ | 155 → 155 | | | 63 → 70 | | chỗ điền giả 17 → 0, cặp block chồng nhau 14 → 0, một viền hàng bị xóa khỏi nền nay được giữ; co nhiều hơn vì mỗi ô không còn lấn sang ô bên |
+| Bảng không kẻ sát chữ (3 trang) | 169 → 169 | | | | | giống hệt |
+| Bài tập có các mục (lựa chọn A．B．…) trên cùng hàng | 36 → 36 | | | | | giống hệt |
+
+- Thời gian tách các bộ trên không đổi (0,07–1,04 s mỗi tệp). Trên một trang thử nặng (300 cặp nhãn và số, 8.000 chấm vẽ rời), riêng bước gộp mất 0,44 s; khi cả 300 cặp được gộp, cả lượt tách trang đó từ 1,3 s lên khoảng 4 s, phần lớn do mỗi token cần một ảnh và một vùng xóa.
+- Giới hạn: mọi số đều trên trang tổng hợp (in từ Edge, trang PyMuPDF), chưa có PDF thật của Word, WPS hay LaTeX. Mẩu thẳng hàng (trong 0,25 em) với một mẩu không có chữ Hán khác cách 0,6–4 em phía trên hay dưới vẫn để riêng, nên tử và mẫu của phân số xếp chồng giữ nguyên trên nền. Một ô số đứng riêng của bảng không kẻ một hàng, cách đầu hàng chữ Hán dưới 2 em, bị gộp với ô đó. MuPDF tự giữ trong một dòng các cụm chữ Hán cách nhau tới khoảng 1,7 em mà không chèn dấu cách, nên các lựa chọn “A．3个B．4个” in sát nhau vẫn là một dòng như trước.

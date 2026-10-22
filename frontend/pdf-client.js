@@ -12,7 +12,23 @@ export function cleanPdfPages(rawPages,{preserveBodyNumbers=false}={}){
  return pages.map((lines,pageIndex)=>{const clean=lines.filter((line,index)=>(!PAGE_NUMBER.test(line)||(preserveBodyNumbers&&index>0&&index<lines.length-1))&&!repeated.has(line.toLocaleLowerCase())),paragraphs=[];let current='';for(const line of clean){if(!current){current=line;continue;}const join=CJK.test(current)&&CJK.test(line)&&!END_PUNCT.test(current)&&!HEADING.test(line);if(join)current+=line;else{paragraphs.push(current);current=line;}}if(current)paragraphs.push(current);return `[Trang PDF ${pageIndex+1}]\n${paragraphs.join('\n')}`;}).join('\n\n').trim();
 }
 export function usefulPageText(text){const compact=String(text||'').replace(/\s/gu,''),cjk=(compact.match(/[\u3400-\u9fff\uf900-\ufaff]/gu)||[]).length;return compact.length>=40&&cjk>=12;}
-async function loadPdf(file){const pdfjs=await import('/vendor/pdf.mjs');pdfjs.GlobalWorkerOptions.workerSrc='/vendor/pdf.worker.mjs';return pdfjs.getDocument({data:new Uint8Array(await file.arrayBuffer())}).promise;}
+// pdf.js reports a protected or broken file in English (PasswordException "No password given", InvalidPDFException
+// "Invalid PDF structure."); the student is told in Vietnamese what to do. A browser too old for this pdf.js fails with a
+// TypeError or SyntaxError (a missing built-in), which is said as such rather than as a broken file.
+export function pdfOpenError(error){
+ const name=String(error?.name||''),said=(message,code)=>Object.assign(new Error(message),{code,cause:error});
+ if(name==='PasswordException')return said('PDF này có mật khẩu mở tệp nên Hoa Trí không đọc được. Hãy mở tệp bằng mật khẩu, lưu (hoặc in) thành một bản PDF không có mật khẩu, rồi chọn bản đó.','pdf_password');
+ if(['InvalidPDFException','FormatError','MissingPDFException','UnknownErrorException','ResponseException'].includes(name))return said('Không đọc được tệp PDF này: tệp bị hỏng, chưa tải về đủ hoặc không phải PDF. Hãy tải lại tệp gốc rồi chọn lại.','pdf_invalid');
+ if(error instanceof TypeError||error instanceof SyntaxError||['TypeError','SyntaxError'].includes(name))return said('Trình duyệt này chưa đọc được PDF, có thể vì phiên bản trình duyệt đã cũ. Hãy cập nhật trình duyệt (hoặc dùng Chrome, Edge, Firefox, Safari bản mới) rồi chọn lại tệp.','pdf_browser');
+ return error;
+}
+async function loadPdf(file){
+ // A reader that does not arrive is the network's fault; one this browser cannot run is the browser's.
+ const pdfjs=await import('/vendor/pdf.mjs').catch(error=>{throw error instanceof SyntaxError?pdfOpenError(error):Object.assign(new Error('Không tải được bộ đọc PDF. Hãy kiểm tra mạng rồi chọn lại tệp.'),{code:'pdf_reader',cause:error});});
+ pdfjs.GlobalWorkerOptions.workerSrc='/vendor/pdf.worker.mjs';
+ const data=new Uint8Array(await file.arrayBuffer());
+ try{return await pdfjs.getDocument({data}).promise;}catch(error){throw pdfOpenError(error);}
+}
 export async function pdfPageCount(file){const pdf=await loadPdf(file);try{return pdf.numPages;}finally{await pdf.loadingTask.destroy();}}
 function itemsToLines(items){let textItems=items.filter(item=>'str' in item&&item.str);const vertical=textItems.filter(item=>item.dir==='ttb').length>textItems.length*.4;if(vertical)textItems=[...textItems].sort((a,b)=>(b.transform?.[4]||0)-(a.transform?.[4]||0)||(b.transform?.[5]||0)-(a.transform?.[5]||0));const lines=[];let current=[],lastAxis=null;for(const item of textItems){const axis=Math.round(item.transform?.[vertical?4:5]||0);if(lastAxis!==null&&(Math.abs(axis-lastAxis)>3||item.hasEOL)){if(current.length)lines.push(current.join(vertical?'':' '));current=[];}current.push(item.str);lastAxis=axis;if(item.hasEOL&&current.length){lines.push(current.join(vertical?'':' '));current=[];lastAxis=null;}}if(current.length)lines.push(current.join(vertical?'':' '));return lines.join('\n');}
 export function pdfTextLayout(items,viewport){

@@ -21,7 +21,7 @@ Công cụ làm bản dịch mẫu giữ bố cục trang **mà không gọi Gem
   - Máy chủ khác: bắt buộc HTTPS; lấy mã từ biến `HOATRI_ADMIN_TOKEN` hoặc nhập ẩn khi được hỏi. Không bao giờ dùng `.dev.vars`.
   - Mã không bị in ra hay ghi vào tệp nào.
 - Chỉ đăng khi `rights.confirmed` trong `sample.json` là `true`: chủ sách xác nhận được phép công bố các trang gốc và bản dịch.
-- Ví dụ mẫu không tạo bản dịch (job) nào, nên trang học tập không bao giờ báo đây là bản "giáo viên duyệt".
+- Ví dụ mẫu không tạo bản dịch (job) nào, nên Xưởng dịch không bao giờ giới thiệu nó như bản dịch đã công bố của cùng tệp: dòng "Học liệu của Hoa Trí đã công bố bản dịch của đúng tệp này" chỉ hiện với bản dịch do xưởng dịch admin công bố.
 
 ## Các bước
 
@@ -61,7 +61,7 @@ npm run samples -- check tai-lieu-mau c01      # mọi lỗi và cảnh báo tro
 npm run samples -- render tai-lieu-mau c01     # check rồi dựng render/c01.vi.pdf và ảnh render/p<trang>.compare.png
 npm run samples -- status tai-lieu-mau         # phần nào đã sẵn sàng đăng
 ```
-Nếu chữ Việt không vừa khung, `render` báo lỗi. Hãy dịch gọn hơn (không bỏ ý). `--preview-overflow` cho xem bản lỗi nhưng bản đó không đăng được.
+Nếu chữ Việt không vừa khung, `render` báo lỗi "Trang N: chữ Việt không vừa box (p4-b1, …), kể cả ở cỡ chữ nhỏ nhất…", nêu một lần mọi đoạn không vừa của mọi trang trong phần (từ 22/10/2026; trước đó nó dừng ở trang đầu tiên có đoạn tràn). Hãy dịch gọn hơn (không bỏ ý). `--preview-overflow` cho xem bản lỗi nhưng bản đó không đăng được.
 
 ## Đăng, thay, gỡ
 
@@ -99,5 +99,6 @@ Máy chủ cũ (chưa có ví dụ mẫu) vẫn đăng được như trước: s
 - Trang không có đoạn chữ Trung vẫn nằm trong phần, giữ nguyên ảnh gốc.
 - Chữ Hán nằm ngoài mọi đoạn sẽ giữ nguyên trong bản xuất. `check` có cảnh báo khi gặp trường hợp này.
 - Thuật ngữ được tính theo từ dài nhất khớp tại mỗi chỗ: `RULES.md` và cảnh báo thuật ngữ của `check` không bắt dùng “khối lượng” (质量) bên trong 质量数 (số khối) khi môn của sách đã có từ ghép đó.
-- PDF dựng trên Windows dùng phông Times New Roman. Bản xuất của học sinh trên máy chủ Linux dùng DejaVu, nên hai bản có thể hơi khác nhau.
-- Chạy lại `extract --force` thì thư mục `work` cũ được giữ lại thành `work.old-…`. `texts.json` của các phần có cùng trang được chép sang.
+- PDF dựng trên Windows dùng phông Times New Roman. Từ 22/10/2026, bản xuất của học sinh trên máy chủ Linux dùng Liberation Serif, có cùng độ rộng chữ với Times New Roman, nên chữ trong hai bản dàn gần như giống nhau (chưa so trên tài liệu thật). Trước đó máy chủ dùng DejaVu Serif, rộng hơn khoảng 26%.
+- Chạy lại `extract --force` thì thư mục `work` cũ được giữ lại thành `work.old-…`. `texts.json` của các phần có cùng trang được chép sang. Từ 22/10/2026, bộ tách gộp các dòng của trang có lớp chữ thành đoạn văn và đánh số đoạn theo thứ tự đọc (trang hai cột: hết cột này mới sang cột kia), nên tách lại một phần cũ có thể ra mã đoạn khác, hoặc cùng mã mà khác nội dung. `check` báo được mã thiếu ("Thiếu đoạn …") hay lạ ("Mã đoạn lạ …"), còn đoạn cùng mã mà khác nội dung thì không: với phần có trang lớp chữ hoặc trang hai cột, đối chiếu lại `texts.json` vừa chép sang với `blocks.json` mới. Trang scan một cột giữ nguyên các đoạn như trước.
+- Lượt sửa thứ hai của bộ tách (cũng 22/10/2026) đổi thêm `source` của trang có lớp chữ: công thức, số hay chữ Latin mà MuPDF tách khỏi dòng chữ Hán được gộp vào đoạn của dòng đó thành mã `@@PDF_INLINE_n@@` mới; bộ thủ Khang Hy và chữ Hán "tương thích" được đổi về chữ Hán thường; ô của bảng kẻ sát chữ không còn nhận `____` giả. Sau `extract --force`, bản dịch đã chép sang mà thiếu mã công thức mới bị `check` báo lỗi: thêm mã đó vào đúng chỗ trong `translation` (ảnh của nó nằm trong `inlines/`).

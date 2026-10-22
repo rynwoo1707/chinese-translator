@@ -2,8 +2,8 @@
 
 Tài liệu này gồm hai phần:
 
-- **A.** Dịch vụ PDF giữ bố cục chạy trên máy chủ riêng, bằng Docker và Caddy (HTTPS tự động). Các tệp nằm trong thư mục này.
-- **B.** Deploy Worker lên Cloudflare bằng `npm run deploy`. Lệnh này kiểm tra mọi thứ trước, rồi mới thay đổi production.
+- **A.** Dịch vụ PDF giữ bố cục chạy trên máy chủ riêng, bằng Docker và Caddy (HTTPS tự động): bảo vệ máy chủ (A.1), cài đặt, cập nhật và vá image hằng tháng (A.5), giới hạn (A.6), sự cố (A.7), giám sát cả hai phía (A.8). Các tệp nằm trong thư mục này.
+- **B.** Deploy Worker lên Cloudflare bằng `npm run deploy`. Lệnh này kiểm tra mọi thứ trước, rồi mới thay đổi production. Sao lưu và khôi phục D1, R2 ở mục B.5.
 
 ```
 Trình duyệt ──HTTPS──> Worker (Cloudflare: D1, R2, frontend/)
@@ -20,17 +20,44 @@ Trình duyệt không bao giờ gọi thẳng dịch vụ PDF và không thấy 
 
 - **Máy chủ Linux** (Ubuntu 24.04 hoặc Debian 12) có Docker Engine và plugin compose (`docker compose version` chạy được).
   - Cấu hình khởi điểm (ước tính, chưa đo trên Linux): 2 vCPU, 4 GB RAM.
-  - Mỗi tiến trình chạy tối đa 2 việc cùng lúc; mỗi lần xuất PDF mở một Chromium.
+  - Dịch vụ chạy tối đa 2 việc cùng lúc (`PDF_LAYOUT_JOBS`), mỗi việc dùng gần trọn một CPU; mỗi lần xuất PDF mở một Chromium.
 - **Tên miền** cho dịch vụ, ví dụ `pdf.example.com`. Tạo bản ghi A (và AAAA nếu máy chủ có IPv6) trỏ về IP máy chủ.
   - Nếu DNS ở Cloudflare: chọn **DNS only** (mây xám). Proxy cam hoặc Cloudflare Tunnel cắt mọi yêu cầu sau 100 s (lỗi 524), trong khi một lượt có thể cần 240–280 s.
-- **Tường lửa** chỉ mở 22, 80 và 443/TCP. Cổng 80 cần cho việc cấp chứng chỉ và chuyển hướng sang HTTPS.
+- **Bảo vệ máy chủ** trước khi cài: đăng nhập SSH chỉ bằng khóa, tường lửa chỉ mở 22, 80 và 443/TCP, tự cập nhật bản vá hệ điều hành, thêm swap (các lệnh ngay dưới đây).
 - **Một token mới**, dùng chung cho dịch vụ và Worker: `openssl rand -hex 32`. Cất trong trình quản lý mật khẩu, khác bản local.
 - **Giấy phép:** PyMuPDF dùng AGPL-3.0. Chạy nó thành dịch vụ mạng có thể kéo theo nghĩa vụ AGPL (ONBOARDING mục 8). Chủ dự án quyết định trước khi mở dịch vụ.
+
+#### Bảo vệ máy chủ (làm một lần, trước A.2)
+
+Chạy bằng một tài khoản có `sudo`, không phải `root`. Trước khi tắt đăng nhập bằng mật khẩu, mở **một cửa sổ terminal khác** và thử đăng nhập bằng khóa SSH; nếu không vào được thì đừng đóng phiên đang mở.
+
+```bash
+# 1. SSH chỉ nhận khóa; root không đăng nhập bằng mật khẩu.
+#    sshd dùng giá trị đọc được ĐẦU TIÊN, và các tệp trong sshd_config.d/ được đọc trước sshd_config (image cloud
+#    thường có 50-cloud-init.conf đặt "PasswordAuthentication yes"), nên đặt quy tắc trong một tệp tên bắt đầu bằng 00-.
+printf 'PasswordAuthentication no\nKbdInteractiveAuthentication no\nPermitRootLogin prohibit-password\n' | sudo tee /etc/ssh/sshd_config.d/00-hoa-tri.conf
+sudo sshd -t && sudo systemctl reload ssh
+sudo sshd -T | grep -Ei '^(passwordauthentication|kbdinteractiveauthentication|permitrootlogin) '   # phải là no, no và without-password (hay prohibit-password)
+# 2. Tường lửa: chỉ SSH, 80 (cấp chứng chỉ, chuyển sang HTTPS) và 443
+sudo apt-get update && sudo apt-get install -y ufw unattended-upgrades
+sudo ufw default deny incoming && sudo ufw default allow outgoing
+sudo ufw allow OpenSSH && sudo ufw allow 80/tcp && sudo ufw allow 443/tcp
+sudo ufw enable && sudo ufw status verbose
+# 3. Bản vá bảo mật của hệ điều hành tự cài mỗi ngày
+sudo dpkg-reconfigure -plow unattended-upgrades
+# 4. 2 GB swap: một lượt scan nặng làm chậm máy thay vì bị hệ thống dừng ngay khi thiếu RAM
+sudo fallocate -l 2G /swapfile && sudo chmod 600 /swapfile && sudo mkswap /swapfile && sudo swapon /swapfile
+echo '/swapfile none swap sw 0 0' | sudo tee -a /etc/fstab
+```
+
+- Docker mở cổng bằng iptables của riêng nó, **không qua ufw**. Vì vậy `docker-compose.yml` chỉ mở 80/443 của Caddy; đừng thêm `ports:` cho `pdf-layout`.
+- Bản vá hệ điều hành không cập nhật Chromium, Python hay MuPDF **bên trong image**: các thứ đó chỉ mới khi build lại image (mục A.5, "Bản vá hằng tháng").
+- Tùy chọn: chỉ cho dải IP của Cloudflare (https://www.cloudflare.com/ips/) vào cổng 443, vì chỉ Worker gọi dịch vụ. Token đã chặn người lạ. Nếu làm, làm bằng tường lửa của nhà cung cấp VPS (hoặc chuỗi `DOCKER-USER` của iptables), **không** bằng ufw (Docker bỏ qua ufw như trên); giữ cổng 80 mở cho Caddy gia hạn chứng chỉ; dịch vụ theo dõi uptime khi đó không gọi thẳng được `https://pdf.example.com/health` nữa (mục A.8). Kiểm tra lại ngay bằng `https://<Worker>/api/health?deep=1`.
 
 ### A.2 Cài lần đầu
 
 ```bash
-git clone https://github.com/rynwoo1707/chinese-translator.git hoa-tri   # thêm -b <nhánh> nếu không deploy từ main
+git clone -b handoff/2026-10-16 https://github.com/rynwoo1707/chinese-translator.git hoa-tri   # nhánh mà link "Mã nguồn" (SOURCE_URL) trỏ tới
 cd hoa-tri/deploy/pdf-layout
 cp env.example .env && chmod 600 .env
 nano .env                      # điền PDF_DOMAIN, ACME_EMAIL, PDF_LAYOUT_SERVICE_TOKEN
@@ -39,6 +66,7 @@ docker compose ps              # pdf-layout: healthy; caddy: Up
 docker compose logs -f caddy   # chờ dòng "certificate obtained successfully", rồi Ctrl+C
 ```
 
+- Clone đúng nhánh (hoặc tag) đang deploy cho Worker: nhánh `main` trên GitHub hiện còn là bản đầu tiên, chưa có `deploy/pdf-layout`. Worker và dịch vụ phải cùng commit (mục A.5).
 - Thiếu một giá trị trong `.env` thì `docker compose` dừng ngay và báo bằng tiếng Việt tên biến cần đặt.
 - `.env` đã nằm trong `.gitignore`. Không commit tệp này, không gửi qua chat hay email.
 - Caddy chỉ khởi động sau khi `pdf-layout` báo healthy. Image tự kiểm tra `/health` (kèm token) mỗi 15 giây, nên lần đầu mất khoảng 15 giây.
@@ -57,7 +85,7 @@ Bước smoke chạy bên trong container, bằng token có sẵn trong môi tr�
 - `verify.py` kiểm kích thước trang, chữ Việt và hình vẽ vector giữ nguyên.
 - OCR đọc được chữ Hán trên một trang scan.
 
-Kết quả đúng kết thúc bằng `Dịch vụ PDF đạt kiểm thử (không gọi Gemini).`
+Kết quả đúng kết thúc bằng `Dịch vụ PDF đạt kiểm thử (không gọi Gemini).` Dòng `/health` của smoke ghi thêm bản mã nguồn, số việc cùng lúc và phông (phải là `LiberationSerif-Regular.ttf` trong image). Dòng "CẢNH BÁO: dịch vụ dùng bộ kiểm tra bố cục …, mã nguồn trên máy này là …" nghĩa là dịch vụ và bản mã nguồn chạy smoke khác commit (mục A.5).
 
 Thử qua đúng đường HTTPS và Caddy, từ máy Windows đã chạy `npm run setup`. Script dùng Python mà setup ghi vào `.dev.vars` (dòng `PDF_PYTHON`, nếu có), không thì dùng `python`; nó không đọc dòng nào khác của `.dev.vars`.
 
@@ -76,7 +104,7 @@ Token đọc từ biến môi trường, không đặt trên dòng lệnh, để
 - `PDF_LAYOUT_SERVICE_URL=https://pdf.example.com`: chỉ phần gốc, không thêm đường dẫn.
 - `PDF_LAYOUT_SERVICE_TOKEN`: giống hệt giá trị trong `.env`.
 
-Sau khi deploy, `https://<Worker>/api/health` phải có `"pdfLayout":"configured"`.
+Sau khi deploy, `https://<Worker>/api/health` phải có `"pdfLayout":"configured"`, và `https://<Worker>/api/health?deep=1` phải có `"pdfService":{"status":"ok",…}`: Worker gọi được dịch vụ bằng token của nó. `npm run deploy` tự kiểm tra cả hai (phần B).
 
 ### A.5 Cập nhật
 
@@ -86,8 +114,34 @@ cd deploy/pdf-layout && docker compose up -d --build && docker image prune -f
 ```
 
 - Build lại khi một trong các tệp sau thay đổi: `services/pdf-layout/`, `package.json`, `package-lock.json`, `frontend/pdf-box-layout.js`, `frontend/math-text.js`.
-- Lúc container khởi động lại, các lượt đang chạy sẽ lỗi; người dùng chỉ cần bấm dịch lại.
+- Lúc container khởi động lại, các lượt đang chạy sẽ lỗi. Lượt dịch cả quyển tự chờ rồi thử lại; ở chế độ chọn trang, trang tự thử lại 3 lần (mỗi lần chờ khoảng 30 giây) rồi mới để người dùng bấm dịch lại.
 - **Thứ tự cập nhật:** deploy Worker (phần B) trước hoặc cùng lúc với dịch vụ PDF. Hai bên dùng chung bộ kiểm tra tài liệu (`frontend/pdf-box-layout.js`); dịch vụ mới chạy với Worker cũ có thể khiến mọi trang scan báo "Ảnh trang PDF không hợp lệ.".
+- **Kiểm tra hai bên khớp nhau:** `/health` của dịch vụ báo `version.layout` (mã băm của bộ kiểm tra tài liệu) và `version.service` (mã băm mã nguồn của image). `npm run deploy` cho Worker biết mã bố cục của nó, nên `https://<Worker>/api/health?deep=1` báo `"layoutMatch":true` khi khớp, và `"status":"mismatch"` (mã 503) khi lệch. Kiểm tra sau deploy của `npm run deploy` cũng cảnh báo khi image chạy bản mã nguồn khác commit vừa deploy.
+
+**Bản vá hằng tháng** (Chromium, MuPDF, Python và các gói Debian trong image). Lệnh build thường dùng lại lớp `apt-get` cũ trong cache, nên bản vá chỉ vào image khi build với `--pull --no-cache`:
+
+```bash
+cd hoa-tri && git pull
+cd deploy/pdf-layout
+docker tag hoa-tri-pdf-layout:local hoa-tri-pdf-layout:previous   # giữ bản đang chạy để quay lại
+docker compose build --pull --no-cache pdf-layout && docker compose up -d
+docker compose ps                                                  # pdf-layout: healthy
+docker compose exec pdf-layout node services/pdf-layout/smoke.mjs http://127.0.0.1:8091 /tmp/smoke
+docker image prune -f                                              # xóa image không còn tên (giữ :previous)
+```
+
+- Mỗi tháng cũng xem ghi chú phát hành của PyMuPDF (https://github.com/pymupdf/PyMuPDF/releases): dịch vụ đọc PDF do người lạ gửi lên. Có bản vá bảo mật thì nâng `services/pdf-layout/requirements.txt`, đợi CI xanh, rồi build lại như trên.
+
+**Quay lại bản trước** khi bản mới lỗi (smoke không đạt, `docker compose ps` báo unhealthy, học sinh báo lỗi xuất PDF):
+
+```bash
+cd hoa-tri/deploy/pdf-layout
+docker tag hoa-tri-pdf-layout:previous hoa-tri-pdf-layout:local
+docker compose up -d --no-build pdf-layout
+```
+
+- Không còn tag `:previous`: quay mã nguồn về commit trước (`git log --oneline -5`, rồi `git checkout <commit>`), chạy `docker compose up -d --build`, sau đó `git checkout -` để về nhánh cũ.
+- Nếu đã deploy Worker mới cùng lúc và hai bên lệch bộ kiểm tra bố cục, quay cả Worker (`npx wrangler rollback`, phần B.2).
 - **Cập nhật Caddy:** đổi tag `caddy:2.11.7-alpine` trong `docker-compose.yml` (đọc ghi chú phát hành của Caddy trước), rồi chạy `docker compose up -d caddy`.
 - **Cập nhật Node trong image:** image dùng đúng bản `node:22.23.3-bookworm-slim`, nên build lại vài tháng sau vẫn ra đúng môi trường CI đã thử. Muốn lên bản mới, sửa dòng `FROM` trong `services/pdf-layout/Dockerfile`, đợi CI xanh, rồi build lại.
 
@@ -102,15 +156,17 @@ Giữa hai bước, các thao tác PDF báo "Unauthorized".
 
 | Mục | Giá trị |
 |---|---|
-| Thời gian | Caddy chờ phản hồi tối đa 300 s; Worker chờ 280 s; Python dừng ở 240 s |
-| Kích thước | Caddy nhận thân yêu cầu tới 48 MB. Dịch vụ tự giới hạn PDF 25 MiB và JSON 40 MiB, kèm thông báo rõ ràng |
-| Đồng thời | 2 việc mỗi container; việc thứ ba nhận "Dịch vụ PDF đang bận. Hãy thử lại sau." |
-| Tài nguyên | Mặc định 2 CPU và 3g RAM. Đổi bằng `PDF_LAYOUT_CPUS` và `PDF_LAYOUT_MEMORY` trong `.env`; máy 1 CPU phải đặt `PDF_LAYOUT_CPUS=1` |
+| Thời gian | Caddy chờ phản hồi tối đa 300 s; Worker chờ 280 s; tách trang (Python) dừng ở 240 s; một lần xuất PDF (Chromium và ghép trang) dừng ở 250 s. Trước mức 240 s, `extract.py` tự thôi bắt đầu trang mới khi sắp quá khoảng 170 s (`PDF_EXTRACT_SECONDS`) và trả các trang đã xong kèm "Lượt này xử lý X/Y trang đã chọn…". Muốn đổi thì đặt `PDF_EXTRACT_SECONDS` trong `.env` (một số, nhỏ hơn 240): compose chuyển nó vào container, mặc định 170 |
+| Kích thước | Caddy nhận thân yêu cầu tới 48 MB. Dịch vụ tự giới hạn PDF 25 MiB và JSON 40 MiB: quá giới hạn thì nó vẫn đọc hết thân yêu cầu rồi trả 413 với `"code":"too_large"` và câu "Dữ liệu gửi tới dịch vụ PDF lớn hơn 25 MB (hoặc 40 MB)…" (Worker báo `pdf_too_large`), chỉ cắt kết nối khi người gửi vượt thêm 64 MiB. JSON hỏng hay header `X-PDF-Pages` hỏng nhận 400 bằng tiếng Việt |
+| Đồng thời | `PDF_LAYOUT_JOBS` việc mỗi container (mặc định 2). Worker chia các chỗ đó cho cả trang web: tối đa `PDF_LAYOUT_SLOTS` lượt cùng lúc (var của Worker, khai báo `"2"` trong khối `"vars"` của `wrangler.jsonc`, đặt bằng `PDF_LAYOUT_JOBS`; muốn đổi thì sửa giá trị đó, ví dụ `"3"`, rồi deploy lại), mỗi tài khoản tối đa một lượt. Khi đầy, Worker trả 503 `pdf_service_busy` kèm `Retry-After: 20` mà không gọi dịch vụ; lượt dịch cả quyển tự chờ rồi thử lại (tối đa khoảng nửa giờ) |
+| Việc nặng | Tách trang quá thời gian, hết bộ nhớ, kết quả quá lớn hoặc tiến trình chết: Worker trả 413 (`pdf_timeout`, `pdf_memory`, `pdf_too_large`, `pdf_crash`) và lượt dịch cả quyển tự thử lại với nửa số trang; ở chế độ chọn trang, học sinh được khuyên chọn ít trang hơn (3–5 trang) |
+| Người gọi rời đi | Khi Worker ngắt kết nối (học sinh đóng tab, Worker hết 280 s), dịch vụ dừng việc ngay (dừng Python, đóng Chromium) và nhường chỗ. Chỗ của Worker (lưu trong D1) tự hết hạn sau tối đa 1 phút |
+| Tài nguyên | Mặc định 2 CPU và 3g RAM. Đổi bằng `PDF_LAYOUT_CPUS` và `PDF_LAYOUT_MEMORY` trong `.env`; máy 1 CPU phải đặt `PDF_LAYOUT_CPUS=1` (và `PDF_LAYOUT_JOBS=1`, `PDF_LAYOUT_SLOTS=1`) |
 | Bảo mật | Container chạy bằng user `node`, bỏ mọi capability, `no-new-privileges`. Chromium vẫn cần `--no-sandbox` trong container. Chỉ Caddy mở cổng ra ngoài |
-| Sức khỏe | `HEALTHCHECK` của image gọi `/health` kèm token mỗi 15 giây; `docker compose ps` hiện `healthy` |
+| Sức khỏe | `healthcheck.mjs` gọi `/health` kèm token mỗi 15 giây; `docker compose ps` hiện `healthy`. Docker không tự khởi động lại container chỉ vì unhealthy, nên sau 4 lần lỗi liên tiếp (`PDF_HEALTH_RESTART_AFTER`, 0 là tắt) chính bước kiểm tra dừng dịch vụ và `restart: unless-stopped` khởi động lại |
 | Nhật ký | `docker compose logs --tail 200 pdf-layout` hoặc `caddy`. Mỗi dịch vụ giữ tối đa 3 tệp 10 MB. Caddy ghi `Authorization` thành `REDACTED` |
 | OCR | Cùng dữ liệu `chi_sim` và `eng` (@tesseract.js-data 4.0.0_best_int) với `npm test` và bản Windows |
-| Phông chữ | Trong Docker là DejaVu Serif; trên Windows là Times New Roman, nên độ vừa ô có thể khác (chưa so trên tài liệu thật) |
+| Phông chữ | Liberation Serif (gói `fonts-liberation2`): cùng độ rộng chữ với Times New Roman mà mọi phép đo độ vừa ô trên Windows đã dùng, đủ mọi chữ Việt. DejaVu Serif chỉ bù các ký hiệu Liberation thiếu. Image không build được nếu thiếu Liberation Serif; `/health` báo phông đang dùng. Muốn phông khác thì đặt `PDF_FONT_PATH` cho container |
 
 Đã có reverse proxy khác (ví dụ nginx)? Chỉ chạy dịch vụ: `docker compose up -d pdf-layout`. Thêm `docker-compose.override.yml` mở `127.0.0.1:8091:8091` cho dịch vụ đó, và giữ đúng các giới hạn ở trên: timeout ≥ 300 s, thân yêu cầu ≥ 45 MB, không giữ kết nối keep-alive tới dịch vụ.
 
@@ -127,6 +183,25 @@ Giữa hai bước, các thao tác PDF báo "Unauthorized".
 | `range of CPUs is from 0.01 to 1.00` | Máy chủ chỉ có 1 CPU | Đặt `PDF_LAYOUT_CPUS=1` trong `.env` |
 | `pdf-layout` unhealthy, nhật ký có `Killed` hoặc `SIGKILL` | Thiếu RAM | Tăng `PDF_LAYOUT_MEMORY`, hoặc chọn ít trang hơn mỗi lượt |
 | `docker compose up` báo `dependency failed to start` và Caddy không chạy | `pdf-layout` chưa healthy | `docker compose logs pdf-layout`: thường là token quá ngắn hoặc thiếu RAM (hai dòng trên) |
+| Học sinh hay gặp "Dịch vụ PDF đang bận vì nhiều người dùng cùng lúc" | Các chỗ của dịch vụ thường xuyên đầy | Máy mạnh hơn: tăng CPU/RAM, rồi tăng cùng lúc `PDF_LAYOUT_JOBS` (`.env`) và `PDF_LAYOUT_SLOTS` (`wrangler.jsonc`) |
+| `/api/health?deep=1` báo `"status":"mismatch"` | Worker và dịch vụ chạy hai commit có bộ kiểm tra bố cục khác nhau | Cập nhật dịch vụ cho cùng commit với Worker (mục A.5) |
+| `/api/health?deep=1` báo `"unauthorized"`, `"unreachable"` hoặc `"timeout"` | Token khác nhau; máy chủ, DNS hoặc Caddy không chạy | Đặt lại token (mục A.5); `docker compose ps`, `docker compose logs caddy` |
+| `pdf-layout` khởi động lại sau khoảng mỗi phút | Bước kiểm tra sức khỏe lỗi liên tiếp nên tự khởi động lại | `docker compose logs pdf-layout`; tạm đặt `PDF_HEALTH_RESTART_AFTER=0` trong `.env` để tìm lỗi |
+| `docker compose build` dừng ngay sau dòng `PDF font: …` (mã 1) | Phông xuất PDF tìm được không phải `LiberationSerif-Regular.ttf`: gói `fonts-liberation2` không cài được hoặc đổi chỗ để tệp | Đọc lỗi của bước `apt-get` phía trên; nếu Debian đổi đường dẫn tệp, sửa `LINUX_FONTS` trong `services/pdf-layout/engine.mjs` rồi build lại |
+| `/api/health?deep=1` báo `"status":"error"` kèm `"code"` | Dịch vụ trả mã HTTP đó cho `/health` (ví dụ Caddy trả 502 khi container chưa chạy) | `docker compose ps`, `docker compose logs pdf-layout caddy` |
+| Học sinh hay gặp "Xuất PDF tiếng Việt vượt thời gian cho phép của dịch vụ…" hoặc "Tách PDF vượt thời gian cho phép…" | Máy chủ quá tải (2 việc trên máy yếu, swap đầy) hoặc PDF quá nặng | `docker stats` và `free -h` lúc có việc; tăng CPU/RAM, hoặc giảm `PDF_LAYOUT_JOBS` và `PDF_LAYOUT_SLOTS` |
+| Học sinh gặp "Dịch vụ PDF chưa mở được trình duyệt để dựng bản PDF tiếng Việt…" khi xuất PDF (Worker: 503 `pdf_unavailable`) | Chromium trong container không khởi động được | `docker compose logs pdf-layout`: dòng `[pdf-layout] /render …` ghi lỗi gốc trong ngoặc (thiếu tệp trình duyệt, `CHROMIUM_EXECUTABLE_PATH` sai, "Failed to launch the browser process"). Build lại image (mục A.5); kiểm tra RAM và `shm_size` |
+| Học sinh gặp "Trình duyệt của dịch vụ PDF dừng giữa chừng khi dựng trang N…" (Worker: `pdf_crash`) | Chromium chết giữa lần xuất, thường do thiếu RAM hoặc bộ nhớ chia sẻ | `docker stats`; tăng `PDF_LAYOUT_MEMORY`, giữ `shm_size: 1gb` của compose |
+| "Dịch vụ PDF nhận được dữ liệu hỏng hoặc bị cắt giữa chừng…" (400) hoặc "Dữ liệu gửi tới dịch vụ PDF lớn hơn 25 MB…" (413) | Thân yêu cầu bị cắt trên đường (proxy, mạng), không phải JSON object, hoặc quá giới hạn của dịch vụ | Proxy khác Caddy: nhận thân yêu cầu ≥ 45 MB, không cắt yêu cầu dài; với 413 thì chọn ít trang hơn mỗi lượt |
+
+### A.8 Giám sát
+
+Không có gì tự báo khi dịch vụ PDF ngừng, nên đặt một dịch vụ theo dõi uptime miễn phí (ví dụ UptimeRobot hoặc Better Stack), kiểm tra mỗi 5 phút:
+
+- `https://<Worker>/api/health?deep=1`: báo động khi mã khác 200. Mã 503 nghĩa là D1 lỗi (`"database":"error"`) hoặc Worker không dùng được dịch vụ PDF (`"pdfService":{"status":…}`). Câu trả lời không chứa token, URL hay nội dung lỗi; mỗi isolate của Worker (một bản đang chạy trên một máy của Cloudflare) hỏi dịch vụ tối đa một lần mỗi 30 giây, dù có bao nhiêu lần kiểm tra. Kiểm tra bằng `HEAD` cũng được: chỉ trả mã 200 hoặc 503.
+- `https://pdf.example.com/health`: mong đợi mã 401 (dịch vụ đòi token). Kiểm tra này đi thẳng tới Caddy, nên vẫn báo khi Worker hoạt động bình thường mà máy chủ PDF không vào được. Bật thêm cảnh báo hết hạn chứng chỉ TLS nếu dịch vụ theo dõi có.
+- Trên Cloudflare: bật Notifications cho Worker để biết khi tỉ lệ lỗi tăng; xem lỗi trực tiếp bằng `npx wrangler tail`. Lỗi mà các trang gặp trong trình duyệt của người dùng là những dòng `"event":"client_error"` trong Workers Logs (nội dung lỗi đã lọc, tệp và dòng, đường dẫn trang, họ trình duyệt; ONBOARDING mục 5.9). Chưa có gì tự báo động theo số dòng này: xem lại mỗi tuần, và ngay sau mỗi lần deploy.
+- Trên máy chủ: `docker compose ps` phải hiện `healthy`; `docker compose logs --since 1h pdf-layout | grep "stopped: the caller left"` cho biết bao nhiêu lượt bị bỏ dở.
 
 ## B. Deploy Worker bằng `npm run deploy`
 
@@ -142,8 +217,10 @@ npx.cmd wrangler r2 bucket create muc-viet-files --location apac
 - **Không** đổi `bucket_name`: dữ liệu R2 local gắn với tên bucket.
 - Muốn Worker tên khác `muc-viet-cms` (ví dụ `hoa-tri`)? Đổi `"name"` trước lần deploy đầu. Đổi về sau là đổi URL, callback Google và phải đặt lại secret.
 - Nên dùng gói Workers Paid. Gói Free chỉ cho 10 ms CPU, không đủ cho đăng nhập (PBKDF2) và PDF lớn.
-- Gắn tên miền riêng (Workers → Settings → Domains & Routes) **trước** lần chia sẻ link đầu tiên: thẻ xem trước khi dán link vào Zalo/Facebook và địa chỉ canonical lấy theo tên miền mà người dùng mở, nên link `*.workers.dev` sẽ hiện tên đó. Sau khi tên miền chạy ổn, đặt `"workers_dev": false` để không còn bản trùng (xem ONBOARDING).
-- Muốn có nút "Tra chữ Hán" trên production thì chạy `npm run prepare:dict` một lần trước khi deploy. Dữ liệu nằm trong `frontend/vendor/dict` và không commit. Thiếu dữ liệu này, script chỉ cảnh báo chứ không dừng.
+- Gắn tên miền riêng **trước** lần chia sẻ link đầu tiên: thẻ xem trước khi dán link vào Zalo/Facebook và địa chỉ canonical lấy theo tên miền mà người dùng mở, nên link `*.workers.dev` sẽ hiện tên đó. Nên khai báo trong `wrangler.jsonc` (`"routes": [{"pattern": "<tên miền>", "custom_domain": true}]`) rồi deploy; thêm trên dashboard (Workers → Settings → Domains & Routes) thì chép luôn dòng đó vào `wrangler.jsonc` (xem B.2, "Chỉ đổi cấu hình Worker trong `wrangler.jsonc`"). Sau khi tên miền chạy ổn, đặt `"workers_dev": false` để không còn bản trùng (xem ONBOARDING mục 5.3).
+- Chạy `npm run prepare:dict` một lần trên máy deploy (lần sau `npm run setup` tự cập nhật). Dữ liệu "Tra chữ Hán" nằm trong `frontend/vendor/dict` và không commit. Thiếu dữ liệu này thì script dừng ngay bước 1; `--allow-no-dictionary` để vẫn deploy không có từ điển.
+- Điền mọi chỗ `[[CHƯA ĐIỀN: …]]` của `frontend/dieu-khoan.html`, `frontend/quyen-rieng-tu.html` và `frontend/.well-known/security.txt` (ONBOARDING mục 5.1), rồi commit. `security.txt` cần `Contact:` là `mailto:`, `https://` hoặc `tel:` (cùng email liên hệ của hai trang pháp lý) và đúng một `Expires:` dạng RFC 3339, cách hôm nay dưới một năm.
+- Push commit sắp deploy lên nhánh mà link "Mã nguồn" trỏ tới (`SOURCE_URL` trong `frontend/site-footer.js`, hiện `…/tree/handoff/2026-10-16`). Script so với nhánh remote đã biết trên máy, không tự fetch: push từ máy khác thì chạy `git fetch` trước.
 
 **Tệp secret** dạng `TÊN=giá trị`, đặt **ngoài** thư mục dự án, ví dụ `C:\Users\<bạn>\hoa-tri-secrets\production.env`:
 
@@ -174,8 +251,11 @@ Script chạy theo thứ tự sau và dừng ở bước đầu tiên không đ�
 
 1. **Trên máy:**
    - Node ≥ 22.13 và git không có thay đổi chưa commit.
-   - `wrangler.jsonc` hợp lệ: UUID thật, không có khối `secrets`, không có var mang tên bí mật. Script cũng cảnh báo khi `REGISTRATION_MODE` sai chính tả hoặc là `domain` mà `ALLOWED_EMAIL_DOMAINS` trống, vì khi đó không ai tạo được tài khoản.
-   - Các trang công khai không còn chỗ `[[CHƯA ĐIỀN`.
+   - `wrangler.jsonc` hợp lệ: UUID thật, không có khối `secrets`, không có var mang tên bí mật, không có `PDF_LAYOUT_VERSION` trong `"vars"`. Script cũng cảnh báo khi `REGISTRATION_MODE` sai chính tả hoặc là `domain` mà `ALLOWED_EMAIL_DOMAINS` trống, vì khi đó không ai tạo được tài khoản.
+   - Các trang công khai (`frontend/*.html`, `frontend/*.js`) và `frontend/.well-known/*` không còn chỗ `[[CHƯA ĐIỀN`. `--allow-placeholders` biến lỗi này thành cảnh báo chỉ khi `REGISTRATION_MODE` là `closed` hoặc `domain` (bản thử kín); với `open` script vẫn dừng.
+   - `frontend/.well-known/security.txt`: `Contact:` và `Expires:` hợp lệ (lỗi); cảnh báo khi `Expires` đã qua, còn dưới 30 ngày, xa hơn một năm, hoặc khi thiếu tệp.
+   - Commit hiện tại đã có trên nhánh của `SOURCE_URL`, ở một git remote trỏ tới đúng repo GitHub đó (https hoặc ssh). Đạt thì in "Mã nguồn công khai của bản này: https://github.com/…/tree/<mã commit> (nhánh …)."; không đạt thì dừng, trừ khi có `--allow-unpushed`. Lý do: dịch vụ PDF chạy PyMuPDF theo giấy phép GNU AGPL, nên link "Mã nguồn" phải mở đúng bản đang chạy.
+   - Có dữ liệu từ điển (`frontend/vendor/dict/manifest.json` và thư mục phiên bản nó ghi), trừ khi có `--allow-no-dictionary`.
    - Tệp secret hợp lệ.
 2. **Cloudflare, chỉ đọc:** đã đăng nhập (máy có nhiều account thì đặt `CLOUDFLARE_ACCOUNT_ID`), có bucket R2, đủ secret (`ADMIN_TOKEN` bắt buộc; cặp PDF và cặp Google phải đi cùng nhau), và phiên bản đang chạy để quay lại nếu cần.
 3. **Build:**
@@ -183,20 +263,25 @@ Script chạy theo thứ tự sau và dừng ở bước đầu tiên không đ�
    - Chép `frontend/vendor` bằng `backend/vendor.mjs --require-paddle`: production bắt buộc có PaddleOCR, nên lỗi ở đây là dừng (trên máy dev thì chỉ là cảnh báo).
    - `npm test` (chặn mọi lệnh gọi Gemini, Google, Cloudflare), rồi `wrangler deploy --dry-run`.
 4. **Migration D1:** liệt kê các migration chờ, in lệnh khôi phục Time Travel, rồi hỏi `Gõ CÓ để tiếp tục:`. Nếu D1 có migration lạ (code cũ hơn production), script dừng.
-5. **Deploy:** `wrangler deploy --strict`, gắn tag là mã commit.
+5. **Deploy:** `wrangler deploy --strict`, gắn tag là mã commit, kèm var `PDF_LAYOUT_VERSION` (mã băm bộ kiểm tra bố cục của commit này, để `/api/health?deep=1` so với dịch vụ PDF).
 6. **Kiểm tra bản mới:**
    - `/api/health` báo đúng commit.
+   - `/api/health?deep=1`: Worker gọi được dịch vụ PDF và hai bên dùng cùng bộ kiểm tra bố cục (lệch là lỗi). Script cảnh báo khi image của dịch vụ chạy bản mã nguồn khác commit này, hoặc không xuất PDF bằng Liberation Serif.
    - Các tệp `/vendor/` là tệp thật, không phải trang chủ trả thay.
    - `/api/library` và `/api/me` trả lời; `/api/me` cho biết chế độ đăng ký đang bật.
    - Trang chủ có Content-Security-Policy.
+   - `http://<tên máy>/` chuyển sang `https://` cùng tên máy bằng 301 hoặc 308. Mã tạm thời (302, 303, 307) hay không kết nối được là cảnh báo; trả trang qua `http://` hay chuyển sang nơi khác là lỗi.
    - `/api/status` báo nếu `ADMIN_TOKEN` của production ngắn hơn 32 ký tự. Khi đó trang quản trị bị khóa; đặt lại bằng `npx wrangler secret put ADMIN_TOKEN`.
-   - Có dữ liệu từ điển trên máy thì kiểm tra thêm `/vendor/dict/manifest.json`.
+   - Dữ liệu từ điển: `/vendor/dict/manifest.json` và tệp chỉ mục đầu tiên của thư mục phiên bản nó ghi. Thiếu là lỗi; deploy với `--allow-no-dictionary` thì chỉ là cảnh báo.
    - Cuối cùng in danh sách kiểm tra bằng tay và lệnh quay lại.
 
 Tùy chọn:
 
 - `--yes`: không hỏi trước khi áp migration (bắt buộc khi không có terminal).
-- `--skip-tests`, `--allow-dirty`, `--allow-placeholders`, `--allow-stale`: bỏ qua từng kiểm tra tương ứng.
+- `--skip-tests`, `--allow-dirty`, `--allow-stale`: bỏ qua từng kiểm tra tương ứng.
+- `--allow-placeholders`: cho deploy khi trang công khai còn chỗ trống, chỉ khi `REGISTRATION_MODE` là `closed` hoặc `domain` (bản thử kín, ONBOARDING mục 5.11).
+- `--allow-unpushed`: cho deploy commit chưa có trên nhánh của link "Mã nguồn"; chỉ dành cho bản thử kín.
+- `--allow-no-dictionary`: deploy khi máy chưa có dữ liệu "Tra chữ Hán"; kiểm tra sau deploy khi đó chỉ cảnh báo.
 - `--url https://…`: địa chỉ dùng để kiểm tra sau deploy, ví dụ khi có tên miền riêng.
 
 Muốn kiểm tra cả `/api/status` bằng mã quản trị, đặt biến môi trường trước khi chạy và xóa ngay sau đó:
@@ -207,11 +292,13 @@ npm.cmd run deploy
 Remove-Item Env:HOATRI_ADMIN_TOKEN
 ```
 
+**Chỉ đổi cấu hình Worker trong `wrangler.jsonc`** (var, route, tên miền), không sửa trên dashboard. Theo mã nguồn wrangler 4.131.1 (chưa gặp thật): nếu lần thay đổi gần nhất của Worker làm trên dashboard và khác cấu hình trong repo, `wrangler deploy --strict` chạy không có terminal dừng với "Aborting the upload operation because of conflicts", mà lúc đó migration đã áp (script báo "Migration đã áp dụng; bản code cũ vẫn đang chạy."). Gặp thì chép thay đổi trên dashboard vào `wrangler.jsonc` rồi chạy lại. Deploy tay (không qua script) thì thêm `--var PDF_LAYOUT_VERSION:<mã>` (in bằng `node -e "import('./services/pdf-layout/version.mjs').then(m=>console.log(m.layoutVersion()))"`), không thì `/api/health?deep=1` không so được bộ kiểm tra bố cục (`"layoutMatch":null`).
+
 **Quay lại** (script in sẵn các lệnh này kèm mã cụ thể):
 
-- Code: `npx wrangler rollback <version-id>`. Lệnh này không hoàn tác migration hay secret.
+- Code: `npx wrangler rollback <version-id>`. Lệnh này không hoàn tác migration hay secret. Nếu bản quay về dùng bộ kiểm tra bố cục khác dịch vụ PDF đang chạy (`/api/health?deep=1` báo `mismatch`), quay cả image dịch vụ (mục A.5).
 - Dữ liệu D1: `npx wrangler d1 time-travel restore DB --bookmark=<bookmark>`. Mọi thay đổi dữ liệu sau thời điểm đó bị xóa.
-- R2 không có bản lưu: đối tượng đã xóa là mất hẳn.
+- R2 không có bản lưu nào ngoài bản sao lưu tự đặt (mục B.5): đối tượng đã xóa là mất hẳn.
 
 ### B.3 Kiểm thử tự động trên GitHub
 
@@ -221,15 +308,15 @@ Remove-Item Env:HOATRI_ADMIN_TOKEN
   - chặn commit nhầm `.dev.vars`, `.env`, khóa Google, khóa riêng tư, `samples/`, `.wrangler/`;
   - `npm ci`, `prepare:vendor -- --require-paddle` (mô hình PaddleOCR lấy từ `backend/paddle-models/`, không tải mạng; thiếu PaddleOCR thì job đỏ), PyMuPDF và dữ liệu OCR;
   - `npm test` với `backend/test-support/no-paid-api.mjs` nạp trước;
-    - Test máy PDF dùng Chromium của máy chạy CI.
-    - Hai test bố cục chỉ dành cho Edge (`book-ui.test.mjs`) được bỏ qua.
-    - Job đỏ nếu một test cần Python bị bỏ qua, vì khi đó bước cài Python đã hỏng.
+    - Test máy PDF dùng Chromium của máy chạy CI và phông Liberation Serif như image: job cài `fonts-liberation2` cùng `fonts-dejavu-core` (không có `fonts-liberation2` thì dùng `fonts-liberation`), rồi đỏ nếu `fontPath()` của `services/pdf-layout/engine.mjs` không ra `LiberationSerif-Regular.ttf`.
+    - Các test giao diện chỉ dành cho Edge (`book-ui`, `study-ui-*`, `reader-phone-ui`, `old-browsers`…, danh sách ở ONBOARDING mục 7) được bỏ qua.
+    - Job đỏ nếu một test cần Python bị bỏ qua (kể cả `pdf-extract-text-layer` mới), vì khi đó bước cài Python đã hỏng.
   - `wrangler deploy --dry-run`.
 - **pdf-image:**
   - kiểm `docker-compose.yml` và `Caddyfile`;
   - build `services/pdf-layout/Dockerfile`;
   - chạy container với cùng giới hạn như compose, rồi kiểm tra:
-    - nó tự báo healthy;
+    - nó tự báo healthy, và `/health` báo `"font":"LiberationSerif-Regular.ttf"`;
     - nó không chạy bằng root;
     - nó đòi token;
     - `smoke.mjs` chạy bên trong container đạt.
@@ -249,7 +336,7 @@ Các lần chạy dưới đây không gọi Gemini và không chạm vào Cloud
 
 - `smoke.mjs` đạt trong ba trường hợp:
   - gọi thẳng dịch vụ;
-  - dịch vụ dùng phông DejaVu Serif như trong image Linux;
+  - dịch vụ dùng phông DejaVu Serif như image Linux trước bản 22/10/2026 (nay image dùng Liberation Serif);
   - đi qua Caddy 2.11.7 với `Caddyfile` này. Bản thử chỉ đổi upstream, chạy HTTP và chỉ nghe trên 127.0.0.1.
 - Qua Caddy, các kết quả đúng như bước kiểm tra trong CI:
   - 401 khi thiếu token, 200 khi có token, 404 cho đường dẫn khác;
@@ -274,12 +361,93 @@ Các lần chạy dưới đây không gọi Gemini và không chạm vào Cloud
 - `wrangler deploy --dry-run` đạt.
 - Bước `npm ci --omit=dev --ignore-scripts` của Dockerfile chạy được. Dữ liệu OCR của image trùng từng byte với dữ liệu mà `npm test` dùng.
 
+**Lượt sửa dịch vụ PDF (22/10/2026), trên máy Windows, không Docker, không gọi Gemini:**
+
+- `smoke.mjs` đạt với `server.mjs` và `engine.mjs` mới, cả khi xuất bằng Liberation Serif 2.1.5 lấy từ gói Debian `fonts-liberation2` (`PDF_FONT_PATH`). PDF xuất ra chỉ nhúng LiberationSerif; đủ 146 chữ Việt (hoa, thường, mọi dấu, đ/Đ) đều vẽ bằng phông này, không mượn phông khác. Độ rộng chữ đo bằng PyMuPDF trùng Times New Roman (tỉ lệ 1,0000; DejaVu Serif rộng hơn khoảng 26%).
+- `node services/pdf-layout/server.mjs` thật, với Node đóng vai Python: trả 503 kèm `Retry-After` khi đầy; dừng Python ngay khi người gọi ngắt kết nối (bản cũ để Python chạy tiếp tới hết).
+- Edge thật: một lần xuất bị dừng giữa chừng đóng trình duyệt ngay; quá hạn thì báo hết thời gian.
+- Bộ nhớ của Worker, đo bằng Node 24 (V8, không phải workerd) với một bản kê giả 14,3 MiB của 12 trang scan, bộ nhớ còn giữ ở mỗi lần chờ I/O: tách trang 89,6 → 39,9 MiB; đọc ảnh OCR 87,5 → 35,4 MiB; tải bản kê 86,3 → 5,6 MiB; xuất PDF 86,2 → 43,9 MiB. Khi các lượt OCR đến cách nhau, 32 lượt OCR chạy cùng lúc vẫn nằm trong 128 MiB vùng nhớ V8 (bản cũ: 6).
+
+**Lượt sửa thứ hai (22/10/2026), trên máy Windows, không Docker, không gọi Gemini** (do các lượt sửa ghi lại; người viết runbook này không chạy lại):
+
+- `server.mjs` thật ở `127.0.0.1` với `extract.py` mới, rồi `smoke.mjs`: đạt cả sáu bước (`/health`, `/font`, `/extract` 2 trang, 7 block, 1 công thức; `/render`; `verify.py` lệch điểm ảnh trung bình 0,000; OCR trang scan 56 chữ Hán trong 4 block). Với `extract.py` ngay trước bản sửa, smoke không đạt: công thức `|a| = 1` bị MuPDF tách khỏi dòng `向量的长度` và không thuộc block nào; nay hai phần là một block.
+- Test HTTP của dịch vụ (`backend/pdf-layout-service.test.mjs`): JSON hỏng, `X-PDF-Pages` hỏng (400), thân yêu cầu 26 MiB và 41 MiB (413 sau khi đọc hết), trình duyệt không khởi động được (500 `browser`, không để lại thư mục hồ sơ tạm của Puppeteer). Một luồng 200 MiB bị cắt kết nối sau khoảng 89 MiB, sau đó `/health` vẫn 200. `backend/pdf-engine-browser.test.mjs` xuất thật bằng Edge một tài liệu ba trang có block tràn ở trang đầu và trang cuối, và nhận đúng danh sách "Đoạn k" của cả hai trang trong một câu trả lời.
+- `docker compose config` cho `PDF_EXTRACT_SECONDS` là `"170"`. `security.txt` được phục vụ như tệp tĩnh: suy ra từ mã nguồn wrangler 4.131.1 (thư mục bắt đầu bằng dấu chấm vẫn được tải lên, kiểu `text/plain; charset=utf-8`), chưa chạy `wrangler dev`.
+- `node backend/deploy.mjs --check --skip-tests` trên repo này dừng ở bước 1 đúng như mong đợi: `database_id` còn `local-db`, chỗ trống trong `security.txt` và hai trang pháp lý, tệp chưa commit, commit chưa có trên `origin/handoff/2026-10-16`. Không gọi Cloudflare.
+
 Chưa kiểm chứng:
 
+- Image có `fonts-liberation2`, bước kiểm tra phông khi build và `healthcheck.mjs` chưa build lần nào (máy bàn giao không chạy Docker); job `pdf-image` của CI sẽ là lần đầu. Việc tự khởi động lại container sau 4 lần kiểm tra lỗi cũng chưa chạy trên Docker thật.
+- Bộ nhớ trên workerd thật: chạy thử trên Cloudflare với `wrangler tail` (vài lượt tách trang 12–20 trang scan cùng lúc), xem có lỗi vượt bộ nhớ không.
+- Sức chứa của VPS thật: số trang tách được mỗi phút và RAM cao nhất khi 2 việc chạy cùng lúc (`docker stats`), trước khi tăng `PDF_LAYOUT_JOBS` và `PDF_LAYOUT_SLOTS`.
 - Build image: job `pdf-image` trên GitHub là lần build đầu tiên. Lần đó cũng là lần đầu chạy các phần sau:
   - `HEALTHCHECK` và user `node` trong container;
   - compose + Caddy qua HTTPS.
-- Test máy PDF và hai test Edge chưa chạy trên Linux. Test máy PDF đã đạt trên Windows với phông DejaVu Serif.
+- Test máy PDF và các test chỉ dành cho Edge chưa chạy trên Linux. Test máy PDF đã đạt trên Windows với phông DejaVu Serif.
 - Bước `prepare:vendor -- --require-paddle` của CI (thay cho bước tải mô hình PaddleOCR có cache) chưa chạy trên GitHub. Chế độ bắt buộc này có test trong `npm test` (`backend/paddle-assets.test.mjs`: thiếu mô hình thì báo lỗi thay vì chỉ cảnh báo).
 - Cấp chứng chỉ thật và chạy trên máy chủ thật.
-- Deploy thật lên Cloudflare: D1, R2, secret, giới hạn của Workers Paid.
+- Deploy thật lên Cloudflare: D1, R2, secret, giới hạn của Workers Paid. Các kiểm tra mới của script (commit đã push, từ điển, `security.txt`, `http://` chuyển sang `https://`) mới chạy với Cloudflare và git giả lập trong `backend/deploy.test.mjs`.
+- Các bước phông của CI (`fonts-liberation2` trên Ubuntu 24.04 của GitHub, `/health` báo Liberation Serif trong job `pdf-image`) chưa chạy trên GitHub.
+- Các lệnh sao lưu và khôi phục ở mục B.5.
+
+### B.5 Sao lưu và khôi phục dữ liệu (D1, R2)
+
+> **(chưa chạy thử)** Các lệnh dưới đây theo tài liệu của Cloudflare (D1 import/export, Time Travel) và của rclone cho R2, chưa chạy trên tài khoản thật. Hãy chạy thử trọn một lần, cả bước khôi phục, trước khi có người dùng.
+
+Cloudflare tự giữ gì: D1 có Time Travel (khôi phục tại chỗ về một thời điểm trong 30 ngày với Workers Paid, 7 ngày với gói Free); R2 không có bản sao nào. Mọi thứ nằm trong một tài khoản Cloudflare: một lỗi xóa, một thao tác nhầm, hay tài khoản bị khóa hoặc bị chiếm là mất bản gốc và bản dịch của học sinh.
+
+**Chuẩn bị một lần**
+
+- Bật xác thực hai lớp cho tài khoản Cloudflare và GitHub.
+- Máy chạy sao lưu: máy dùng để deploy (đã `npx wrangler login`, có repo) hoặc máy chủ PDF (cài thêm Node 22.13+ và chạy `npm ci` trong bản clone). Chạy theo lịch không người trông thì dùng một API token riêng (biến `CLOUDFLARE_API_TOKEN` và `CLOUDFLARE_ACCOUNT_ID`) chỉ có quyền D1 của account, thử bằng một lần xuất bằng tay trước khi đặt lịch; đừng dùng token deploy. **Không** dùng GitHub Actions: repo công khai, và người ngoài có thể tải artifact của nó.
+- Nơi cất ngoài Cloudflare: ổ cứng ngoài, NAS hoặc dịch vụ lưu trữ khác (Backblaze B2, S3…), đủ chỗ cho dung lượng R2 đang dùng (xem dashboard R2) cộng các bản D1.
+- R2 API token chỉ đọc: dashboard → R2 → Manage R2 API Tokens → Create API token, quyền "Object Read only", chỉ bucket `muc-viet-files`. Cất Access Key ID, Secret Access Key và Account ID trong trình quản lý mật khẩu.
+- `rclone` bản 1.59 trở lên (bản cũ hơn có thể báo `401 Unauthorized` với R2). Chạy `rclone config` để tạo hai remote: `r2` (đọc R2) như dưới đây, và `sao-luu` kiểu `crypt` trỏ vào nơi cất, để bản sao được mã hóa. Cất mật khẩu của `sao-luu` riêng: mất nó là không mở được bản sao.
+
+```ini
+[r2]
+type = s3
+provider = Cloudflare
+access_key_id = <Access Key ID>
+secret_access_key = <Secret Access Key>
+endpoint = https://<Account ID>.r2.cloudflarestorage.com
+acl = private
+no_check_bucket = true
+```
+
+**Mỗi đêm** (khoảng 3:00; khi còn ít người dùng thì mỗi tuần), trong thư mục dự án (PowerShell; Linux thì đổi `npx.cmd` thành `npx`, `$ngay` lấy bằng `ngay=$(date +%F)`):
+
+```powershell
+$ngay = Get-Date -Format yyyy-MM-dd
+npx.cmd wrangler d1 export DB --remote --output "muc-viet-$ngay.sql"                    # D1 bị khóa trong lúc xuất: chạy lúc vắng người
+rclone move "muc-viet-$ngay.sql" sao-luu:d1/                                             # mã hóa rồi xóa bản không mã hóa trên máy
+rclone sync r2:muc-viet-files sao-luu:r2/hien-tai --backup-dir "sao-luu:r2/da-xoa/$ngay"   # tệp đã xóa hay bị thay trên R2 chuyển sang da-xoa/<ngày>
+rclone delete sao-luu:d1 --min-age 30d                                                   # giữ bản D1 30 ngày
+```
+
+- Xóa các thư mục `sao-luu:r2/da-xoa/<ngày>` cũ hơn thời hạn giữ bằng `rclone purge sao-luu:r2/da-xoa/<ngày>` (đừng dùng `--min-age` ở đây: tệp giữ ngày tải lên gốc, không phải ngày bị xóa).
+- Đặt lịch bằng Task Scheduler (Windows) hoặc `cron` (Linux), ghi nhật ký ra tệp và xem lại mỗi tuần.
+- Bản sao chứa email, mã băm mật khẩu và tài liệu riêng của học sinh, kể cả dữ liệu của tài khoản đã xóa, tới khi bản sao hết hạn. Chọn thời hạn giữ (ví dụ 30 ngày, bằng Time Travel), ghi vào trang quyền riêng tư (hiện trang chưa nói về sao lưu), và xóa đúng hạn.
+
+**Khôi phục**
+
+1. Lỗi xảy ra trong 30 ngày, D1 còn nguyên trên Cloudflare: dùng Time Travel. Lệnh ghi đè tại chỗ và in một bookmark để hoàn tác.
+   ```powershell
+   npx.cmd wrangler d1 time-travel info DB --timestamp=2026-11-02T08:00:00+07:00   # bookmark của thời điểm trước sự cố
+   npx.cmd wrangler d1 time-travel restore DB --bookmark=<bookmark>
+   ```
+   Time Travel không đưa lại tệp R2 đã xóa sau thời điểm đó: chép lại từ `sao-luu:r2/da-xoa/<ngày>` (bước 3).
+2. Mất D1, hoặc sự cố cũ hơn 30 ngày: nhập bản xuất vào một D1 mới, kiểm tra, rồi trỏ Worker sang đó.
+   ```powershell
+   rclone copy sao-luu:d1/muc-viet-<ngày>.sql .
+   npx.cmd wrangler d1 create muc-viet-khoi-phuc --location apac                # wrangler hỏi có thêm vào cấu hình không thì trả lời không
+   npx.cmd wrangler d1 execute muc-viet-khoi-phuc --remote --file muc-viet-<ngày>.sql
+   npx.cmd wrangler d1 execute muc-viet-khoi-phuc --remote --command "SELECT (SELECT COUNT(*) FROM d1_migrations) AS migrations, (SELECT COUNT(*) FROM reader_users) AS users, (SELECT COUNT(*) FROM study_sessions) AS sessions"
+   ```
+   - `migrations` phải bằng số tệp trong `database/migrations/` của commit đang chạy. Bảng `d1_migrations` thiếu hay thiếu dòng thì đừng chạy `npm run deploy` lên D1 này (script sẽ áp lại từ đầu và lỗi vì bảng đã có): tìm hiểu trước.
+   - Nhập báo lỗi khóa ngoại: thêm dòng `PRAGMA defer_foreign_keys = true;` ở đầu tệp rồi nhập vào một D1 mới khác. Báo "cannot start a transaction within a transaction": bỏ các dòng `BEGIN TRANSACTION` và `COMMIT` trong tệp.
+   - Trỏ Worker sang D1 mới: sửa `database_name` và `database_id` của binding `DB` trong `wrangler.jsonc` (UUID in ra ở lệnh `d1 create`), commit, `npm run deploy`.
+3. R2: tạo tạm một token "Object Read & Write" cho `muc-viet-files` và một remote `r2-ghi` dùng nó, rồi `rclone copy sao-luu:r2/hien-tai r2-ghi:muc-viet-files` (thêm từ `sao-luu:r2/da-xoa/<ngày>` nếu cần); xong thì xóa token đó.
+4. Khôi phục D1 và R2 từ **cùng một đêm**: hàng D1 trỏ tới tệp R2 (bản gốc, manifest, PDF đã dịch), nên lệch thời điểm thì "Tải cả quyển", "Đọc song ngữ" hay lịch sử sẽ báo thiếu tệp.
+
+**Diễn tập mỗi quý:** làm bước 2 vào một D1 thử (`muc-viet-thu`), so số dòng với production, rồi xóa nó (`npx.cmd wrangler d1 delete muc-viet-thu`); chép về máy một tệp PDF bất kỳ trong `sao-luu:r2/hien-tai/study/` và mở thử.

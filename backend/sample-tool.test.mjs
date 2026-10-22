@@ -83,7 +83,8 @@ test('readOcrText checks and normalizes a reading exactly as a Gemini answer is 
  }
  assert.equal(readOcrText(answers[0],block,{tab:'#2'}),'向量 @@PDF_INLINE_1@@ @@PDF_INLINE_2@@ 的模 \\(\\frac{1}{2}\\)');
  for(const [text,message] of [['向量 的模',/không bảo toàn công thức của p4-b1/u],['@@PDF_INLINE_1@@ @@PDF_INLINE_2@@ @@PDF_INLINE_3@@',/mã công thức không hợp lệ/u]]){
-  answer=text;await assert.rejects(()=>recognizePdfBlocks(aiEnv,[{...block,image:png}]),message);assert.throws(()=>readOcrText(text,block),message);
+  // A Gemini reading that breaks a formula token keeps the block's machine text; a hand-made reading is refused.
+  answer=text;assert.equal((await recognizePdfBlocks(aiEnv,[{...block,image:png}])).blocks[0].ocrKept,'formula');assert.throws(()=>readOcrText(text,block),message);
  }
 });
 

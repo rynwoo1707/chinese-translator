@@ -39,7 +39,7 @@ export function planBook(sources,pageCounts=new Map()){
 export function missingPdfNote(part,{inBook=true}={}){
  const name=`Phần “${part.title}”`;
  if(part.layout)return inBook?`${name} chưa có PDF tiếng Việt (hãy mở lại phần này trong Xưởng dịch và bấm Xuất PDF tiếng Việt); các trang của phần này giữ nguyên bản gốc.`:`${name} chưa có PDF tiếng Việt nên chưa có trong bản ghép; hãy mở lại phần này trong Xưởng dịch và bấm Xuất PDF tiếng Việt.`;
- const redo=/\.pdf$/iu.test(part.filename||'')?' Muốn có các trang này bằng tiếng Việt trong bản ghép, hãy dịch lại chúng với tùy chọn “Giữ bố cục PDF và xuất bản tiếng Việt”.':'';
+ const redo=/\.pdf$/iu.test(part.filename||'')?' Muốn có các trang này bằng tiếng Việt trong bản ghép, hãy dịch lại chúng với tùy chọn “Giữ bố cục PDF và xuất PDF tiếng Việt”.':'';
  return `${name} là bản dịch dạng chữ, không có trang PDF, nên ${inBook?'các trang của phần này giữ nguyên bản gốc':'không có trong bản ghép; phần này vẫn đọc được trong Thư viện riêng'}.${redo}`;
 }
 export const coverageNote=plan=>`Đã dịch ${plan.translated}/${plan.total} trang; các trang còn lại giữ nguyên bản gốc.`;

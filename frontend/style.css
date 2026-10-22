@@ -464,3 +464,70 @@ main#noi-dung:focus{outline:none}
 @media(max-width:680px){#account-request,.auth-tabs button,.auth-form input:not([type=checkbox]){min-height:44px}}
 /* Windows High Contrast drops the colours that mark the chosen theme or filter: a ring marks it instead. */
 @media(forced-colors:active){[aria-pressed="true"]{outline:2px solid Highlight;outline-offset:2px}}
+/* Robustness pass (2026-10-22). Reader on a phone: the header scrolls away with the page and the toolbar is one row
+   (library, part, "Tùy chọn"); page colour, Chinese lookup, font size and listening open under it on demand, so the
+   first screen shows reading text. Wider screens keep every control in view. */
+.reader-more{display:contents}
+.reader-toolbar .reader-more-toggle{display:none}
+.reader-toolbar .reader-more-toggle svg{width:20px;height:20px}
+@media(max-width:800px){.public-shell.is-reading .site-masthead{position:relative}html.is-reading{scroll-padding-top:12px}}
+@media(max-width:680px){
+ .public-content.read-mode{margin-top:10px;padding:8px}
+ .reader-layout .reader{padding:22px 16px;margin:12px 0}
+ .reader-layout .prose{margin-top:20px}
+ .reader-pdf-area{margin-inline:-24px}
+ .reader-toolbar{flex-wrap:nowrap;gap:8px;padding:8px}
+ .reader-toolbar .reader-start{gap:6px}
+ .reader-toolbar .reader-back,.reader-toolbar .reader-share{width:44px;padding:0!important}
+ .reader-toolbar .reader-back span,.reader-toolbar .reader-share span,.reader-more-toggle span{position:absolute;width:1px;height:1px;overflow:hidden;clip-path:inset(50%);white-space:nowrap}
+ .reader-toolbar .reader-chapter-picker{order:0;flex:1 1 0;width:auto;min-width:0;padding-top:0;border-top:0}
+ .reader-toolbar .reader-chapter-picker select{margin-top:0}
+ .reader-toolbar .reader-more-toggle{display:inline-flex;flex:none;width:44px;border-color:#dfe2d5;background:#f8f8f1;color:#4d5b42}
+ .reader-toolbar .reader-more-toggle[aria-expanded="true"]{border-color:#536b43;background:#edf1e6;color:#35472f}
+ .reader-more{display:none}
+ .reader-toolbar.is-more-open{flex-wrap:wrap}
+ .reader-toolbar.is-more-open .reader-more{display:flex;flex-wrap:wrap;align-items:center;gap:10px;order:5;width:100%;padding-top:10px;border-top:1px solid #e6e7dc}
+ .reader-more .reader-options{display:contents}
+ .reader-more .reader-audio{margin-left:0}
+}
+/* Long titles without spaces (a file name, a URL) wrap instead of widening a phone page. */
+.reader-layout .reader h1,.page-heading h1,.page-heading .subtitle,.story-card h2,.book h2,.review-book-main h2,.user-identity h2,.user-identity p,.book-title,.book-author,.book-genre,.story-card p,.personal-book h3,.request-row h3,.chapter-source,.chapter-choice-heading .eyebrow{overflow-wrap:anywhere}
+.page-heading>div,.review-book-main,.user-identity>div,.personal-book>div{min-width:0}
+@media(max-width:680px){.library,.user-books,.editor-grid,.form-grid{grid-template-columns:minmax(0,1fr)}}
+/* A book being opened: its buttons wait (aria-busy) while its parts download. */
+[data-read][aria-busy="true"]{cursor:progress}
+.cover-trigger[aria-busy="true"]{opacity:.75}
+/* A browser that cannot run the pages (browser-check.js). */
+.browser-notice{max-width:640px;margin:48px auto;padding:24px 28px;border:1px solid #e7c8c0;border-left:4px solid #a03c32;border-radius:12px;background:#fff8f5;color:#3b2f2a;font-family:'Be Vietnam Pro','Segoe UI',sans-serif;line-height:1.7}
+.browser-notice h1{margin:0 0 8px;font-size:22px;letter-spacing:normal}
+.browser-notice p{margin:0}
+.browser-notice button{min-height:44px;margin-top:14px}
+@media(max-width:680px){.browser-notice{margin:16px;padding:18px}}
+/* The skip link waits above the page until focused; with a notice above the page it must not show there. */
+.skip-link:not(:focus){clip-path:inset(50%);pointer-events:none}
+/* Account: a Google sign-in that came back with a reason, a weak password, changing the password, signing out
+   everywhere; a reset link waiting for "Tiếp tục". */
+.auth-failure{margin:0 0 18px}
+.account-warning{display:flex;flex-wrap:wrap;align-items:center;gap:10px 16px;max-width:760px;margin:0 0 28px;padding:12px 16px;border:1px solid #ecd9a9;border-left:4px solid #a07a1c;border-radius:10px;background:#fdf6e3;color:#5c4614;font-size:14px;line-height:1.6}
+.account-warning span{flex:1 1 300px}
+.account-warning button{min-height:44px}
+.account-security{max-width:760px;padding:22px 24px;border:1px solid #dfe1d6;border-radius:14px;background:rgba(255,254,248,.92)}
+.account-security h3{margin:0;font-size:16px}
+.account-password{margin-top:16px;max-width:460px}
+.account-security-note{margin:0;color:#5b6354;font-size:13px;line-height:1.6}
+.account-sessions{display:grid;justify-items:start;gap:8px;margin-top:24px;padding-top:20px;border-top:1px solid #e6e7dc}
+.account-sessions p{margin:0;color:#57504b;font-size:13px;line-height:1.7}
+.account-sessions button{min-height:44px}
+.reset-ready{display:grid;justify-items:start;gap:12px}
+.reset-ready p{color:#4d4130;line-height:1.7}
+/* Admin lists come in pages. */
+.load-more{display:flex;flex-wrap:wrap;justify-content:center;gap:10px;margin:22px 0}
+.load-more button,.user-books-open{min-height:44px}
+/* New translation requests: a count that stands out on the admin's "Yêu cầu dịch" button, on phones too. The button
+   holds its visually hidden words: placed against the page, they would widen it past the phone's side-scrolling nav. */
+.nav button{position:relative}
+.nav .count{min-width:22px;padding:2px 7px;border-radius:999px;background:var(--red);color:#fff;font-weight:600;text-align:center}
+@media(max-width:680px){.nav .count{display:inline-block;margin-left:0}}
+/* A stored link that is not a web address is shown as text, never as a link. */
+.source-text{overflow-wrap:anywhere}
+.request-links .source-text{color:var(--muted);font-size:13px}

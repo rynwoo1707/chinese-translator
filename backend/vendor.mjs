@@ -1,6 +1,7 @@
-import {mkdir,copyFile,cp} from 'node:fs/promises';
+import {mkdir,copyFile,cp,readFile,writeFile} from 'node:fs/promises';
 import {fileURLToPath} from 'node:url';
 import {installPaddle} from './paddle-assets.mjs';
+import {PDFJS_FILES,vendoredPdfjs} from './pdfjs-vendor.mjs';
 // The paths below are relative to the project root (PaddleOCR gets it as `root`), whichever folder this starts from.
 const root=fileURLToPath(new URL('../',import.meta.url));process.chdir(root);
 // What the app cannot start without (frontend/vendor/pdf.mjs above all) comes first; a failure here is a LỖI (exit
@@ -13,8 +14,9 @@ try{
   mkdir('frontend/vendor/tessdata',{recursive:true})
  ]);
  await Promise.all([
-  copyFile('node_modules/pdfjs-dist/build/pdf.mjs','frontend/vendor/pdf.mjs'),
-  copyFile('node_modules/pdfjs-dist/build/pdf.worker.mjs','frontend/vendor/pdf.worker.mjs'),
+  // pdf.js's legacy build with Promise.withResolvers added (pdfjs-vendor.mjs): it opens PDFs on browsers a year or two
+  // old too (about 350 KB more than the default build, loaded only with a PDF).
+  ...PDFJS_FILES.map(async([from,to])=>writeFile(to,vendoredPdfjs(await readFile(from,'utf8')))),
   // What pdf.js loads to draw every page (PDFJS_ASSETS in frontend/cover-detect.js): CMaps for non-embedded Chinese
   // fonts, the standard fonts, and the CCITT/JBIG2/JPEG 2000 decoders of scans; the script engine (quickjs) is not used.
   cp('node_modules/pdfjs-dist/cmaps','frontend/vendor/cmaps',{recursive:true}),

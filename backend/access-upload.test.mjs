@@ -56,7 +56,10 @@ test('Reader and admin layouts stay separated, including direct hashes and logou
  vm.runInContext("state.status={authenticated:true};render()",context);assert.match(app.innerHTML,/sidebar/);assert.match(app.innerHTML,/admin-logout/);
  await vm.runInContext('logout()',context);assert.match(app.innerHTML,/Đăng nhập quản trị/);assert.doesNotMatch(app.innerHTML,/sidebar/);
  const parsed=vm.runInContext("readerFootnotes('Nội dung có dẫn chứng [1].\\n\\n[1] Hồng Nghiệp, tr. 412.\\n[2] Cùng sách trên, trang 413.\\n[3] Tác phẩm dẫn trên, xem tr. 835.')",context);
- assert.equal(parsed.body,'Nội dung có dẫn chứng [1].');assert.equal(parsed.notes.length,3);assert.equal(parsed.notes[0].content,'Hồng Nghiệp.');assert.equal(parsed.notes[1].content,'Cùng sách trên.');assert.equal(parsed.notes[2].content,'Tác phẩm dẫn trên.');
+ assert.equal(parsed.body,'Nội dung có dẫn chứng [1].');assert.equal(parsed.notes.length,3);assert.equal(parsed.notes[0].content,'Hồng Nghiệp, tr. 412.');assert.equal(parsed.notes[1].content,'Cùng sách trên, trang 413.');assert.equal(parsed.notes[2].content,'Tác phẩm dẫn trên, xem tr. 835.');
+ // A note is never cut in the middle: a table's page, a citation's pages, a line break joined.
+ const cited=vm.runInContext("readerFootnotes('Văn bản [1] [2] [3].\\n\\n[1] Bảng 2 ở trang 45 cho số liệu dân số năm 1820.\\n[2] Định lý được chứng minh ở trang 12-14 của sách giáo khoa.\\n[3] Tư Mã Thiên, Sử ký, Trung Hoa thư cục, 1959,\\n   tr. 239–240.')",context);
+ assert.deepEqual(Array.from(cited.notes,note=>note.content),['Bảng 2 ở trang 45 cho số liệu dân số năm 1820.','Định lý được chứng minh ở trang 12-14 của sách giáo khoa.','Tư Mã Thiên, Sử ký, Trung Hoa thư cục, 1959, tr. 239–240.']);
  const saved=vm.runInContext("readerProse('Vectơ AB⃗ có độ dài |AB⃗|. Các vectơ OA⃗, OB⃗, OC⃗. AB và OA là điểm; [□] chưa đọc được.')",context);
  assert.equal((saved.html.match(/class="math-vector"/gu)||[]).length,5);assert.doesNotMatch(saved.html,/⃗/gu);assert.match(saved.html,/AB và OA là điểm; \[□\]/u);
 });

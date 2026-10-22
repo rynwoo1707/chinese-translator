@@ -1,5 +1,6 @@
 // Guarded production deploy: `npm run deploy`, and `npm run deploy:check` for the same checks without any change.
-//  1. On this machine: Node, wrangler.jsonc, unfilled placeholders in public pages, clean git tree, the secrets file.
+//  1. On this machine: Node, wrangler.jsonc, unfilled placeholders in public pages and security.txt, clean git tree
+//     whose commit is published where the "Mã nguồn" link points, the lookup dictionary, the secrets file.
 //  2. Cloudflare, read only: login, R2 bucket, secret names, the version that is live now.
 //  3. frontend/vendor with PaddleOCR (models from backend/paddle-models), npm test (paid APIs blocked), wrangler deploy --dry-run.
 //  4. Pending D1 migrations: listed with a Time Travel bookmark, applied only after typing "CÓ" (or --yes).
@@ -15,6 +16,7 @@ import {createInterface} from 'node:readline';
 import {fileURLToPath,pathToFileURL} from 'node:url';
 import {parseArgs} from 'node:util';
 import {checkPaddleModels,RESTORE_HINT} from './paddle-assets.mjs';
+import {buildVersion,layoutVersion} from '../services/pdf-layout/version.mjs';
 
 export const ROOT=fileURLToPath(new URL('../',import.meta.url));
 const NPX=process.platform==='win32'?'npx.cmd':'npx';
@@ -35,8 +37,11 @@ const USAGE=`Cách dùng:
   npm run deploy:check                         kiểm tra mọi thứ, không thay đổi gì trên Cloudflare
   npm run deploy                               kiểm tra, áp migration D1 (hỏi trước), deploy, kiểm tra bản mới
   npm run deploy -- --secrets-file <tệp>       kèm secret từ tệp TÊN=giá trị nằm ngoài repo (bắt buộc ở lần đầu)
-Tùy chọn: --yes (không hỏi trước khi áp migration), --skip-tests, --allow-dirty, --allow-placeholders,
-  --allow-stale (D1 có migration lạ), --url <https://…> (địa chỉ để kiểm tra sau deploy, ví dụ tên miền riêng).
+Tùy chọn: --yes (không hỏi trước khi áp migration), --skip-tests, --allow-dirty,
+  --allow-placeholders (bản thử kín còn chỗ [[CHƯA ĐIỀN…]]; cần REGISTRATION_MODE "closed" hoặc "domain"),
+  --allow-unpushed (commit chưa có trên nhánh GitHub mà liên kết "Mã nguồn" trỏ tới; chỉ để thử kín),
+  --allow-no-dictionary (deploy không có dữ liệu "Tra chữ Hán"), --allow-stale (D1 có migration lạ),
+  --url <https://…> (địa chỉ để kiểm tra sau deploy, ví dụ tên miền riêng).
 Kiểm tra /api/status sau deploy: đặt biến môi trường HOATRI_ADMIN_TOKEN (giá trị ADMIN_TOKEN của production).`;
 
 // JSONC as wrangler reads it: // and /* */ comments and trailing commas, never inside strings.
@@ -72,6 +77,9 @@ export function configProblems(cfg){
   if(SECRET_NAMES.includes(name)||SECRET_LIKE.test(name))errors.push(`${name} là bí mật, không đặt trong "vars" của wrangler.jsonc (repo công khai): dùng ${NPX} wrangler secret put ${name}`);
   else if(typeof value==='string'&&KEY_LIKE.test(value.trim()))errors.push(`Giá trị của var ${name} trông như một khóa bí mật: chuyển nó sang wrangler secret.`);
  }
+ // The hash of the layout checks a deploy runs with (--var): a copy in vars would go stale and, under wrangler dev,
+ // make the deep health check report a mismatch with the PDF service.
+ if(Object.hasOwn(cfg?.vars||{},'PDF_LAYOUT_VERSION'))errors.push('PDF_LAYOUT_VERSION không đặt trong "vars" của wrangler.jsonc: npm run deploy tự truyền mã bố cục của bản code đang deploy. Hãy xóa dòng này.');
  if(cfg?.observability?.enabled&&cfg.observability.redact_query_string!==true)warnings.push('observability.redact_query_string chưa bật: nhật ký Workers sẽ ghi cả ?code= của đăng nhập Google.');
  const mode=String(cfg?.vars?.REGISTRATION_MODE??'open').trim().toLowerCase(),domains=String(cfg?.vars?.ALLOWED_EMAIL_DOMAINS||'').trim();
  if(!REGISTRATION_MODES.includes(mode))warnings.push(`REGISTRATION_MODE "${cfg.vars.REGISTRATION_MODE}" không hợp lệ (open, closed hoặc domain): máy chủ sẽ coi là closed, không ai tạo được tài khoản mới.`);
@@ -142,9 +150,69 @@ export function validateSecretsFile(file,{root=ROOT,varNames=[]}={}){
  return {names:[...values.keys()],errors};
 }
 
+// Public pages (frontend/*.html, *.js) and the files of frontend/.well-known (security.txt) that still hold a blank.
 export function placeholderFiles(root=ROOT){
- const dir=join(root,'frontend');let names=[];try{names=readdirSync(dir).filter(name=>/\.(html|js)$/u.test(name));}catch{}
- return names.filter(name=>readFileSync(join(dir,name),'utf8').includes(PLACEHOLDER)).map(name=>`frontend/${name}`).sort();
+ const files=[];
+ for(const [folder,pattern] of [['frontend',/\.(html|js)$/u],['frontend/.well-known',/./u]]){
+  let names=[];try{names=readdirSync(join(root,folder),{withFileTypes:true}).filter(entry=>entry.isFile()&&pattern.test(entry.name)).map(entry=>entry.name);}catch{}
+  files.push(...names.filter(name=>readFileSync(join(root,folder,name),'utf8').includes(PLACEHOLDER)).map(name=>`${folder}/${name}`));
+ }
+ return files.sort();
+}
+const registrationMode=cfg=>String(cfg?.vars?.REGISTRATION_MODE??'open').trim().toLowerCase();
+
+// frontend/.well-known/security.txt (RFC 9116): a Contact URI (the blank is left to the placeholder check) and one
+// Expires date, which researchers treat as stale once it passed; it should stay under a year ahead.
+export const SECURITY_TXT='frontend/.well-known/security.txt';
+export function securityTxtProblems(text,now=new Date()){
+ const errors=[],warnings=[],values=name=>[...String(text).matchAll(new RegExp(`^${name}:[ \\t]*(.*?)[ \\t]*$`,'gimu'))].map(match=>match[1]);
+ const contacts=values('Contact'),expires=values('Expires');
+ if(!contacts.length)errors.push(`${SECURITY_TXT} thiếu dòng "Contact:" (RFC 9116).`);
+ for(const contact of contacts)if(!contact.includes(PLACEHOLDER)&&!/^(?:mailto:[^\s@]+@[^\s@]+\.[^\s@]+|https:\/\/\S+|tel:\+?[\d -]+)$/iu.test(contact))errors.push(`${SECURITY_TXT}: "Contact: ${contact}" phải là một địa chỉ mailto:, https:// hoặc tel:.`);
+ const at=expires.length===1&&/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/u.test(expires[0])?Date.parse(expires[0]):NaN;
+ if(!Number.isFinite(at))errors.push(`${SECURITY_TXT} cần đúng một dòng "Expires:" theo RFC 3339, chưa quá một năm kể từ hôm nay, ví dụ Expires: ${new Date(now.getTime()+330*86400000).toISOString().slice(0,10)}T00:00:00.000Z.`);
+ else{
+  const days=(at-now.getTime())/86400000,renew=`sửa dòng Expires thành một ngày trong vòng một năm tới rồi deploy lại`;
+  if(days<=0)warnings.push(`${SECURITY_TXT} đã hết hạn từ ${expires[0]}: người báo lỗi bảo mật sẽ coi tệp là cũ; ${renew}.`);
+  else if(days<30)warnings.push(`${SECURITY_TXT} hết hạn sau ${Math.ceil(days)} ngày (${expires[0]}): ${renew}.`);
+  else if(days>366)warnings.push(`${SECURITY_TXT}: Expires ${expires[0]} xa hơn một năm; RFC 9116 khuyên dưới một năm.`);
+ }
+ return {errors,warnings};
+}
+
+// The "Mã nguồn" link of every page (frontend/site-footer.js SOURCE_URL, https://github.com/<owner>/<repo>/tree/<ref>)
+// must open the code that runs: the PDF service runs PyMuPDF under the GNU AGPL, which asks for that.
+export function sourceUrl(root=ROOT){
+ let text='';try{text=readFileSync(join(root,'frontend/site-footer.js'),'utf8');}catch{return null;}
+ const url=/export const SOURCE_URL\s*=\s*(['"`])([^'"`]+)\1/u.exec(text)?.[2];if(!url)return null;
+ const match=/^https:\/\/github\.com\/([\w.-]+)\/([\w.-]+?)\/tree\/([^?#]+?)\/?$/u.exec(url);
+ return match?{url,owner:match[1],repo:match[2],ref:decodeURIComponent(match[3])}:{url};
+}
+const sameRepository=(address,{owner,repo})=>{const match=/github\.com[/:]([\w.-]+)\/([\w.-]+?)(?:\.git)?\/?$/iu.exec(address);return Boolean(match)&&match[1].toLowerCase()===owner.toLowerCase()&&match[2].toLowerCase()===repo.toLowerCase();};
+// null when HEAD is published there: on that branch of a remote for the repository (as of the last fetch or push), or,
+// for a tag or commit link, HEAD's own tag or commit on a branch of it. Otherwise what is wrong, in Vietnamese.
+export async function unpublishedSource(run,root,source,sha){
+ if(!source?.ref)return `Không đọc được SOURCE_URL dạng https://github.com/<chủ>/<repo>/tree/<nhánh> trong frontend/site-footer.js${source?.url?` (đang là ${source.url})`:''}.`;
+ if(!sha)return 'Không đọc được commit hiện tại, nên không kiểm tra được mã nguồn công khai.';
+ const git=args=>run('git',args,{cwd:root}),lines=result=>String(result?.stdout||'').split(/\r?\n/u).map(line=>line.trim()).filter(Boolean);
+ const [remotes,branches]=await Promise.all([git(['remote','-v']),git(['branch','-r','--contains','HEAD','--format=%(refname)'])]);
+ const names=[...new Set(lines(remotes).map(line=>line.split(/\s+/u)).filter(([name,address])=>name&&address&&sameRepository(address,source)).map(([name])=>name))];
+ const where=`github.com/${source.owner}/${source.repo}`;
+ if(!names.length)return `Không có git remote nào trỏ tới ${where}, nơi liên kết “Mã nguồn” ở chân trang trỏ tới (SOURCE_URL trong frontend/site-footer.js): thêm remote đó, push commit ${sha} rồi chạy lại.`;
+ const published=lines(branches).flatMap(ref=>names.filter(name=>ref.startsWith(`refs/remotes/${name}/`)).map(name=>ref.slice(`refs/remotes/${name}/`.length)));
+ if(published.includes(source.ref))return null;
+ const ref=source.ref.toLowerCase();
+ if(published.length&&(/^[\da-f]{7,40}$/u.test(ref)&&(ref.startsWith(sha)||sha.startsWith(ref))||lines(await git(['tag','--points-at','HEAD'])).includes(source.ref)))return null;
+ return `Commit ${sha} chưa có trên nhánh ${source.ref} của ${where}, nơi liên kết “Mã nguồn” ở chân trang trỏ tới (SOURCE_URL trong frontend/site-footer.js). Dịch vụ PDF chạy PyMuPDF theo giấy phép GNU AGPL, nên mã nguồn công khai phải đúng bản đang chạy: git push lên nhánh ${source.ref} (đã push từ máy khác thì chạy git fetch trước) rồi chạy lại, hoặc đổi SOURCE_URL sang nhánh đã có commit này.`;
+}
+
+// The lookup data of "Tra chữ Hán" (npm run prepare:dict, git-ignored): its manifest and the version folder it names.
+export const DICTIONARY_MANIFEST='frontend/vendor/dict/manifest.json';
+export function dictionaryProblem(root=ROOT){
+ let manifest=null;try{manifest=JSON.parse(readFileSync(join(root,DICTIONARY_MANIFEST),'utf8'));}catch{}
+ if(manifest?.format!==1||!/^[\da-f]{12}$/u.test(manifest.id||''))return `Chưa có dữ liệu từ điển (${DICTIONARY_MANIFEST}): trên production, nút “Tra chữ Hán” sẽ báo chưa có dữ liệu.`;
+ if(!existsSync(join(root,'frontend/vendor/dict/v',manifest.id,'i','00.json')))return `Dữ liệu từ điển trong frontend/vendor/dict/v/${manifest.id} chưa đủ: nút “Tra chữ Hán” sẽ lỗi khi tra.`;
+ return null;
 }
 
 // The first JSON object or array in a command's output (wrangler may print warnings around it).
@@ -186,11 +254,21 @@ export function parseDeployOutput(text){
 
 export const confirmed=answer=>String(answer||'').normalize('NFD').replace(/\p{M}/gu,'').trim().toUpperCase()==='CO';
 
-export async function postDeployChecks(base,{fetch=globalThis.fetch,sha=null,adminToken='',dictionary=false,sleep=ms=>new Promise(done=>setTimeout(done,ms)),attempts=6,timeoutMs=15000}={}){
+// What /api/health?deep=1 says about the PDF service (backend/health.js), when it is not usable.
+const PDF_SERVICE_PROBLEMS={
+ unauthorized:'Dịch vụ PDF từ chối token của Worker: secret PDF_LAYOUT_SERVICE_TOKEN khác giá trị trong .env của dịch vụ (deploy/pdf-layout/README.md mục A.5, "Đổi token").',
+ timeout:'Dịch vụ PDF không trả lời Worker trong 5 giây: xem docker compose ps và docker compose logs pdf-layout trên máy chủ PDF.',
+ unreachable:'Worker không kết nối được dịch vụ PDF: kiểm tra máy chủ PDF, bản ghi DNS (DNS only) và secret PDF_LAYOUT_SERVICE_URL.',
+ error:'Dịch vụ PDF trả lời lỗi: xem docker compose logs pdf-layout trên máy chủ PDF, và PDF_LAYOUT_SERVICE_URL phải là gốc https://….'
+};
+// layout/service: the hashes of this checkout (services/pdf-layout/version.mjs), compared with what the live service runs.
+// dictionary: false when deployed without the lookup data on purpose (--allow-no-dictionary): it is still checked, and
+// its absence is then only a warning.
+export async function postDeployChecks(base,{fetch=globalThis.fetch,sha=null,adminToken='',dictionary=true,layout=null,service=null,sleep=ms=>new Promise(done=>setTimeout(done,ms)),attempts=6,timeoutMs=15000}={}){
  const results=[],ok=text=>results.push({level:'ok',text}),warn=text=>results.push({level:'warn',text}),bad=text=>results.push({level:'error',text});
- const get=async(path,{method='GET',headers={}}={})=>{
+ const get=async(path,{method='GET',headers={},redirect='follow'}={})=>{
   try{
-   const response=await fetch(new URL(path,base),{method,headers,signal:AbortSignal.timeout(timeoutMs)}),text=method==='HEAD'?'':await response.text();
+   const response=await fetch(new URL(path,base),{method,headers,redirect,signal:AbortSignal.timeout(timeoutMs)}),text=method==='HEAD'?'':await response.text();
    let json;try{json=JSON.parse(text);}catch{}
    return {status:response.status,type:response.headers.get('content-type')||'',headers:response.headers,json,text};
   }catch(error){return {status:0,type:'',headers:new Headers(),json:undefined,text:'',error:error?.cause?.code||error?.name||String(error)};}
@@ -206,6 +284,19 @@ export async function postDeployChecks(base,{fetch=globalThis.fetch,sha=null,adm
   if(sha&&health.json.version!==sha)warn(`/api/health báo phiên bản "${health.json.version}", chưa phải ${sha}: chờ vài phút rồi mở lại ${new URL('/api/health',base)}.`);
   else ok(`/api/health: D1 trả lời, phiên bản ${health.json.version}.`);
   if(health.json.pdfLayout&&health.json.pdfLayout!=='configured')warn('/api/health: Worker chưa có cấu hình dịch vụ PDF giữ bố cục.');
+  // The Worker itself calls the PDF service: the address, the token and the shared layout checks are verified at once.
+  else if(health.json.pdfLayout==='configured'){
+   // A Worker older than the deep check answers without pdfService: nothing to compare then.
+   const pdf=(await get('/api/health?deep=1')).json?.pdfService;
+   if(pdf?.status==='ok'){
+    ok(`Dịch vụ PDF trả lời qua Worker (${pdf.ms} ms, ${pdf.jobs||'?'} việc cùng lúc, phông ${pdf.font||'?'})${pdf.layoutMatch?'; bộ kiểm tra bố cục khớp với Worker':''}.`);
+    if(layout&&pdf.expectedLayout&&pdf.expectedLayout!==layout)warn(`Worker đang chạy báo mã bố cục ${pdf.expectedLayout}, mã nguồn này là ${layout}: chờ vài phút rồi mở lại ${new URL('/api/health?deep=1',base)}.`);
+    if(service&&pdf.version?.service&&pdf.version.service!==service)warn(`Dịch vụ PDF đang chạy bản ${pdf.version.service}, mã nguồn này là bản ${service}: cập nhật dịch vụ PDF trên máy chủ (deploy/pdf-layout/README.md mục A.5).`);
+    if(pdf.font&&!/^LiberationSerif/u.test(pdf.font))warn(`Dịch vụ PDF xuất bằng phông ${pdf.font}, không phải Liberation Serif như image chuẩn: chữ Việt có thể nhỏ hơn bản đã thử. Build lại image (deploy/pdf-layout/README.md mục A.5).`);
+   }
+   else if(pdf?.status==='mismatch')bad(`Dịch vụ PDF kiểm tra tài liệu bằng mã bố cục ${pdf.version?.layout||'?'}, còn Worker vừa deploy dùng ${pdf.expectedLayout||'?'}: trang scan có thể bị từ chối ("Ảnh trang PDF không hợp lệ."). Cập nhật dịch vụ PDF ngay (deploy/pdf-layout/README.md mục A.5).`);
+   else if(pdf)bad(PDF_SERVICE_PROBLEMS[pdf.status]||`Dịch vụ PDF chưa dùng được (${pdf.status}).`);
+  }
  }else if(health.status===503)bad('/api/health trả 503: Worker không truy vấn được D1 (kiểm tra database_id và migration).');
  else if(health.status===404)warn('Bản này chưa có /api/health: bỏ qua kiểm tra phiên bản.');
  else bad(`/api/health không trả lời đúng (${health.status||health.error}).`);
@@ -215,6 +306,16 @@ export async function postDeployChecks(base,{fetch=globalThis.fetch,sha=null,adm
  else warn('Trang chủ chưa có header Content-Security-Policy (frontend/_headers).');
  // Link previews and the sitemap take the address the request came to: a workers.dev name shows on every shared card.
  const host=new URL(base).hostname,origin=new URL(base).origin;
+ // A visitor who types http:// is sent to https:// before anything is filled in: by the Worker (backend/http.js
+ // insecureRequest) or the zone's "Always Use HTTPS". A temporary redirect works, but browsers do not remember it.
+ const plain=new URL('/',base);plain.protocol='http:';
+ const insecure=await get(plain.href,{redirect:'manual'}),location=insecure.headers.get('location')||'';
+ let target=null;try{target=new URL(location,plain);}catch{}
+ const secure=target?.protocol==='https:'&&target.hostname===plain.hostname;
+ if(secure&&[301,308].includes(insecure.status))ok(`http://${host}/ chuyển sang https:// (${insecure.status}).`);
+ else if(secure&&[302,303,307].includes(insecure.status))warn(`http://${host}/ chuyển sang https:// bằng mã tạm thời ${insecure.status} thay vì 301: kiểm tra “Always Use HTTPS” của tên miền (ONBOARDING mục 5.3).`);
+ else if(!insecure.status)warn(`Không kiểm tra được http://${host}/ (${insecure.error}): mở thử địa chỉ đó, trang phải chuyển sang https://.`);
+ else bad(`http://${host}/ trả ${insecure.status}${location?` (chuyển tới ${location})`:''} thay vì chuyển hướng 301 sang https://${host}/: ai gõ http:// có thể đăng nhập qua kết nối không mã hóa. Kiểm tra backend/http.js (insecureRequest) và bật “Always Use HTTPS” cho tên miền (ONBOARDING mục 5.3).`);
  if(/\.workers\.dev$/iu.test(host))warn(`Trang đang chạy ở ${host}: link chia sẻ sẽ hiện tên này trên thẻ xem trước và trong sitemap. Gắn tên miền riêng trước khi chia sẻ link đầu tiên (ONBOARDING mục 5.3), rồi kiểm tra lại bằng --url https://<tên miền>.`);
  const sitemap=await get('/sitemap.xml');
  if(sitemap.status===200&&sitemap.text?.includes(`<loc>${origin}/</loc>`))ok(`/sitemap.xml liệt kê các trang trên ${origin}.`);
@@ -229,10 +330,13 @@ export async function postDeployChecks(base,{fetch=globalThis.fetch,sha=null,adm
   if(asset.status===200&&(type?type.test(asset.type):!/text\/html/iu.test(asset.type)))ok(`${path}: ${asset.type||'?'}.`);
   else bad(`${path} trả ${asset.status||asset.error} (${asset.type||'?'}): thiếu thư viện giao diện; chạy npm run prepare:vendor rồi deploy lại.`);
  }
- if(dictionary){
-  const manifest=await get('/vendor/dict/manifest.json');
-  if(manifest.status===200&&manifest.json?.format===1)ok(`/vendor/dict/manifest.json: dữ liệu từ điển ${manifest.json.id||'?'}.`);
-  else bad(`/vendor/dict/manifest.json trả ${manifest.status||manifest.error} (${manifest.type||'?'}): dữ liệu từ điển chưa lên Worker; chạy npm run prepare:dict rồi deploy lại.`);
+ // The lookup data of "Tra chữ Hán": its manifest and the first index file of the version folder it names.
+ const manifest=await get('/vendor/dict/manifest.json'),folder=manifest.json?.base,lookup=dictionary?bad:warn;
+ if(manifest.status!==200||manifest.json?.format!==1||!/^\/vendor\/dict\/v\/[\da-f]{12}\/$/u.test(String(folder||'')))lookup(`/vendor/dict/manifest.json trả ${manifest.status||manifest.error} (${manifest.type||'?'}): dữ liệu từ điển chưa lên Worker${dictionary?'; chạy npm run prepare:dict rồi deploy lại':' (đã deploy với --allow-no-dictionary)'}.`);
+ else{
+  const index=await get(`${folder}i/00.json`,{method:'HEAD'});
+  if(index.status===200&&!/text\/html/iu.test(index.type))ok(`/vendor/dict/manifest.json: dữ liệu từ điển ${manifest.json.id}, có tệp ${folder}i/00.json.`);
+  else lookup(`${folder}i/00.json trả ${index.status||index.error} (${index.type||'?'}): dữ liệu từ điển lên Worker chưa đủ; chạy npm run prepare:dict rồi deploy lại.`);
  }
  const library=await get('/api/library');
  if(library.status===200&&Array.isArray(library.json))ok(`/api/library: ${library.json.length} mục công khai.`);
@@ -278,9 +382,9 @@ async function gitState(run,root){
 }
 
 function parseOptions(argv){
- const {values}=parseArgs({args:argv,strict:true,allowPositionals:false,options:{check:{type:'boolean'},yes:{type:'boolean'},'skip-tests':{type:'boolean'},'allow-dirty':{type:'boolean'},'allow-placeholders':{type:'boolean'},'allow-stale':{type:'boolean'},'secrets-file':{type:'string'},url:{type:'string'},help:{type:'boolean',short:'h'}}});
+ const {values}=parseArgs({args:argv,strict:true,allowPositionals:false,options:{check:{type:'boolean'},yes:{type:'boolean'},'skip-tests':{type:'boolean'},'allow-dirty':{type:'boolean'},'allow-placeholders':{type:'boolean'},'allow-unpushed':{type:'boolean'},'allow-no-dictionary':{type:'boolean'},'allow-stale':{type:'boolean'},'secrets-file':{type:'string'},url:{type:'string'},help:{type:'boolean',short:'h'}}});
  if(values.url&&!/^https:\/\/[^/]+\/?$/u.test(values.url))throw new Error('--url phải là gốc https://… của Worker.');
- return {check:!!values.check,yes:!!values.yes,skipTests:!!values['skip-tests'],allowDirty:!!values['allow-dirty'],allowPlaceholders:!!values['allow-placeholders'],allowStale:!!values['allow-stale'],secretsFile:values['secrets-file']||null,url:values.url?.replace(/\/$/u,'')||null,help:!!values.help};
+ return {check:!!values.check,yes:!!values.yes,skipTests:!!values['skip-tests'],allowDirty:!!values['allow-dirty'],allowPlaceholders:!!values['allow-placeholders'],allowUnpushed:!!values['allow-unpushed'],allowNoDictionary:!!values['allow-no-dictionary'],allowStale:!!values['allow-stale'],secretsFile:values['secrets-file']||null,url:values.url?.replace(/\/$/u,'')||null,help:!!values.help};
 }
 
 function afterDeployText(base,{previous,bookmark}){
@@ -290,6 +394,7 @@ function afterDeployText(base,{previous,bookmark}){
   `  - ${base||'<URL Worker>'}/study: dòng dịch vụ PDF ghi "Dịch từng đoạn ngay tại chỗ; giữ hình gốc, công thức và vị trí chữ."`,
   `  - ${base||'<URL Worker>'}/admin: đăng nhập bằng ADMIN_TOKEN, mở "Cài đặt".`,
   `  - Xem lỗi trực tiếp: ${NPX} wrangler tail`,
+  `  - Giám sát (một lần): trỏ dịch vụ theo dõi uptime vào ${base||'<URL Worker>'}/api/health?deep=1 (trả 503 khi D1 hoặc dịch vụ PDF lỗi); xem deploy/pdf-layout/README.md mục A.8.`,
   'Nếu cần quay lại:',
   previous?`  - Code: ${NPX} wrangler rollback ${previous} --message "rollback"   (không hoàn tác migration và secret)`:'  - Code: chưa có bản trước (lần deploy đầu); deploy lại một commit cũ nếu cần.',
   ...(bookmark?[`  - D1: ${NPX} wrangler d1 time-travel restore DB --bookmark=${bookmark}   (xóa mọi thay đổi dữ liệu sau thời điểm đó)`]:[])
@@ -313,11 +418,28 @@ export async function main({argv=process.argv.slice(2),env=process.env,root=ROOT
  let cfg;try{cfg=parseJsonc(readFileSync(join(root,'wrangler.jsonc'),'utf8'));}catch(error){return stop(`Không đọc được wrangler.jsonc: ${error.message}`);}
  const config=configProblems(cfg),varNames=Object.keys(cfg.vars||{});
  errors.push(...config.errors);config.warnings.forEach(caution);
- const placeholders=placeholderFiles(root);
- if(placeholders.length&&!opts.allowPlaceholders)errors.push(`Trang công khai còn chỗ "${PLACEHOLDER}…" chưa điền: ${placeholders.join(', ')}. Điền thông tin thật trước khi công bố (--allow-placeholders nếu chỉ thử).`);
+ // Blanks only on a closed trial (registration closed, or open to one test school's domain): the public never signs up
+ // under terms that name no operator or contact.
+ const placeholders=placeholderFiles(root),mode=registrationMode(cfg);
+ if(placeholders.length){
+  const blanks=`Trang công khai còn chỗ "${PLACEHOLDER}…" chưa điền: ${placeholders.join(', ')}.`;
+  if(!opts.allowPlaceholders)errors.push(`${blanks} Điền thông tin thật trước khi công bố (--allow-placeholders chỉ dành cho bản thử kín, khi REGISTRATION_MODE là "closed" hoặc "domain").`);
+  else if(mode==='open')errors.push(`${blanks} --allow-placeholders chỉ dành cho bản thử kín, nhưng wrangler.jsonc đang mở đăng ký cho mọi người (REGISTRATION_MODE "open"): đặt "closed" (hoặc "domain" cho một trường thử) rồi chạy lại, hoặc điền hết các chỗ trống.`);
+  else caution(`${blanks} Đây chỉ là bản thử kín (REGISTRATION_MODE "${mode}"): điền hết trước khi mở đăng ký và chia sẻ link.`);
+ }
+ if(existsSync(join(root,SECURITY_TXT))){const security=securityTxtProblems(readFileSync(join(root,SECURITY_TXT),'utf8'));errors.push(...security.errors);security.warnings.forEach(caution);}
+ else caution(`Chưa có ${SECURITY_TXT} (RFC 9116): người phát hiện lỗi bảo mật không biết báo ở đâu.`);
  const git=await gitState(run,root);
  if(!git.sha&&!opts.allowDirty)errors.push('Không đọc được commit hiện tại (cần git và một bản clone): --allow-dirty để bỏ qua.');
  if(git.dirty&&!opts.allowDirty)errors.push(`Có ${git.dirty} tệp thay đổi chưa commit: commit hoặc stash trước, để bản deploy đúng với commit được gắn tag (--allow-dirty để bỏ qua).`);
+ const source=sourceUrl(root),unpublished=await unpublishedSource(run,root,source,git.sha);
+ if(!unpublished)log(`Mã nguồn công khai của bản này: https://github.com/${source.owner}/${source.repo}/tree/${git.sha} (nhánh ${source.ref}).`);
+ else if(opts.allowUnpushed)caution(`${unpublished} Bỏ qua vì có --allow-unpushed: chỉ dùng cho bản thử kín.`);
+ else errors.push(`${unpublished} (--allow-unpushed nếu chỉ thử kín.)`);
+ // The lookup data is git-ignored and built by npm run prepare:dict: a fresh clone has none.
+ const missingDictionary=dictionaryProblem(root);
+ if(missingDictionary&&!opts.allowNoDictionary)errors.push(`${missingDictionary} Chạy npm run prepare:dict rồi chạy lại (--allow-no-dictionary để deploy không có từ điển).`);
+ else if(missingDictionary)caution(`${missingDictionary} Deploy tiếp vì có --allow-no-dictionary.`);
  let fileSecrets=[];
  if(opts.secretsFile){const checked=validateSecretsFile(opts.secretsFile,{root,varNames});errors.push(...checked.errors);fileSecrets=checked.names;}
  if(errors.length)return stop(errors);
@@ -362,9 +484,6 @@ export async function main({argv=process.argv.slice(2),env=process.env,root=ROOT
  const missingVendor=VENDOR_FILES.filter(file=>!existsSync(join(root,file)));
  if(missingVendor.length)return stop(`Thiếu tệp sau khi chạy backend/vendor.mjs: ${missingVendor.join(', ')}`);
  log('frontend/vendor đã đủ.');
- // The lookup dictionary is optional and git-ignored: without it only the "Tra chữ Hán" button says there is no data.
- const dictionary=existsSync(join(root,'frontend/vendor/dict/manifest.json'));
- if(!dictionary&&existsSync(join(root,'backend/prepare-dictionary.mjs')))caution('Chưa có dữ liệu từ điển (frontend/vendor/dict): trên production, nút "Tra chữ Hán" sẽ báo chưa có dữ liệu. Chạy npm run prepare:dict trước khi deploy.');
  if(!opts.skipTests){
   const npmCli=env.npm_execpath&&/\.c?js$/u.test(env.npm_execpath)?env.npm_execpath:null;
   const guard=`--import=${pathToFileURL(join(root,'backend/test-support/no-paid-api.mjs')).href}`;
@@ -402,7 +521,9 @@ export async function main({argv=process.argv.slice(2),env=process.env,root=ROOT
  if(opts.check){log(`\nKiểm tra đạt: npm run deploy${firstDeploy?' -- --secrets-file <tệp>':''} sẽ ${pending.length?`áp dụng ${pending.length} migration rồi `:''}deploy commit ${tag}.`);return 0;}
 
  step('Deploy Worker');
- const deployArgs=['deploy','--strict','--tag',tag,'--message',`${branch}@${tag}`.slice(0,100),...(opts.secretsFile?['--secrets-file',resolve(opts.secretsFile)]:[])];
+ // The Worker's /api/health?deep=1 compares this hash of the shared layout checks with the PDF service's own.
+ const layout=layoutVersion(root),service=buildVersion(root)?.service||null;
+ const deployArgs=['deploy','--strict','--tag',tag,'--message',`${branch}@${tag}`.slice(0,100),...(opts.secretsFile?['--secrets-file',resolve(opts.secretsFile)]:[]),...(layout?['--var',`PDF_LAYOUT_VERSION:${layout}`]:[])];
  const deployed=await wrangler(deployArgs,{tee:true});
  if(deployed.code!==0)return stop([`wrangler deploy lỗi (xem ở trên).${firstDeploy?' Lần đầu: nếu wrangler đòi đăng ký subdomain workers.dev, đăng ký trong dashboard Cloudflare (Workers & Pages) rồi chạy lại.':''}`],pending.length?'Migration đã áp dụng; bản code cũ vẫn đang chạy.':'Đã dừng: bản code cũ vẫn đang chạy.');
  const {url,versionId}=parseDeployOutput(output(deployed)),base=opts.url||url;
@@ -411,7 +532,7 @@ export async function main({argv=process.argv.slice(2),env=process.env,root=ROOT
  step('Kiểm tra bản vừa deploy');
  let failed=0;
  if(!base)caution('Không đọc được URL của Worker từ wrangler: lần sau thêm --url <https://…> để kiểm tra tự động.');
- else for(const result of await postDeployChecks(base,{fetch,sha:tag,adminToken:env.HOATRI_ADMIN_TOKEN||'',dictionary,...(sleep?{sleep}:{})})){
+ else for(const result of await postDeployChecks(base,{fetch,sha:tag,adminToken:env.HOATRI_ADMIN_TOKEN||'',dictionary:!missingDictionary,layout,service,...(sleep?{sleep}:{})})){
   if(result.level==='error'){failed++;logError(`LỖI: ${result.text}`);}
   else if(result.level==='warn')caution(result.text);
   else log(`OK  ${result.text}`);

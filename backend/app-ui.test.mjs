@@ -13,7 +13,7 @@ const source=(await readFile(new URL('../frontend/app.js',import.meta.url),'utf8
 const SHA='b'.repeat(64);
 function app({pathname='/'}={}){
  const root={innerHTML:''},calls=[];
- const context=vm.createContext({musicMarkup:()=>'',bindMusic(){},renderMathText,mathStyles,termMatcher,highlightTerms,bindTermPopover,hideTermPopover(){},attachHanziLookup(){},openHanziPanel(){},closeHanziPanel(){},setHanziTheme(){},footerHtml,isSample,sampleBadge,sampleCardNote,sampleIntro,sampleReaderNotice,SAMPLE_LABEL,bilingualSource,mountBilingual(){return {destroy(){}};},releaseBilingual(){},location:{pathname,hash:'',search:''},document:{querySelector:selector=>selector==='#app'?root:selector==='#modal'?{close(){}}:null,querySelectorAll:()=>[]},localStorage:{getItem:()=>null},window:{addEventListener(){}},setTimeout,clearTimeout,clearInterval,FormData,console});
+ const context=vm.createContext({musicMarkup:()=>'',bindMusic(){},renderMathText,mathStyles,termMatcher,highlightTerms,bindTermPopover,hideTermPopover(){},attachHanziLookup(){},openHanziPanel(){},closeHanziPanel(){},setHanziTheme(){},footerHtml,isSample,sampleBadge,sampleCardNote,sampleIntro,sampleReaderNotice,SAMPLE_LABEL,bilingualSource,mountBilingual(){return {destroy(){}};},releaseBilingual(){},location:{pathname,hash:'',search:''},document:{querySelector:selector=>selector==='#app'?root:selector==='#modal'?{close(){}}:null,querySelectorAll:()=>[]},localStorage:{getItem:()=>null},window:{addEventListener(){}},setTimeout,clearTimeout,clearInterval,FormData,URL,console});
  context.fetch=async(url,init)=>{calls.push({url,init});return {ok:true,status:200,json:async()=>pathname.startsWith('/admin')?{authenticated:false}:[]};};
  vm.runInContext(source,context);
  return {root,calls,context,run:code=>vm.runInContext(code,context)};
@@ -38,7 +38,8 @@ test('Sign-in: the Google button waits for a terms box, and the page follows the
  const {run}=app(),view=reader=>run(`state.loaded=true;state.reader=${JSON.stringify(reader)};accountView()`);
  const open=view({authenticated:false,googleConfigured:true,registration:{mode:'open',domains:[]}});
  assert.match(open,/data-auth-tab="register"/u);assert.match(open,/<input name="acceptTerms" type="checkbox" required data-terms-check>/u);
- assert.match(open,/<a class="google-login" id="google-login" href="\/api\/auth\/google\/start\?accept_terms=1&amp;return_to=%2F%23account" aria-disabled="true"/u);
+ assert.match(open,/<a class="google-login" id="google-login" href="\/api\/auth\/google\/start\?return_to=%2F%23account" aria-disabled="true"/u,'no consent in the link before a box is ticked');
+ assert.match(run(`state.termsAccepted=true;accountView()`),/<a class="google-login" id="google-login" href="\/api\/auth\/google\/start\?accept_terms=1&amp;return_to=%2F%23account" aria-disabled="false"/u);run('state.termsAccepted=false');
  assert.match(open,/id="google-terms-row"><input type="checkbox" data-terms-check>/u);assert.match(open,/href="\/dieu-khoan"[^>]*>Điều khoản sử dụng<\/a> và <a href="\/quyen-rieng-tu"/u);
  assert.match(open,/role="tablist"[\s\S]*role="tab"[^>]*aria-selected="true"[\s\S]*role="tabpanel"/u);
  const closed=view({authenticated:false,googleConfigured:true,registration:{mode:'closed',domains:[]}});
@@ -100,6 +101,23 @@ test('Reader: sample notice, "Đọc song ngữ" only when the original page is 
  assert.equal(run(`state.readerStory={id:'s1'};wholeBookPdf()`),false);assert.equal(run(`state.readerStory={id:'s1',assembly:true};wholeBookPdf()`),true);
  const text=run(`state.chapters=[{id:'t1',title:'Văn bản',mime:'text/plain',content:'Nội dung.'}];state.readerStory={id:'s2'};state.readerAssembly=null;readerView()`);
  assert.doesNotMatch(text,/reader-pdf-tools|sample-notice/u);assert.match(text,/class="prose"/u);
+});
+
+// A request's link and a part's source come from stored data: only a web address (http or https with a host) is drawn as
+// a link, by its normalized address; anything else (javascript:, data:, a bare word, "https://") is plain text.
+test('Stored links: only an http(s) address with a host becomes a link, in the admin requests and in the reader',()=>{
+ const admin=app({pathname:'/admin'}).run,request=(id,source_url)=>({id,title:`Yêu cầu ${id}`,notes:'',status:'pending',visibility:'private',reader_name:'Lan',source_url});
+ const links=['https://example.com/sách?a=1','HTTP://Example.COM/x'],texts=['javascript:alert(document.cookie)','JavaScript:alert(1)','data:text/html,<script>alert(1)</script>','vbscript:x','//example.com/x','https://','ftp://example.com/a','  javascript:alert(1)'];
+ const html=admin(`state.status={authenticated:true};state.requests=${JSON.stringify([...links,...texts].map((url,i)=>request(`r${i}`,url)))};requestsView()`);
+ const hrefs=[...html.matchAll(/<a href="([^"]*)"/gu)].map(match=>match[1]);
+ assert.deepEqual(hrefs,['https://example.com/s%C3%A1ch?a=1','http://example.com/x'],'only the two web addresses, normalized');
+ for(const text of texts)assert.ok(html.includes(`<span class="source-text">Nguồn (không phải địa chỉ web): ${text.trim().replace(/&/gu,'&amp;').replace(/</gu,'&lt;').replace(/>/gu,'&gt;')}</span>`),text);
+ assert.doesNotMatch(html,/href="(?:javascript|data|vbscript):/iu);
+ const reader=app().run,part=source_url=>reader(`state.route='reader';state.chapters=[{id:'c1',title:'Phần 1',mime:'text/plain',content:'Nội dung.',source_url:${JSON.stringify(source_url)}}];state.chapter=0;state.readerStory={id:'s1',title:'Sách'};state.readerAssembly=null;readerView()`);
+ assert.match(part('https://ctext.org/analects'),/<p class="chapter-source">Nguồn: <a href="https:\/\/ctext\.org\/analects" target="_blank" rel="noopener noreferrer">Mở nguyên tác ↗<\/a><\/p>/u);
+ assert.match(part('javascript:alert(1)'),/<p class="chapter-source">Nguồn: <span class="source-text">javascript:alert\(1\)<\/span><\/p>/u);
+ assert.match(part('Sách giáo khoa Toán 10'),/<p class="chapter-source">Nguồn: <span class="source-text">Sách giáo khoa Toán 10<\/span><\/p>/u);
+ assert.doesNotMatch(part(null),/chapter-source/u);
 });
 
 test('Admin review: a student-chosen story title is shown as text in every heading, never as markup',()=>{

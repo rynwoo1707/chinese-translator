@@ -36,6 +36,10 @@ export function bilingualSource(assembly,chapterId){
 export const nextZoom=(zoom,step)=>step>0?ZOOMS.find(value=>value>zoom+1e-9)??ZOOMS.at(-1):[...ZOOMS].reverse().find(value=>value<zoom-1e-9)??ZOOMS[0];
 
 let library=null,worker=null;const files=new Map();
+// Every pdf.js build parses only in browsers with class static blocks (Safari and iOS 16.4 or later): an older one fails
+// to load the module itself with a SyntaxError, which is no network problem and no retry helps.
+export const PDF_TOO_OLD='Trình duyệt này quá cũ để mở PDF. Hãy cập nhật iPhone hoặc iPad lên iOS 16.4 trở lên, hoặc dùng bản mới của Chrome, Edge, Firefox hay Safari.';
+const readerFailure=error=>error?.name==='SyntaxError'?PDF_TOO_OLD:'Không tải được bộ đọc PDF. Hãy kiểm tra mạng rồi bấm Thử lại.';
 function pdfjs(){return library??=import('/vendor/pdf.mjs').then(module=>{module.GlobalWorkerOptions.workerSrc='/vendor/pdf.worker.mjs';return module;},error=>{library=null;throw error;});}
 // Open files by URL, most recent last: the current part's two plus the previous part's, so moving back and forth
 // between parts (or redrawing after a theme change) never downloads a file again.
@@ -122,7 +126,7 @@ export function mountBilingual(root,{originalUrl,translatedUrl,pages,labels=null
  function setZoom(value){if(value===scale)return;scale=value;onChange({index:current,zoom:scale});draw();}
  async function load(){
   failures.original=failures.translated='';status(loading);
-  try{lib=await pdfjs();}catch{failures.translated=failures.original='Không tải được bộ đọc PDF. Hãy kiểm tra mạng rồi bấm Thử lại.';draw();return;}
+  try{lib=await pdfjs();}catch(error){failures.translated=failures.original=readerFailure(error);draw();return;}
   if(!alive)return;
   const sides=[['translated',translatedUrl,'bản dịch PDF'],['original',originalUrl,'PDF gốc']];
   await Promise.all(sides.map(async([side,url,what])=>{
@@ -158,7 +162,8 @@ export function mountBilingual(root,{originalUrl,translatedUrl,pages,labels=null
 // dropped again when far away, so a long part never holds more than a few canvases. One page is drawn at a time, the
 // waiting near page closest to the screen first; a page that left the screen meanwhile is skipped (a fast fling on a slow
 // phone would otherwise draw every page it passed, keep their canvases, and leave the page in view blank behind them).
-export function mountPdfPages(root,{url,label='Bản dịch tiếng Việt'}={}){
+// onLayout(): the pages are in place at their final positions (a reader going back to a saved page scrolls then).
+export function mountPdfPages(root,{url,label='Bản dịch tiếng Việt',onLayout=()=>{}}={}){
  root.innerHTML='<section class="bilingual pdf-pages"><p class="bilingual-status" data-pp="status" role="status" aria-live="polite"></p><div class="pdf-pages-list" data-pp="list"></div></section>';
  root.firstElementChild.setAttribute('aria-label',label);
  const box=root.querySelector('[data-pp="status"]'),list=root.querySelector('[data-pp="list"]'),slots=[],tasks=new Map();
@@ -202,14 +207,14 @@ export function mountPdfPages(root,{url,label='Bản dịch tiếng Việt'}={})
  }
  async function load(){
   status('Đang tải PDF…');
-  try{lib=await pdfjs();}catch{if(alive)status('Không tải được bộ đọc PDF. Hãy kiểm tra mạng rồi bấm Thử lại.',true);return;}
+  try{lib=await pdfjs();}catch(error){if(alive)status(readerFailure(error),error?.name!=='SyntaxError');return;}
   if(!alive)return;const file=openPdf(lib,url);
   file.progress=({loaded,total})=>{if(alive&&!doc&&loaded)status(total?`Đang tải PDF… ${Math.min(99,Math.round(loaded/total*100))}%`:`Đang tải PDF… ${(loaded/1048576).toFixed(1)} MB`);};
   try{doc=await file.promise;const first=(await doc.getPage(1)).getViewport({scale:1});aspect=first.height/first.width||aspect;}catch(error){if(alive)status(loadFailure(error,'bản dịch PDF'),true);return;}
   if(!alive)return;
   slots.length=0;list.replaceChildren();
   for(let number=1;number<=doc.numPages;number++){const slot=document.createElement('div');slot.className='bilingual-page pdf-pages-page';slot.dataset.page=String(number);slot.setAttribute('role','group');slot.setAttribute('aria-label',`Trang ${number} / ${doc.numPages}`);slots.push(slot);}
-  list.append(...slots);status(doc.numPages>1?`${doc.numPages} trang · kéo xuống để đọc tiếp.`:'');layout();
+  list.append(...slots);status(doc.numPages>1?`${doc.numPages} trang · kéo xuống để đọc tiếp.`:'');layout();if(width>=40)onLayout();
  }
  const resize=typeof ResizeObserver==='function'?new ResizeObserver(()=>{clearTimeout(resizeTimer);resizeTimer=setTimeout(()=>{if(alive&&slots.length&&Math.abs(columnWidth()-width)>2)layout();},150);}):null;
  resize?.observe(list);load();

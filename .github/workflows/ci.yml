@@ -61,13 +61,19 @@ jobs:
           python -m pip install --disable-pip-version-check --target .runtime/pdf-python -r services/pdf-layout/requirements.txt
           npm run prepare:pdf-ocr
 
-      - name: Browser and font for the PDF engine test; Edge-only tests skip
+      - name: Browser and fonts for the PDF engine tests; Edge-only tests skip
         run: |
-          # Puppeteer renders with the runner's Chromium (or Chrome); DejaVu Serif is the PDF font on Linux.
+          # Puppeteer renders with the runner's Chromium (or Chrome).
           browser="$(command -v chromium || command -v chromium-browser || command -v google-chrome || true)"
           if [ -z "$browser" ]; then echo "::error::No Chromium or Chrome on this runner"; exit 1; fi
           echo "CHROMIUM_EXECUTABLE_PATH=$browser" >> "$GITHUB_ENV"
-          test -f /usr/share/fonts/truetype/dejavu/DejaVuSerif.ttf || { sudo apt-get update -q && sudo apt-get install -y -q fonts-dejavu-core; }
+          # The production font, as in the image: Liberation Serif (fonts-liberation2) has the Times New Roman widths every
+          # fit was tuned with; DejaVu Serif fills in symbols. The engine itself must pick it (engine.mjs fontPath).
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends fonts-liberation2 fonts-dejavu-core || sudo apt-get install -y -q --no-install-recommends fonts-liberation fonts-dejavu-core
+          font="$(node -e "import('./services/pdf-layout/engine.mjs').then(({fontPath})=>console.log(fontPath()))")"
+          echo "PDF font: $font"
+          case "$font" in */LiberationSerif-Regular.ttf) ;; *) echo "::error::The PDF engine would export with $font, not Liberation Serif"; exit 1;; esac
           # book-ui.test.mjs measures layouts in Microsoft Edge as on Windows and skips without it; the image ships Edge.
           sudo rm -rf /opt/microsoft/msedge
 
@@ -143,7 +149,10 @@ jobs:
           test "$health" = healthy
           test "$(docker exec pdf-layout id -u)" != 0
           test "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8091/health)" = 401
-          curl -fsS -H "Authorization: Bearer $PDF_LAYOUT_SERVICE_TOKEN" http://127.0.0.1:8091/health
+          answer="$(curl -fsS -H "Authorization: Bearer $PDF_LAYOUT_SERVICE_TOKEN" http://127.0.0.1:8091/health)"
+          echo "$answer"
+          # Exports set Vietnamese in Liberation Serif, the widths every fit was tuned with (Dockerfile, fonts-liberation2).
+          printf '%s' "$answer" | grep -qF '"font":"LiberationSerif-Regular.ttf"' || { echo "::error::/health reports another export font"; exit 1; }
 
       - name: Smoke test inside the container (extract, render, verify.py, OCR of a scan; no Gemini)
         run: docker exec pdf-layout node services/pdf-layout/smoke.mjs http://127.0.0.1:8091 /tmp/smoke

@@ -4,15 +4,43 @@
 // (x^2, a_{n}) and element formulas (H_2O). Plain AB/OA, unreadable □ and snake_case words stay text;
 // unsupported or malformed TeX stays verbatim. Every character of the source reaches the HTML escaped.
 const escape=value=>String(value).replace(/[&<>"']/gu,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+// Safari and iOS before 16.4 cannot parse a lookbehind ((?<!…)): one in a regular expression literal stops this module,
+// and every page that imports it, from loading, and one built at load time throws there. No literal here uses one.
 // $…$ follows Pandoc: no space just inside the dollars and no digit right after the closing one, so prices in an
-// economics or history text ("$5 và $10") stay text.
-const expressions=/\\\([\s\S]*?\\\)|\\\[[\s\S]*?\\\]|\$\$[\s\S]*?\$\$|\$(?=[^\s$])(?:\\.|[^$\n\\])+?(?<!\s)\$(?!\d)/gu;
+// economics or history text ("$5 và $10") stay text. The last character before the closing $ is matched as a token that
+// is not a space (\\\S or [^$\\\s]), which is exactly what a lookbehind (?<!\s) before it would require.
+const expressions=/\\\([\s\S]*?\\\)|\\\[[\s\S]*?\\\]|\$\$[\s\S]*?\$\$|\$(?=[^\s$])(?:\\.|[^$\n\\])*?(?:\\\S|[^$\\\s])\$(?!\d)/gu;
 const vectorStarts=/\\+(?:vec|overrightarrow)\b|[\p{Script=Latin}\p{Script=Greek}\p{N}\u{1D400}-\u{1D7FF}'′]+\u20d7/gu;
 const ELEMENTS=new Set('H He Li Be B C N O F Ne Na Mg Al Si P S Cl Ar K Ca Sc Ti V Cr Mn Fe Co Ni Cu Zn Ga Ge As Se Br Kr Rb Sr Y Zr Nb Mo Tc Ru Rh Pd Ag Cd In Sn Sb Te I Xe Cs Ba La Ce Pr Nd Pm Sm Eu Gd Tb Dy Ho Er Tm Yb Lu Hf Ta W Re Os Ir Pt Au Hg Tl Pb Bi Po At Rn Fr Ra Ac Th Pa U Np Pu Am Cm Bk Cf Es Fm Md No Lr Rf Db Sg Bh Hs Mt Ds Rg Cn Nh Fl Mc Lv Ts Og'.split(' '));
 const SUB=String.raw`_(?:\d+|\{\d+\})`,ELEMENT=String.raw`[A-Z][a-z]?`,UNIT=String.raw`(?:${ELEMENT}(?:${SUB})?|\((?:${ELEMENT}(?:${SUB})?)+\)(?:${SUB})?)`;
 // Outside delimiters: a command, a combining arrow, an element formula with a numeric subscript (checked
 // against the periodic table, so MAX_2 or snake_case stay text), or a one-letter/number base with a script.
-const bareStarts=new RegExp([String.raw`(\\+[A-Za-z]+)`,String.raw`([\p{Script=Latin}\p{Script=Greek}\p{N}\u{1D400}-\u{1D7FF}'′]+\u20d7)`,String.raw`((?<![\p{L}\p{N}_@\\])${UNIT}+(?:\^(?:\{\d*[+\-−]\}|\d*[+\-−]))?(?![\p{L}\p{N}_]))`,String.raw`((?<![\p{L}\p{N}_@\\'′])[\p{Script=Latin}\p{Script=Greek}](?=_(?:\{|\d)|\^(?:\{|[+\-−]?\d))|(?<![\p{L}\p{N}_@.,\\])\d+(?=\^(?:\{|[+\-−]?\d))|[)\]](?=\^(?:\{|[+\-−]?\d)))`].join('|'),'gu');
+// Each alternative: its capture group, the characters that may not come right before it, its pattern.
+const SCRIPTED=String.raw`(?=_(?:\{|\d)|\^(?:\{|[+\-−]?\d))`,RAISED=String.raw`(?=\^(?:\{|[+\-−]?\d))`,AFTER_WORD=String.raw`[\p{L}\p{N}_@\\'′]`;
+const BARE=[[1,'',String.raw`\\+[A-Za-z]+`],[2,'',String.raw`[\p{Script=Latin}\p{Script=Greek}\p{N}\u{1D400}-\u{1D7FF}'′]+\u20d7`],[3,String.raw`[\p{L}\p{N}_@\\]`,String.raw`${UNIT}+(?:\^(?:\{\d*[+\-−]\}|\d*[+\-−]))?(?![\p{L}\p{N}_])`],[4,AFTER_WORD,String.raw`[\p{Script=Latin}\p{Script=Greek}]${SCRIPTED}`],[4,String.raw`[\p{L}\p{N}_@.,\\]`,String.raw`\d+${RAISED}`],[4,'',String.raw`[)\]]${RAISED}`]];
+// One expression with a lookbehind per alternative, built on first use. Where the browser refuses it (Safari before
+// 16.4), the same matches are found by trying the alternatives in order at each place, after checking the character
+// before it by hand.
+let bareStarts=null,bareScan=null;
+// The character (code point) that ends at index, as a lookbehind sees it.
+function before(text,index){const low=text.charCodeAt(index-1),high=text.charCodeAt(index-2);return low>=0xdc00&&low<=0xdfff&&high>=0xd800&&high<=0xdbff?text.slice(index-2,index):text[index-1];}
+function* scanBare(text){
+ bareScan??={any:new RegExp(BARE.map(([,,pattern])=>`(?:${pattern})`).join('|'),'gu'),parts:BARE.map(([group,not,pattern])=>({group,not:not?new RegExp(`^${not}$`,'u'):null,pattern:new RegExp(pattern,'uy')}))};
+ // A place where no alternative matches even without its lookbehind cannot match with it: the search jumps past it.
+ for(let at=0;at<text.length;){
+  bareScan.any.lastIndex=at;const near=bareScan.any.exec(text);if(!near)return;
+  const index=near.index;let found=null;
+  for(const {group,not,pattern} of bareScan.parts){
+   if(not&&index>0&&not.test(before(text,index)))continue;
+   pattern.lastIndex=index;const match=pattern.exec(text);if(match){found=[match[0]];found[group]=match[0];found.index=index;break;}
+  }
+  if(found){yield found;at=index+found[0].length;}else at=index+(text.codePointAt(index)>0xffff?2:1);
+ }
+}
+function bareMatches(text){
+ if(bareStarts===null){try{bareStarts=new RegExp([1,2,3,4].map(group=>`(${BARE.filter(([part])=>part===group).map(([,not,pattern])=>not?`(?<!${not})${pattern}`:pattern).join('|')})`).join('|'),'gu');}catch{bareStarts=false;}}
+ return bareStarts?text.matchAll(bareStarts):scanBare(text);
+}
 const symbols=Object.freeze({
  alpha:'α',beta:'β',gamma:'γ',delta:'δ',epsilon:'ε',varepsilon:'ε',zeta:'ζ',eta:'η',theta:'θ',vartheta:'ϑ',iota:'ι',kappa:'κ',lambda:'λ',mu:'μ',nu:'ν',xi:'ξ',omicron:'ο',pi:'π',varpi:'ϖ',rho:'ρ',varrho:'ϱ',sigma:'σ',varsigma:'ς',tau:'τ',upsilon:'υ',phi:'φ',varphi:'φ',chi:'χ',psi:'ψ',omega:'ω',
  Gamma:'Γ',Delta:'Δ',Theta:'Θ',Lambda:'Λ',Xi:'Ξ',Pi:'Π',Sigma:'Σ',Upsilon:'Υ',Phi:'Φ',Psi:'Ψ',Omega:'Ω',
@@ -158,8 +186,10 @@ function vectorTokens(text){
  }
  return tokens;
 }
-// "A_1" is not an element formula but still a one-letter base with a subscript.
-const scriptBase=/(?<![\p{L}\p{N}_@\\'′])[\p{Script=Latin}\p{Script=Greek}](?=_(?:\{|\d)|\^(?:\{|[+\-−]?\d))/uy;
+// "A_1" is not an element formula but still a one-letter base with a subscript (not right after a letter, digit, _, @,
+// \, ' or ′).
+const scriptBase=new RegExp(`[\\p{Script=Latin}\\p{Script=Greek}]${SCRIPTED}`,'uy'),afterWord=new RegExp(`^${AFTER_WORD}$`,'u');
+function scriptBaseAt(text,index){if(index>0&&afterWord.test(before(text,index)))return null;scriptBase.lastIndex=index;return scriptBase.exec(text);}
 function scripted(text,index,base){const suffix=plainScripts(text,index+base.length);return suffix&&{end:suffix.end,html:`<span class="math-inline">${escape(base)}${suffix.html}</span>`};}
 // Command names this renderer knows. A backslash chain holding any other name ("Files\App\log", "D:\data\in") is a
 // Windows path, never TeX: none of its \log, \in, \to, \max is rendered.
@@ -174,12 +204,12 @@ const pathLike=word=>/^[A-Za-z]:\\|^\\\\[A-Za-z]/u.test(word)||[...word.matchAll
 // formulas are rendered outside delimiters, so code (2^3 as XOR), identifiers and LaTeX tutorials stay as written.
 function plainTokens(text,bare=true){
  const tokens=[];let end=0;
- for(const match of text.matchAll(bareStarts)){
+ for(const match of bareMatches(text)){
   if(match.index<end)continue;let token=null;const word=wordAt(text,match.index);
   if(linked(word))continue;
   if(match[1]){if(pathLike(word)||!bare&&!/^\\+(?:vec|overrightarrow)$/u.test(match[1]))continue;const value=command(text,match.index,0,true);const suffix=value&&scripts(text,value.end);if(suffix&&value.html)token={end:suffix.end,html:suffix.html||/^\\+(?:frac|dfrac|tfrac|cfrac|binom|sqrt)/u.test(match[0])?`<span class="math-inline">${value.html}${suffix.html}</span>`:value.html};}
   else if(match[2]){const label=match[2].slice(0,-1),suffix=scripts(text,match.index+match[2].length);if(suffix)token={end:suffix.end,html:suffix.html?`<span class="math-inline">${vector(escape(label),label)}${suffix.html}</span>`:vector(escape(label),label)};}
-  else if(match[3]){const html=match[3].includes('_')&&!(!bare&&/[=/\\&]/u.test(word))&&chemistry(match[3]);if(html)token={end:match.index+match[3].length,html};else if(bare){scriptBase.lastIndex=match.index;const base=scriptBase.exec(text);if(base)token=scripted(text,match.index,base[0]);}}
+  else if(match[3]){const html=match[3].includes('_')&&!(!bare&&/[=/\\&]/u.test(word))&&chemistry(match[3]);if(html)token={end:match.index+match[3].length,html};else if(bare){const base=scriptBaseAt(text,match.index);if(base)token=scripted(text,match.index,base[0]);}}
   else if(bare)token=scripted(text,match.index,match[4]);
   if(token){tokens.push({start:match.index,...token});end=token.end;}
  }

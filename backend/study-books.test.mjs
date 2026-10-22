@@ -177,7 +177,7 @@ test('Assembly info tells layout ranges (they export Vietnamese PDF pages) from 
  // The reader is told to export a layout range, never a text translation (its export button is disabled).
  assert.match(missingPdfNote(part(layout)),/bấm Xuất PDF tiếng Việt/u);
  for(const session of [browser,docx,olderText])assert.match(missingPdfNote(part(session),{inBook:false}),/là bản dịch dạng chữ, không có trang PDF/u);
- assert.match(missingPdfNote(part(browser)),/dịch lại chúng với tùy chọn “Giữ bố cục PDF và xuất bản tiếng Việt”/u);assert.doesNotMatch(missingPdfNote(part(docx),{inBook:false}),/Giữ bố cục/u);
+ assert.match(missingPdfNote(part(browser)),/dịch lại chúng với tùy chọn “Giữ bố cục PDF và xuất PDF tiếng Việt”/u);assert.doesNotMatch(missingPdfNote(part(docx),{inBook:false}),/Giữ bố cục/u);
 });
 
 test('The newer translation of a page wins the whole book; renaming, moving or re-saving the older part does not change that',async t=>{

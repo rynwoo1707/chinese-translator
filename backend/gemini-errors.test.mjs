@@ -1,8 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import worker from './worker.js';
-import {generate,translate,translateAndVerify} from './ai.js';
+import {generate,translate,translateAndVerify,thinkingConfigFor} from './ai.js';
 import {UserError,errorResponse} from './http.js';
+import {GEMINI_ERROR_CODES} from './gemini-errors.js';
+import {listStudyModels} from './gemini-models.js';
 
 const env={GEMINI_API_KEY:'student-key-long-enough-123',GEMINI_MODEL:'gemini-2.5-flash-lite'};
 // Gemini's RESOURCE_EXHAUSTED answer: QuotaFailure names the quota, RetryInfo (when present) says when to retry.
@@ -90,7 +92,7 @@ test('Key problems are code gemini_key, request problems are not, and Google\'s 
   [failure(401,{message:'Request had invalid authentication credentials.',status:'UNAUTHENTICATED'}),400,/\(401\): khóa Gemini API không hợp lệ/u],
   [failure(403,{message:"Permission denied: Consumer 'api_key:AIzaSyLEAKEDKEY0000' has been suspended.",status:'PERMISSION_DENIED',details:[{'@type':'type.googleapis.com/google.rpc.ErrorInfo',reason:'CONSUMER_SUSPENDED'}]}),403,/\(403\): khóa Gemini API đang bị chặn/u],
   [failure(403,{message:'Your API key was reported as leaked. Please use another API key.',status:'PERMISSION_DENIED'}),403,/đang bị chặn/u],
-  [failure(400,{message:'User location is not supported for the API use.',status:'FAILED_PRECONDITION'}),403,/khu vực hiện tại hoặc cần bật Billing/u]
+  [failure(400,{message:'User location is not supported for the API use without a billing account linked.',status:'FAILED_PRECONDITION'}),403,/chưa dùng được Gemini API khi chưa bật Billing/u]
  ];
  for(const [reply,status,message] of cases){
   const {calls}=gemini(t,[reply]),error=await rejected(generate(env,[{text:'x'}],'i'));
@@ -100,8 +102,40 @@ test('Key problems are code gemini_key, request problems are not, and Google\'s 
  }
  gemini(t,[failure(400,{message:'Request payload size exceeds the limit: 20971520 bytes.',status:'INVALID_ARGUMENT'})]);
  const request=await rejected(generate(env,[{text:'x'}],'i'));
- assert.equal(request.constructor,Error);assert.match(request.message,/Gemini từ chối yêu cầu \(400\): dữ liệu gửi đi không hợp lệ hoặc quá lớn/u);
- const response=errorResponse(request);assert.equal(response.status,400);assert.deepEqual(await response.json(),{error:request.message});
+ assert.ok(request instanceof UserError);assert.equal(request.code,'gemini_request');assert.match(request.message,/Gemini không nhận yêu cầu này \(400\): dữ liệu gửi đi không hợp lệ hoặc quá lớn/u);
+ // Browsers released before the codes forget the key on these words: a request problem must not say them.
+ assert.doesNotMatch(request.message,/Gemini từ chối|Khóa Gemini/u);
+ const response=errorResponse(request);assert.equal(response.status,400);assert.deepEqual(await response.json(),{error:request.message,code:'gemini_request'});
+});
+
+test('A place Gemini does not serve is gemini_location: a 503 to retry, never a key problem, on translation and model listing',async t=>{
+ const where=failure(400,{message:'User location is not supported for the API use.',status:'FAILED_PRECONDITION'});
+ let {calls}=gemini(t,[where]);const error=await rejected(generate(env,[{text:'x'}],'i'));
+ assert.ok(error instanceof UserError);assert.deepEqual([error.status,error.code,error.retryAfter],[503,'gemini_location',60]);assert.equal(calls.length,1,'not retried inside the request');
+ assert.doesNotMatch(error.message,/Gemini từ chối|Khóa Gemini|location/u);assert.match(error.message,/Khóa của bạn vẫn dùng được/u);
+ const response=errorResponse(error);assert.equal(response.headers.get('Retry-After'),'60');assert.deepEqual(await response.json(),{error:error.message,code:'gemini_location',retryAfter:60});
+ // The model list a student's first step asks for answers the same.
+ let listed=0;t.mock.method(globalThis,'fetch',async()=>{listed++;return where();});const listing=await rejected(listStudyModels('student-key-long-enough-123'));
+ assert.deepEqual([listing.status,listing.code],[503,'gemini_location']);assert.equal(listed,1);
+ // Through the Worker: the study route answers 503 with the code, the key stays in the tab.
+ const DB={prepare(){return {bind(){return this;},async first(){return {id:'student',name:'Lan',email:'lan@example.test'};},async run(){return {meta:{changes:1}};}};}};
+ gemini(t,[where]);
+ const route=await worker.fetch(new Request('https://example.test/api/my/study/translate',{method:'POST',headers:{Cookie:'cat_hien_session=token','Content-Type':'application/json'},body:JSON.stringify({apiKey:'student-key-long-enough-123',mode:'economy',source:'你好。'})}),{DB},{});
+ assert.equal(route.status,503);assert.equal((await route.json()).code,'gemini_location');
+});
+
+test('A refusal or a cut-off answer has its own code and wording, which never blames the key',async t=>{
+ for(const [finishReason,code,pattern] of [['RECITATION','gemini_refused',/trùng khớp nguyên văn/u],['SAFETY','gemini_refused',/bộ lọc an toàn/u],['OTHER','gemini_refused',/không trả kết quả/u],['MAX_TOKENS','gemini_truncated',/vượt giới hạn độ dài/u]]){
+  gemini(t,[answer('',{finishReason})]);const error=await rejected(generate(env,[{text:'x'}],'i'));
+  assert.deepEqual([error.status,error.code,error.finishReason],[400,code,finishReason]);assert.match(error.message,pattern);assert.doesNotMatch(error.message,/Gemini từ chối|Khóa Gemini/u);
+ }
+ assert.deepEqual(GEMINI_ERROR_CODES.filter(code=>code==='gemini_key'),['gemini_key'],'one code only means the key');
+});
+
+test('Every model id of a thinking family gets the bound: dated, preview and -001 ids included',()=>{
+ for(const id of ['gemini-2.5-flash','gemini-2.5-flash-001','gemini-2.5-flash-preview-05-20','gemini-2.5-flash-preview-09-2025','gemini-2.5-flash-lite','gemini-2.5-flash-lite-preview-09-2025'])assert.deepEqual(thinkingConfigFor(id,'minimal'),{thinkingBudget:0},id);
+ for(const id of ['gemini-3-flash','gemini-3-flash-preview','gemini-3.6-flash','gemini-3.1-flash-lite'])assert.deepEqual(thinkingConfigFor(id,'low'),{thinkingLevel:'low'},id);
+ assert.equal(thinkingConfigFor('gemini-2.0-flash','minimal'),null);assert.equal(thinkingConfigFor('gemini-3.6-flash','default'),null);assert.equal(thinkingConfigFor('gemini-30-flash','minimal'),null);
 });
 
 test('Every billed attempt counts: a malformed answer retried, a blocked or cut-off answer, and failed repairs',async t=>{

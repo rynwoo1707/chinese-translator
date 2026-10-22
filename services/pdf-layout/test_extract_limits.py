@@ -124,6 +124,9 @@ class ScanFailures(unittest.TestCase):
         with self.assertRaises(MemoryError) as caught:
             extract.extract(payload(self.doc, "1"))
         self.assertRegex(extract.user_message(caught.exception), r"^Không đủ bộ nhớ")
+        # The answer says so in a field of its own as well; other failures carry no code.
+        self.assertEqual(extract.error_answer(caught.exception), {"error": extract.user_message(caught.exception), "code": "memory"})
+        self.assertEqual(extract.error_answer(ValueError("Trang 2 quá nhỏ để dựng lại bố cục.")), {"error": "Trang 2 quá nhỏ để dựng lại bố cục."})
 
     def test_other_failures_on_a_scan_page_do_not_blame_the_ocr_installation(self):
         self.failing(RuntimeError("code=2: cannot render pixmap"))
@@ -176,6 +179,14 @@ class Output(unittest.TestCase):
         document = json.loads(run.stdout)["document"]
         self.assertEqual(len(document["pages"]), 1)
         self.assertTrue(document["pages"][0]["blocks"], "the repaired page still yields its Chinese block")
+
+    def test_a_run_out_of_memory_answers_with_code_memory(self):
+        here = os.path.dirname(os.path.abspath(__file__))
+        script = f"import sys; sys.path.insert(0, {here!r}); import extract\ndef extract_pages(payload):\n    raise MemoryError()\nextract.extract = extract_pages\nextract.main()"
+        run = subprocess.run([sys.executable, "-c", script], input=json.dumps({"pdfBase64": "", "pages": "1"}), capture_output=True, text=True, encoding="utf-8",
+                             env={**os.environ, "PYTHONUTF8": "1"}, timeout=120)
+        self.assertEqual(run.returncode, 1, run.stderr[-2000:])
+        self.assertEqual(json.loads(run.stdout), {"error": extract.user_message(MemoryError()), "code": "memory"})
 
     def test_scan_page_images_use_jpeg_only_when_it_clearly_pays_off(self):
         doc = fitz.open()

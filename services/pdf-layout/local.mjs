@@ -27,4 +27,4 @@ const probe=spawnSync(python,['-c','import pymupdf'],{windowsHide:true,env:{...p
 if(probe.status===9009)console.warn(`CẢNH BÁO: ${PYTHON_SHORTCUT_MESSAGE}`);
 else if(probe.error||probe.status!==0)console.warn(`CẢNH BÁO: không chạy được PyMuPDF bằng "${python}", nên dịch PDF giữ bố cục sẽ lỗi. Chạy "npm run setup" rồi khởi động lại lệnh này.`);
 process.env.PDF_LAYOUT_SERVICE_TOKEN=token;process.env.PORT=url.port||'8091';process.env.PDF_LAYOUT_HOST='127.0.0.1';
-await import('./server.mjs');
+const {startService}=await import('./server.mjs');startService();

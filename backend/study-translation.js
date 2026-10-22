@@ -1,4 +1,4 @@
-import mammoth from 'mammoth/mammoth.browser.js';
+import {extractDocxText,documentTooLarge} from './document-limits.js';
 import {extractEpub} from './epub.js';
 import {extractAzw3} from './azw3.js';
 import {decodeText} from './text-storage.js';
@@ -11,6 +11,7 @@ import {translatePdfBlocks} from './pdf-block-translation.js';
 import {isStudyModel,listStudyModels,selectStudyModel} from './gemini-models.js';
 import {rateLimit} from './rate-limit.js';
 import {isSubject,subjectOf,ownTerms,textModeTerms,ownTermWarnings,GLOSSARY_WARNING} from './subject-glossaries.js';
+import {unifyHan,unifyGlossaryKeys} from './han-text.js';
 
 const reply=(data,status=200)=>Response.json(data,{status,headers:{'Cache-Control':'no-store','X-Content-Type-Options':'nosniff'}});
 const MODELS={economy:'gemini-2.5-flash-lite',balanced:'gemini-3.1-flash-lite',quality:'gemini-2.5-flash'};
@@ -18,6 +19,7 @@ const modelFor=(env,mode)=>env[{economy:'GEMINI_ECONOMY_MODEL',balanced:'GEMINI_
 export const studyModelConfig=env=>({economy:modelFor(env,'economy'),balanced:modelFor(env,'balanced'),quality:modelFor(env,'quality'),pdf:env.GEMINI_PDF_BLOCK_MODEL||modelFor(env,'economy'),runtimeVersion:'pdf-layout-v2-key-model-selection'});
 function requestModel(body,fallback){if(!body.model)return fallback;if(!isStudyModel(body.model))throw new Error('Hãy chọn một model Gemini Flash trong danh sách khả dụng.');return body.model;}
 const validKey=value=>typeof value==='string'&&value.length>=20&&value.length<=500&&!/[\r\n\0]/.test(value);
+const MAX_STUDY_CHARACTERS=2_000_000,TOO_LONG='Tệp không có văn bản hoặc vượt giới hạn 2 triệu ký tự của không gian học tập.';
 const scopedEnv=(env,apiKey,model,thinking=model==='gemini-2.5-flash'?'default':'minimal')=>new Proxy(env,{get(target,property){if(property==='GEMINI_API_KEY')return apiKey;if(property==='GEMINI_MODEL')return model;if(property==='GEMINI_THINKING')return thinking;if(property==='GEMINI_MODEL_RECOVERY')return true;if(property==='GEMINI_PREFERRED_MODEL')return target.GEMINI_MODEL||'gemini-3.6-flash';if(property==='FILES')return undefined;return Reflect.get(target,property);}});
 export function localTranslationReview(source,translation){
  const sourceText=String(source||'').trim(),translatedText=String(translation||'').trim();
@@ -64,17 +66,24 @@ export async function studyRoute(request,env,url,path){
  if(path==='/api/my/study/translate-blocks'){
   const body=await request.json(),apiKey=String(body.apiKey||'').trim();if(!validKey(apiKey))throw new Error('Khóa Gemini API không hợp lệ.');
   const model=requestModel(body,env.GEMINI_PDF_BLOCK_MODEL||modelFor(env,body.mode||'economy'));
+  // Gemini and the glossary see ordinary ideographs where a PDF wrote look-alike ones (han-text.js); the blocks keep
+  // their IDs and the browser keeps its own copy of the sources.
+  if(Array.isArray(body.blocks))body.blocks=body.blocks.map(block=>block&&typeof block.source==='string'?{...block,source:unifyHan(block.source)}:block);
+  if(body.glossary&&typeof body.glossary==='object'&&!Array.isArray(body.glossary))body.glossary=unifyGlossaryKeys(body.glossary);
   const result=await translatePdfBlocks(scopedEnv(env,apiKey,model,'minimal'),body);return reply({...result,model:result.model||model});
  }
  if(path==='/api/my/study/extract'){
   const file=(await request.formData()).get('file');if(!file||typeof file==='string'||!file.size||file.size>25*1024*1024)throw new Error('Tệp phải từ 1 byte đến 25 MB.');
-  const extension=String(file.name||'').split('.').pop().toLowerCase(),data=await file.arrayBuffer();let text;
+  const extension=String(file.name||'').split('.').pop().toLowerCase();
+  // A character takes at most 4 bytes: a longer TXT cannot fit the 2 million characters and is never decoded whole.
+  if(extension==='txt'&&file.size>4*MAX_STUDY_CHARACTERS)throw documentTooLarge(TOO_LONG);
+  const data=await file.arrayBuffer();let text;
   if(extension==='txt')text=decodeText(data);
-  else if(extension==='docx')text=(await mammoth.extractRawText({arrayBuffer:data})).value;
+  else if(extension==='docx')text=await extractDocxText(data);
   else if(extension==='epub')text=extractEpub(data).parts.map(part=>part.content).join('\n\n');
   else if(extension==='azw3')text=(await extractAzw3(data)).parts.map(part=>part.content).join('\n\n');
   else throw new Error('Chỉ hỗ trợ TXT, DOCX, EPUB và AZW3 tại bước trích xuất. PDF được đọc ngay trong trình duyệt.');
-  if(!text.trim()||text.length>2_000_000)throw new Error('Tệp không có văn bản hoặc vượt giới hạn 2 triệu ký tự của không gian học tập.');
+  if(!text.trim()||text.length>MAX_STUDY_CHARACTERS)throw new Error(TOO_LONG);
   return reply({text});
  }
  if(path==='/api/my/study/ocr'){
@@ -89,11 +98,13 @@ export async function studyRoute(request,env,url,path){
   return reply({text:result.text,warnings:Array.isArray(result.warnings)?result.warnings:[],usage:result.__usage||null,model:result.__model||selectedModel});
  }
  if(path==='/api/my/study/translate'){
-  const body=await request.json(),source=String(body.source||''),apiKey=String(body.apiKey||'').trim(),mode=Object.hasOwn(MODELS,body.mode)?body.mode:'economy',domain=isSubject(body.domain)?body.domain:'general';
+  // Text pasted from a PDF may spell Chinese with radicals or compatibility ideographs: the source, its context and the
+  // glossary keys are unified first, so terms match and Gemini reads ordinary characters (han-text.js).
+  const body=await request.json(),source=unifyHan(String(body.source||'')),apiKey=String(body.apiKey||'').trim(),mode=Object.hasOwn(MODELS,body.mode)?body.mode:'economy',domain=isSubject(body.domain)?body.domain:'general';
   if(!validKey(apiKey))throw new Error('Khóa Gemini API không hợp lệ.');
   if(!source.trim()||source.length>8000)throw new Error('Mỗi lượt dịch cần từ 1 đến 8.000 ký tự.');
-  const context=String(body.context||'').slice(-900),previousSource=String(body.previousSource||'').slice(-350),previousTranslation=String(body.previousTranslation||'').slice(-500);
-  const rawGlossary=body.glossary&&typeof body.glossary==='object'&&!Array.isArray(body.glossary)?body.glossary:{};
+  const context=String(body.context||'').slice(-900),previousSource=unifyHan(String(body.previousSource||'').slice(-350)),previousTranslation=String(body.previousTranslation||'').slice(-500);
+  const rawGlossary=body.glossary&&typeof body.glossary==='object'&&!Array.isArray(body.glossary)?unifyGlossaryKeys(body.glossary):{};
   // Built-in terms come back in every reply's glossary; they are added here again, so they never take the 500 places
   // kept for the student's own and learned terms.
   const glossary=Object.fromEntries(Object.entries(ownTerms(rawGlossary,domain)).filter(([key,value])=>!['__proto__','constructor','prototype'].includes(key)&&key.length<=100&&typeof value==='string'&&value.length<=100).slice(0,500)),subjectTerms=textModeTerms(domain);
@@ -101,9 +112,10 @@ export async function studyRoute(request,env,url,path){
   const story={genre:subjectOf(domain).label,context,glossary:JSON.stringify({...subjectTerms,...glossary}),previousSource,previousTranslation};
   const selectedModel=requestModel(body,modelFor(env,mode)),qualityModel=body.model?selectedModel:modelFor(env,'quality');
   // Quality mode keeps a bounded reasoning budget; unbounded default thinking can cost more than the translation itself.
+  // The full retry of a short passage that lost a year or footnote marker gets the same small budget in every mode.
   const outcome=await translateAndVerify(scopedEnv(env,apiKey,selectedModel,mode==='quality'?'low':'minimal'),source,story,{
    repairEnv:scopedEnv(env,apiKey,qualityModel,'minimal'),
-   retryEnv:scopedEnv(env,apiKey,qualityModel,'default'),
+   retryEnv:scopedEnv(env,apiKey,qualityModel,'low'),
    allowRepair:mode!=='quality'
   });
   const model=outcome.model||(outcome.repairScope==='full'?qualityModel:selectedModel);

@@ -66,8 +66,9 @@ export function bindTermPopover(root){
   doc.addEventListener('click',event=>{if(!event.target.closest?.('.term,#term-popover'))closeTerm(doc);});
   doc.addEventListener('keydown',event=>{if(event.key==='Escape')closeTerm(doc,true);});
   doc.defaultView?.addEventListener('resize',()=>closeTerm(doc));
-  // Scrolled under the sticky header or off the screen, the term's popover would float over other controls.
-  doc.addEventListener('scroll',()=>{const open=doc.querySelector('.term[aria-expanded="true"]');if(!open)return;const box=open.getBoundingClientRect(),top=doc.querySelector('.site-masthead')?.getBoundingClientRect().bottom||0;if(box.bottom<top||box.top>doc.documentElement.clientHeight)closeTerm(doc);},{passive:true});
+  // Scrolled under the sticky header or off the screen, the term's popover would float over other controls. A header
+  // that scrolled away with the page (a phone while reading) leaves the top of the screen as the edge.
+  doc.addEventListener('scroll',()=>{const open=doc.querySelector('.term[aria-expanded="true"]');if(!open)return;const box=open.getBoundingClientRect(),top=Math.max(0,doc.querySelector('.site-masthead')?.getBoundingClientRect().bottom||0);if(box.bottom<top||box.top>doc.documentElement.clientHeight)closeTerm(doc);},{passive:true});
   // The keyboard moved on (a tap on plain text moves no focus: the outside click closes it then).
   doc.addEventListener('focusout',event=>{if(event.target.matches?.('.term[aria-expanded="true"]')&&event.relatedTarget&&!event.relatedTarget.closest?.('#term-popover'))closeTerm(doc);});
  }

@@ -4,6 +4,8 @@ import json
 import os
 import re
 import sys
+import time
+import unicodedata
 from bisect import bisect_left, bisect_right
 from statistics import median
 
@@ -13,11 +15,23 @@ import pymupdf as fitz
 # they would corrupt the JSON answer; send them to stderr together with Tesseract's own lines.
 fitz.set_messages(fd=2)
 
-HAN = re.compile(r"[\u3400-\u9fff\uf900-\ufaff]")
+HAN = re.compile(r"[\u3400-\u9fff\uf900-\ufaff\U00020000-\U000323af]")
+# Kangxi radicals, CJK radicals and compatibility ideographs that some fonts' Unicode maps give a text layer in place of
+# the unified ideograph a reader sees (U+2F08 KANGXI RADICAL MAN for U+4EBA, U+F90A for U+91D1): each is read as that
+# ideograph, its NFKC form, so glossary terms, the dictionary lookup and Han counts find it. Nothing else is
+# normalised: full-width punctuation, Latin and digits stay as printed.
+UNIFIED = str.maketrans({c: n for c in map(chr, [*range(0x2E80, 0x2EF4), *range(0x2F00, 0x2FD6), *range(0xF900, 0xFB00)])
+                         if len(n := unicodedata.normalize("NFKC", c)) == 1 and n != c and unicodedata.name(n, "").startswith("CJK UNIFIED IDEOGRAPH")})
 # Limits that keep one response small enough for the Worker to store and return.
 IMAGE_BUDGET = 18 * 1024 * 1024
 TOTAL_BUDGET = 32 * 1024 * 1024
 PIXEL_BUDGET = 30_000_000
+# Seconds one extraction may spend on its pages: the service kills extract.py at 240 s (engine.mjs) and all of its work
+# is lost, so a run that has used this much returns the pages done so far and names the rest for the next run. A page is
+# not started when it would likely end past the budget (its time is guessed from the slowest page so far). The payload's
+# timeBudget (seconds) can only lower it.
+TIME_BUDGET = float(os.getenv("PDF_EXTRACT_SECONDS") or 170)
+clock = time.monotonic
 # Full-page images of scanned pages are photographs of paper: JPEG q95 keeps them visually lossless (PSNR >= 45 dB
 # on real textbook scans) at 1.7-3x less data than PNG, and the smaller of JPEG/PNG is kept. They are only the
 # preview and the export background; paragraph and formula crops (what Gemini reads) stay PNG byte for byte, and
@@ -56,6 +70,12 @@ SENTENCE_PUNCTUATION = frozenset(".,;:!?，。；：、！？")
 FORMULA_HINT = re.compile(r"[A-Za-z0-9\u0370-\u03ff=+<>|/\u00b7\u00d7\u00f7\u2212\u2264\u2265\u22a5]")
 INK_SCALE = 4.0
 INK_LEVELS = bytes(1 if v < 190 else 0 for v in range(256))
+# The least ink height of a row of glyphs (pt), as for every glyph of a scan: lower light specks along a banner's edge
+# are its halftone, never text.
+GLYPH_MIN = 3.5
+# The renderer's smallest font is 5.5 pt at line height 1.08 (pdf-box-layout.js fitTextBoxes): a text box under about
+# 6.5 pt tall holds no line of any translation, and the export of its page fails.
+BOX_MIN_HEIGHT = 6.5
 INK_RUN = re.compile(rb"\x01+")
 # Han-sized cells of a page's text lines left in no block and no protected region before the page gets a warning.
 MISSED_CELLS = 10
@@ -1319,6 +1339,9 @@ def band_glyphs(page, pix, scale, rect):
             rows[-1][1] = max(rows[-1][1], b[3])
         else:
             rows.append([[b], b[3]])
+    rows = [row for row in rows if row[1] - min(b[1] for b in row[0]) >= GLYPH_MIN * INK_SCALE]
+    if not rows:
+        return None
     ox, oy = rect.x0, rect.y0
     page_box = lambda x0, y0, x1, y1: fitz.Rect(ox + x0 / INK_SCALE, oy + y0 / INK_SCALE, ox + x1 / INK_SCALE, oy + y1 / INK_SCALE)
     found, top = [], 1
@@ -1344,6 +1367,9 @@ def band_glyphs(page, pix, scale, rect):
             # the band's blurred edge, where its flat fill would show as a seam.
             pad, edge = max(1, round(.15 * th)), round(.8 * INK_SCALE)
             by0, by1 = max(edge, ty0 - pad), min(height - edge, ty1 + pad)
+            # small print on a band still gets a box one line of the smallest font fits in, over the band's own colour
+            grow = max(0, BOX_MIN_HEIGHT * INK_SCALE - (by1 - by0)) / 2
+            by0, by1 = max(edge, round(by0 - grow)), min(height - edge, round(by1 + grow))
             stop = groups[i + 1][0][0] - round(.6 * th) if i + 1 < len(groups) else width
             right = gx1
             while right < stop and solid(right, right + 1, by0, by1) >= .9:
@@ -2476,7 +2502,9 @@ def scan_layout(page, number):
         return {"piece": piece, "text": re.sub(r"(?<=[㐀-鿿])\s+|\s+(?=[㐀-鿿])", "", re.sub(r"\s+", " ", text)).strip(), "heights": []}
 
     pieces = [piece for band in layout["bands"] for piece in band["pieces"]]
-    for paragraph in sorted(paragraphs + pieces, key=lambda p: (p["rect"].y0, p["rect"].x0)):
+    # Blocks are numbered, packed into OCR sheets and translated in reading order: a page set in columns is read one
+    # column after the other, as a text layer is (reading_order).
+    for paragraph in reading_order(paragraphs + pieces, Columns([l["rect"] for l in layout["lines"]], body_height)):
         if "band" in paragraph:
             reading = read_band(paragraph)
             if reading:
@@ -2740,6 +2768,754 @@ def ocr_sheets(number, blocks, label):
     return sheets, label
 
 
+# Text layer of a born-digital page. A span is text the reader sees when MuPDF paints it (alpha above 0: the OCR layer
+# of a searchable scan is drawn in render mode 3, alpha 0) and no opaque image is painted over it afterwards (a scan
+# laid over its own OCR text), or when its glyphs are drawn as paths right before it (text_cover). Text nobody sees is
+# no source of the page: the page is then a scan.
+# Glyphs MuPDF found no Unicode for, written as their CID or glyph id: a font without a ToUnicode map, whose text
+# copies as gibberish.
+UNMAPPED = 128 | 256  # FZ_STEXT_UNICODE_IS_CID | FZ_STEXT_UNICODE_IS_GID
+# Characters a Chinese book's text layer never holds, where glyph ids read as Unicode land: C1 controls, the scripts
+# from Armenian to Vedic, Glagolitic to Cyrillic Extended-A, CJK Extension A, Yi to Meetei Mayek, private use, U+FFFD.
+IMPLAUSIBLE = re.compile(r"[\u0080-\u009f\u0530-\u1cff\u2c00-\u2dff\u3400-\u4dbf\ua000-\uabff\ue000-\uf8ff\ufffd]")
+# The start of an item of its own: 1. 1、 (1) （一） 一、 ① A. ■ 第三章 【
+LIST_MARKER = re.compile(r"\s*(?:[(（]?\d{1,3}[)）.．、](?!\d)|[(（][一二三四五六七八九十]{1,3}[)）]|[一二三四五六七八九十]{1,3}[、．]|[①-⑳❶-❿]|[A-Ha-h][.．、)）](?![A-Za-z0-9])|[■□●○◆◇•▲△※★☆]|第[一二三四五六七八九十百\d]+[章节课单篇部]|【)")
+# A choice of an exercise set apart on its row (A．5, B、6): an item of its own, whatever follows its letter.
+CHOICE = re.compile(r"\s*[A-H][.．、]")
+SUBSET = re.compile(r"^[A-Z]{6}\+")
+# MuPDF's words for a damaged or truncated file: objects or the xref table missing, streams cut short.
+DAMAGED = re.compile(r"(?i)failed to open|cannot open|no objects found|format error|syntax error|object (?:number )?out of range|cannot find object|xref|trailer|unexpected eof|premature end|zlib|corrupt|truncated")
+# Paths, images and shadings: a rule, a frame, a figure or a tint, which no paragraph runs across.
+DRAWN = frozenset(("fill-path", "stroke-path", "fill-image", "fill-imgmask", "fill-shade"))
+# A paragraph of more lines is cut into pieces (as split_long cuts a scanned one): a block is one translation unit.
+PARAGRAPH_LINES = 35
+
+
+def text_cover(page, log):
+    """Where the text layer and what the page shows part (log: page.get_bboxlog(), in painting order). Returns (covered,
+    outlined). covered: rects of text painted before an opaque image over most of the page, a scan laid over its own
+    OCR text. The log gives an image's rect before clipping, so a smaller picture painted after the text (a photo
+    cropped to its frame) is no cover; nor is an image with a soft mask or a stencil, which may be a watermark.
+    outlined: rects of invisible text each drawn right after a path (or a stencil) of its own glyph, inside the text's
+    box: MuPDF reports the glyphs of a Type 3 font so (Chrome and Edge print some fonts as Type 3), and some writers paint
+    each glyph as a path with the text kept invisible over it; that text is what shows. A scan under its OCR layer is no
+    glyph of it: the page image never fits inside one line's box."""
+    masked = [fitz.Rect(info["bbox"]) for info in page.get_image_info() if info.get("has-mask")]
+    covers = [(k, fitz.Rect(r) + (-1, -1, 1, 1)) for k, (kind, r) in enumerate(log) if kind == "fill-image" and fitz.Rect(r).get_area() >= .6 * page.rect.get_area() and not any(max(abs(a - b) for a, b in zip(r, m)) <= 1 for m in masked)]
+    covered, outlined = [], []
+    for k, (kind, r) in enumerate(log):
+        if kind in ("fill-text", "stroke-text") and covers and any(j > k and cover.contains(fitz.Rect(r)) for j, cover in covers):
+            covered.append(fitz.Rect(r))
+        elif kind == "ignore-text" and k and log[k - 1][0] in ("fill-path", "stroke-path", "fill-imgmask") and (fitz.Rect(r) + (-1, -1, 1, 1)).contains(fitz.Rect(log[k - 1][1])):
+            outlined.append(fitz.Rect(r))
+    return covered, outlined
+
+
+def punctuation(text):
+    """Whether a span holds punctuation only (quotes, commas, brackets, dashes set in a font of their own): text the
+    translation writes itself, never the picture of a formula."""
+    marks = [c for c in text if not c.isspace()]
+    return bool(marks) and all(unicodedata.category(c).startswith("P") for c in marks)
+
+
+def weighted_median(pairs):
+    """Median of (value, weight) pairs."""
+    pairs, total, seen = sorted(pairs), sum(w for _, w in pairs), 0
+    for value, weight in pairs:
+        seen += weight
+        if seen >= total / 2:
+            return value
+    return pairs[-1][0]
+
+
+def line_record(spans, direction=(1, 0), wmode=0, decor=()):
+    """A text line from its spans: box, text, Han count and the style most of its characters (its Han ones first)
+    carry. decor: spans that only mark it up (pinyin above it, emphasis dots under it), removed with it but never read."""
+    body = [s for s in spans if s["marks"]]
+    han = sum(s["han"] for s in body)
+    weight = (lambda s: s["han"]) if han else (lambda s: s["marks"])
+    main = max(body, key=weight)
+    total = sum(weight(s) for s in body)
+    size = weighted_median([(float(s["size"]), weight(s)) for s in body if weight(s)])
+    rect = union_rect([s["rect"] for s in body])
+    # how much taller than its text a stacked fraction or a radical makes the line, which pushes its neighbours away
+    core = max((s["rect"].height for s in body if s["size"] >= .9 * size), default=rect.height)
+    return {"spans": spans, "rect": rect, "text": "".join(s["text"] for s in spans), "han": han, "size": size, "base": main["origin"][1],
+            "font": SUBSET.sub("", main.get("font", "")), "bold": 2 * sum(weight(s) for s in body if s.get("flags", 0) & 16) >= total,
+            "color": main.get("color", 0), "dir": direction, "wmode": wmode, "decor": list(decor), "tall": max(0, rect.height - core)}
+
+
+def horizontal(line):
+    return line["wmode"] == 0 and line["dir"][0] > .98 and abs(line["dir"][1]) < .02
+
+
+def marked_up(line):
+    """A line with its markup moved to decor: small spans without Han wholly above or under its Han glyphs."""
+    han = [s["rect"] for s in line["spans"] if s["han"]]
+    if not han or not horizontal(line):
+        return line
+    top, bottom, size = min(r.y0 for r in han), max(r.y1 for r in han), line["size"]
+    decor = [s for s in line["spans"] if s["marks"] and not s["han"] and s["size"] <= .7 * size and (s["rect"].y1 <= top + .15 * size or s["rect"].y0 >= bottom - .15 * size)]
+    if not decor:
+        return line
+    spans = [s for s in line["spans"] if not any(s is d for d in decor)]
+    return line_record(spans, line["dir"], line["wmode"], line["decor"] + decor)
+
+
+def rule_span(rule, line):
+    """A blank to fill in (a short rule on the baseline) as a span of line: written ____ in the source, and its rule
+    leaves the background with the line (outlined: drawn paths its box covers go with it)."""
+    return {"text": "____", "rect": rule + (0, -.5, 0, .5), "han": 0, "marks": 4, "size": line["size"], "origin": (rule.x0, line["base"]), "flags": 0,
+            "color": line["color"], "font": "", "outlined": True}
+
+
+def reunite_lines(lines, objects):
+    """MuPDF cuts one printed line where a span of another font changes the line's height (a quote mark, an emphasis
+    dot): pieces on one baseline that nearly touch, with nothing drawn between them, are one line again, and so are
+    pieces a blank to fill in joins (a short rule on their baseline from the end of one to the start of the next); a
+    blank right after a line's text, or right before it, is part of the line too. A blank stands alone: a rule another
+    stroke meets at an end (the border of a table cell close under its text) is none. A line of small marks without Han
+    right over or under a Han line (its pinyin, its emphasis dots) becomes that line's decor."""
+    rules = [b for b in objects if b.height <= 1.6 and b.width >= 4]
+    strokes = rules + [o for o in objects if o.width <= 3 and o.height >= 4]
+    used = set()
+
+    def framed(rule):
+        """Whether an upright stroke meets the rule at an end (a cell's or a frame's border) or a rule goes on past it."""
+        y = middle(rule)
+        for o in strokes:
+            if o is rule or not o.y0 - 1.5 <= y <= o.y1 + 1.5:
+                continue
+            if o.width <= 3 and o.height >= 4:
+                if o.x0 - 1.5 <= rule.x0 <= o.x1 + 1.5 or o.x0 - 1.5 <= rule.x1 <= o.x1 + 1.5:
+                    return True
+            elif (o.x0 < rule.x0 - 1 and o.x1 >= rule.x0 - 1.5) or (o.x1 > rule.x1 + 1 and o.x0 <= rule.x1 + 1.5):
+                return True
+        return False
+
+    def blank(line, x0, x1):
+        """An unused rule on line's baseline from about x0 to about x1."""
+        h = line["size"]
+        return next((k for k, b in enumerate(rules) if k not in used and line["base"] - .3 * h <= middle(b) <= line["base"] + .45 * h and abs(b.x0 - x0) <= .5 * h and (x1 is None or abs(b.x1 - x1) <= .5 * h) and not framed(b)), None)
+
+    rows = []
+    for line in sorted(lines, key=lambda l: l["rect"].x0):
+        r, size = line["rect"], line["size"]
+        mate = None
+        if horizontal(line):
+            for k, other in enumerate(rows):
+                o = other["rect"]
+                if not (horizontal(other) and abs(other["base"] - line["base"]) <= .25 * min(size, other["size"]) and o.x0 <= r.x0 and min(o.y1, r.y1) - max(o.y0, r.y0) >= .5 * min(o.height, r.height)):
+                    continue
+                if any(b.x0 >= o.x1 - .5 and b.x1 <= r.x0 + .5 and b.width <= 3 and b.y0 < r.y1 and b.y1 > r.y0 and b.height >= .8 * min(o.height, r.height) for b in objects):
+                    continue
+                gap = None if r.x0 - o.x1 <= .5 * min(size, other["size"]) else blank(other, o.x1, r.x0)
+                if r.x0 - o.x1 <= .5 * min(size, other["size"]) or gap is not None:
+                    mate = (k, gap)
+                    break
+        if mate is None:
+            rows.append(line)
+        else:
+            other, filled = rows[mate[0]], []
+            if mate[1] is not None:
+                used.add(mate[1])
+                filled = [rule_span(rules[mate[1]], other)]
+            rows[mate[0]] = line_record(other["spans"] + filled + line["spans"], other["dir"], other["wmode"], other["decor"] + line["decor"])
+    for k, line in enumerate(rows):
+        if not horizontal(line) or not line["han"]:
+            continue
+        after, before = blank(line, line["rect"].x1, None), None
+        if after is not None:
+            used.add(after)
+        before = next((j for j, b in enumerate(rules) if j not in used and line["base"] - .3 * line["size"] <= middle(b) <= line["base"] + .45 * line["size"] and abs(b.x1 - line["rect"].x0) <= .5 * line["size"] and not framed(b)), None)
+        if before is not None:
+            used.add(before)
+        if after is not None or before is not None:
+            rows[k] = line_record(([rule_span(rules[before], line)] if before is not None else []) + line["spans"] + ([rule_span(rules[after], line)] if after is not None else []), line["dir"], line["wmode"], line["decor"])
+    # A superscript or a subscript MuPDF set apart (the 2 of m/s²) is a piece of the larger line it sits in.
+    absorbed = set()
+    for k, line in enumerate(rows):
+        r = line["rect"]
+        if line["han"] or not horizontal(line):
+            continue
+        host = next((j for j, o in enumerate(rows) if j != k and j not in absorbed and horizontal(o) and o["size"] * .85 >= line["size"] and o["rect"].x0 - .5 <= r.x0
+                     and r.x1 <= o["rect"].x1 + .5 * o["size"] and min(o["rect"].y1, r.y1) - max(o["rect"].y0, r.y0) >= .4 * r.height), None)
+        if host is not None:
+            other = rows[host]
+            rows[host] = line_record(sorted(other["spans"] + line["spans"], key=lambda s: s["rect"].x0), other["dir"], other["wmode"], other["decor"] + line["decor"])
+            absorbed.add(k)
+    rows = [marked_up(line) for k, line in enumerate(rows) if k not in absorbed]
+    kept = []
+    for line in rows:
+        r, size = line["rect"], line["size"]
+        target = None
+        if not line["han"] and horizontal(line):
+            for other in rows:
+                o, h = other["rect"], other["size"]
+                if other["han"] and horizontal(other) and size <= .7 * h and r.x0 >= o.x0 - h and r.x1 <= o.x1 + h and (-.3 * h <= o.y0 - r.y1 <= .6 * h or -.3 * h <= r.y0 - o.y1 <= .5 * h):
+                    target = other
+                    break
+        if target is None:
+            kept.append(line)
+        else:
+            target["decor"] += [s for s in line["spans"] if s["marks"]]
+    return kept
+
+
+def text_lines(page, log):
+    """The page's text layer as a reader sees it: MuPDF's lines with their visible spans and the style most of their
+    characters carry. Returns (lines, unreadable): unreadable counts visible characters that are no text (glyph ids for
+    want of a Unicode map, scripts no Chinese page is set in); their spans are left out like any other drawn ink. A span
+    drawn as glyph paths under invisible text (text_cover) is marked outlined: its paths go with it. Radicals and
+    compatibility ideographs are read as the unified ideographs they stand for (UNIFIED), and counted as Han."""
+    covered, outlined = text_cover(page, log)
+    native = page.get_text("dict", flags=fitz.TEXTFLAGS_DICT & ~fitz.TEXT_PRESERVE_IMAGES)
+    lines, unreadable = [], 0
+    for block in native["blocks"]:
+        if block.get("type") != 0:
+            continue
+        for line in block["lines"]:
+            spans = []
+            for span in line["spans"]:
+                text = span.get("text", "")
+                rect = fitz.Rect(span["bbox"]) & page.rect
+                # under 2 pt nothing is read (hidden keywords, a printer's mark): it stays in the background
+                if not text or rect.is_empty or rect.height < 2 or float(span.get("size", 10)) < 2:
+                    continue
+                marks, shape = sum(1 for c in text if not c.isspace()), False
+                if marks:
+                    centre = fitz.Point((rect.x0 + rect.x1) / 2, middle(rect))
+                    if span.get("alpha", 255) == 0:
+                        if not any(o.contains(centre) for o in outlined):
+                            continue
+                        shape = True
+                    elif covered and any(c.contains(centre) for c in covered):
+                        continue
+                    if span.get("char_flags", 0) & UNMAPPED or 2 * len(IMPLAUSIBLE.findall(text)) > marks:
+                        unreadable += marks
+                        continue
+                text = text.translate(UNIFIED)
+                spans.append(dict(span, text=text, rect=rect, han=len(HAN.findall(text)), marks=marks, outlined=shape))
+            if any(s["marks"] for s in spans):
+                lines.append(line_record(spans, tuple(line.get("dir", (1, 0))), line.get("wmode", 0)))
+    objects = [fitz.Rect(r) for kind, r in log if kind in DRAWN]
+    return reunite_lines(lines, objects), unreadable
+
+
+def pixel_han(page, text, size=None):
+    """Han-sized cells of glyphs the text layer does not hold, outside its visible lines (text: rects): the text of a
+    scan or a photograph, text converted to outlines, glyphs left out as unreadable. The page is rendered once at about
+    1.5 px/pt with the text lines blanked out; its glyph-sized ink (at most 1.6 times the size of the page's text,
+    size, when it has some) is banded into rows and han_glyphs counts the cells of each row holding three or more:
+    the dots of a chart or the hatching of a drawing seldom line up so."""
+    scale = min(1.5, 1300 / max(page.rect.width, page.rect.height))
+    grey = page.get_pixmap(matrix=fitz.Matrix(scale, scale), colorspace=fitz.csGRAY, alpha=False)
+    width, height, stride, samples = grey.width, grey.height, grey.stride, grey.samples
+    counts = [0] * 256
+    for value in samples[::37]:
+        counts[value] += 1
+    seen, paper = 0, 255
+    for value, count in enumerate(counts):
+        seen += count
+        if seen >= .75 * sum(counts):
+            paper = value
+            break
+    data = bytearray(samples.translate(bytes(1 if v < min(190, paper - 40) else 0 for v in range(256))))
+    for rect in text:
+        x0, x1 = max(0, int((rect.x0 - 1) * scale)), min(width, int((rect.x1 + 1) * scale) + 1)
+        if x1 > x0:
+            for y in range(max(0, int((rect.y0 - 1) * scale)), min(height, int((rect.y1 + 1) * scale) + 1)):
+                data[y * stride + x0:y * stride + x1] = bytes(x1 - x0)
+    glyphs, ink = [], {}
+    for x0, y0, x1, y1, pixels in label_runs(bytes(data), width, height, stride):
+        rect = fitz.Rect(x0 / scale, y0 / scale, x1 / scale, y1 / scale)
+        if GLYPH_MIN <= rect.height <= (1.6 * size if size else 60) and .6 <= rect.width <= 65 and pixels >= 3:
+            glyphs.append(rect)
+            ink[id(rect)] = pixels / scale / scale
+    if not glyphs:
+        return 0
+    em = .9 * size if size else page_em(glyphs)
+    return sum(text_cells(row, em, ink) for row in ink_bands(glyphs, height, scale))
+
+
+def text_cells(row, em, ink):
+    """Han glyphs a row of glyph rects holds when it is set like text: cells as han_glyphs counts them (touching pieces
+    merged, at least .85 em tall and .7 em wide, a quarter inked), at most 1.3 em tall, in runs of three or more whose
+    tops and bottoms keep to the row's within a fifth of an em, with gaps under half an em. The dots of a chart or the
+    hatching of a drawing make cells of every height at every spacing."""
+    cells = []
+    for g in sorted(row, key=lambda g: g.x0):
+        if cells and g.x0 <= cells[-1][0].x1 + .4:
+            cells[-1] = (cells[-1][0] | g, cells[-1][1] + ink.get(id(g), 0))
+        else:
+            cells.append((fitz.Rect(g), ink.get(id(g), 0)))
+    good = [c for c, area in cells if .85 * em <= c.height <= 1.3 * em and c.width >= .7 * em and area >= .25 * c.width * c.height]
+    if len(good) < 3:
+        return 0
+    top, bottom = median(c.y0 for c in good), median(c.y1 for c in good)
+    count, run = 0, []
+    for c in [c for c in good if abs(c.y0 - top) <= .2 * em and abs(c.y1 - bottom) <= .2 * em] + [None]:
+        if c is not None and (not run or c.x0 - run[-1].x1 <= .5 * em):
+            run.append(c)
+            continue
+        if len(run) >= 3:
+            count += sum(max(1, round(r.width / em)) for r in run)
+        run = [c] if c is not None else []
+    return count
+
+
+def separated(upper, lower, objects, h):
+    """Whether a rule, an image or a drawing lies between two lines one above the other: something drawn in the gap of
+    their common width that is not behind (or round) both of them, mostly on one of them (a key term's tint, an
+    underline), an underline hugging the upper line or a small mark."""
+    a, b = upper["rect"], lower["rect"]
+    x0, x1 = max(a.x0, b.x0) + 1, min(a.x1, b.x1) - 1
+    if b.y0 - a.y1 < .2 or x1 - x0 < 1:
+        return False
+    gap = fitz.Rect(x0, a.y1, x1, b.y0)
+    for r in objects:
+        if not r.intersects(gap) or (r.y0 <= a.y0 + 1 and r.y1 >= b.y1 - 1):
+            continue
+        if max(min(r.y1, a.y1) - max(r.y0, a.y0), min(r.y1, b.y1) - max(r.y0, b.y0)) > .5 * r.height:
+            continue
+        if r.height <= 2 and r.y1 <= a.y1 + .35 * h:
+            continue
+        if r.width < .3 * (x1 - x0) and r.height < .5 * h:
+            continue
+        return True
+    return False
+
+
+def same_style(a, b):
+    """Whether two lines are set alike: one size (within 8%), and for Han lines one font, weight and colour."""
+    if abs(a["size"] - b["size"]) > .08 * max(a["size"], b["size"]):
+        return False
+    return not (a["han"] and b["han"]) or (a["font"] == b["font"] and a["bold"] == b["bold"] and a["color"] == b["color"])
+
+
+def vertical_columns(lines):
+    """Columns of vertical text: three or more one-glyph lines stacked at one x at most about 1.8 em apart (how most
+    PDF writers set vertical text; two on a page that has such columns), and lines MuPDF reads in vertical writing
+    mode. Returns (columns, the other lines); a column holds its lines top to bottom."""
+    stacked, columns, rest = [], [], []
+    for line in lines:
+        if line["wmode"] == 1 and abs(line["dir"][0]) < .02 and line["dir"][1] > .98:
+            columns.append([line])
+        elif line["wmode"] == 0 and line["dir"][0] > .98 and sum(s["marks"] for s in line["spans"]) <= 2 and line["rect"].width <= 1.6 * line["size"]:
+            stacked.append(line)
+        else:
+            rest.append(line)
+    runs = []
+    for line in sorted(stacked, key=lambda l: l["rect"].y0):
+        r, size = line["rect"], line["size"]
+        run = next((run for run in runs if abs((run[-1]["rect"].x0 + run[-1]["rect"].x1) / 2 - (r.x0 + r.x1) / 2) <= .35 * size
+                    and abs(run[-1]["size"] - size) <= .1 * size and -.3 * size <= r.y0 - run[-1]["rect"].y1 <= .8 * size), None)
+        if run is None:
+            runs.append([line])
+        else:
+            run.append(line)
+    # Two glyphs one above the other are a column (a short title, an author's name) on a page set vertically.
+    shortest = 2 if any(len(run) >= 3 for run in runs) or columns else 3
+    for run in runs:
+        if len(run) >= shortest:
+            columns.append(run)
+        else:
+            rest += run
+    return columns, rest
+
+
+def column_line(members):
+    """One vertical column as a line: its glyphs top to bottom."""
+    spans = [s for line in members for s in line["spans"]]
+    first = max(members, key=lambda l: l["han"])
+    return dict(first, spans=spans, rect=union_rect([l["rect"] for l in members]), text="".join(l["text"] for l in members),
+                han=sum(l["han"] for l in members), size=median(l["size"] for l in members), vertical=True)
+
+
+def column_order(columns):
+    """Vertical columns in reading order: right to left, and columns at one place one above the other (a title over its
+    author) top to bottom."""
+    places = []
+    for column in sorted(columns, key=lambda c: -c["rect"].x1):
+        r = column["rect"]
+        if places and min(places[-1][0].x1, r.x1) - max(places[-1][0].x0, r.x0) >= .5 * min(places[-1][0].width, r.width):
+            places[-1][0].include_rect(r)
+            places[-1][1].append(column)
+        else:
+            places.append((fitz.Rect(r), [column]))
+    return [c for _, members in places for c in sorted(members, key=lambda c: c["rect"].y0)]
+
+
+def vertical_regions(columns, objects):
+    """Columns of one style side by side, read right to left, make one block: its translation is set in horizontal
+    lines over the whole area the columns take."""
+    regions = []
+    for column in sorted(columns, key=lambda c: -(c["rect"].x0 + c["rect"].x1) / 2):
+        r = column["rect"]
+        region = next((g for g in reversed(regions) if same_style(g[-1], column) and 0 <= g[-1]["rect"].x0 - r.x1 <= 1.2 * column["size"]
+                       and min(r.y1, g[-1]["rect"].y1) - max(r.y0, g[-1]["rect"].y0) >= .5 * min(r.height, g[-1]["rect"].height)
+                       and not any(o.intersects(fitz.Rect(r.x1, max(r.y0, g[-1]["rect"].y0), g[-1]["rect"].x0, min(r.y1, g[-1]["rect"].y1))) and not o.contains(r) for o in objects if o.width < 2 * column["size"])), None)
+        if region is None:
+            regions.append([column])
+        else:
+            region.append(column)
+    return regions
+
+
+def word_space(left, right):
+    """The space between two pieces of one printed line that MuPDF set apart (inline_pieces): text, never ink."""
+    a, b = left["rect"], right["rect"]
+    return {"text": " ", "rect": fitz.Rect(a.x1, min(a.y0, b.y0), max(a.x1, b.x0), max(a.y1, b.y1)), "han": 0, "marks": 0, "size": min(left["size"], right["size"]),
+            "origin": (a.x1, left["base"]), "flags": 0, "color": 0, "font": "", "outlined": False}
+
+
+def inline_pieces(lines, objects, gutters):
+    """Formulas and numbers MuPDF set apart from the Han text of their printed line, more than half an em away (closer
+    pieces reunite_lines joins): a piece without Han that is not only punctuation, on a Han line's baseline at most two
+    em from it with nothing drawn and no column gutter between them, is part of that line. It is translated with the
+    line as an inline token and leaves the background with it, and the line's box takes it in. Pieces chain: a formula
+    between two runs of Han joins them, formulas side by side join one line, and so does punctuation set apart between
+    them (a row joined so holds a formula). A piece stays a record of its own when it stands in a column of pieces
+    (aligned left, right or centre with one on a nearby baseline: a table without rules, a grid of items or numbers),
+    or when it labels a drawing (ink within half an em of it that is neither its own arrow, bar or frame, nor drawn
+    along the Han text, nor a blank or an underline on the line, nor text drawn as paths). What starts an item of its
+    own (a choice A．…, a numbered question) never continues what stands before it on the row."""
+    rows = sorted((l for l in lines if horizontal(l)), key=lambda l: l["base"])
+    bases = [l["base"] for l in rows]
+
+    def near(base, reach):
+        return rows[bisect_left(bases, base - reach):bisect_right(bases, base + reach)]
+
+    def stacked(p):
+        r, h = p["rect"], p["size"]
+        return any(q is not p and not q["han"] and abs(q["base"] - p["base"]) > .6 * h
+                   and min(abs(q["rect"].x0 - r.x0), abs(q["rect"].x1 - r.x1), abs(q["rect"].x0 + q["rect"].x1 - r.x0 - r.x1) / 2) <= .25 * h for q in near(p["base"], 4 * h))
+
+    loose = {id(p): p for p in rows if not p["han"] and not stacked(p)}
+    if not any(not punctuation(p["text"]) for p in loose.values()):
+        return lines
+    # drawn objects by bands of the page's height: a chart's thousands of dots are looked at only round its labels
+    bands = {}
+    for o in objects:
+        for k in range(max(0, int(o.y0 // 16)), min(200, int(o.y1 // 16)) + 1):
+            bands.setdefault(k, []).append(o)
+
+    def joins(a, b):
+        """Whether a and b (b to the right of a on its baseline) are pieces of one printed line."""
+        ra, rb = a["rect"], b["rect"]
+        h = max(a["size"] if a["han"] else 0, b["size"] if b["han"] else 0) or max(a["size"], b["size"])
+        if rb.x0 - ra.x1 > 2 * h or max(a["size"], b["size"]) > 1.6 * min(a["size"], b["size"]) or gutters.separates(ra, rb):
+            return False
+        both, han = ra | rb, [l["rect"] for l in (a, b) if l["han"]]
+        zone = both + (-h, -h, h, h)
+        texts = [l["rect"] + (-1, -1, 1, 1) for l in near(middle(both), 3 * h)]
+        drawn = {id(o): o for k in range(max(0, int(zone.y0 // 16)), min(200, int(zone.y1 // 16)) + 1) for o in bands.get(k, ())}
+        for o in drawn.values():
+            if not o.intersects(zone) or o.contains(both):
+                continue
+            if o.x0 >= ra.x1 - .5 and o.x1 <= rb.x0 + .5 and o.y0 < both.y1 and o.y1 > both.y0:
+                return False
+            if any(o.x0 < t.x1 and o.x1 > t.x0 for t in han) or (o.height <= 1.6 and both.y0 - .2 * h <= middle(o) <= both.y1 + .2 * h) or any(t.contains(o) for t in texts):
+                continue
+            for piece in (a, b):
+                if id(piece) in loose:
+                    box = piece["rect"] + (-.5 * h, -.5 * h, .5 * h, .5 * h)
+                    if o.intersects(box) and not box.contains(o):
+                        return False
+        return True
+
+    parent = {}
+
+    def find(k):
+        while parent.setdefault(k, k) != k:
+            parent[k] = parent[parent[k]]
+            k = parent[k]
+        return k
+
+    for p in loose.values():
+        r, h = p["rect"], p["size"]
+        row = [l for l in near(p["base"], .5 * h) if l is not p and abs(l["base"] - p["base"]) <= .3 * min(h, l["size"])
+               and min(l["rect"].y1, r.y1) - max(l["rect"].y0, r.y0) >= .5 * min(l["rect"].height, r.height)]
+        left = max((l for l in row if l["rect"].x0 < r.x0 and l["rect"].x1 <= r.x0 + .5 * h), key=lambda l: l["rect"].x1, default=None)
+        right = min((l for l in row if l["rect"].x0 > r.x0 and l["rect"].x0 >= r.x1 - .5 * h), key=lambda l: l["rect"].x0, default=None)
+        for a, b in ((left, p), (p, right)):
+            if a is not None and b is not None and all(l["han"] or id(l) in loose for l in (a, b)) and not (LIST_MARKER.match(b["text"]) or CHOICE.match(b["text"])) and joins(a, b):
+                parent[find(id(a))] = find(id(b))
+    groups = {}
+    for l in rows:
+        if id(l) in parent:
+            groups.setdefault(find(id(l)), []).append(l)
+    joined, gone = [], set()
+    for members in groups.values():
+        if not any(m["han"] for m in members) or all(m["han"] or punctuation(m["text"]) for m in members):
+            continue
+        members.sort(key=lambda l: l["rect"].x0)
+        spans = list(members[0]["spans"])
+        for a, b in zip(members, members[1:]):
+            if b["rect"].x0 - a["rect"].x1 > .2 * min(a["size"], b["size"]) and not a["text"][-1:].isspace() and not b["text"][:1].isspace():
+                spans.append(word_space(a, b))
+            spans += b["spans"]
+        host = max(members, key=lambda l: l["han"])
+        joined.append(line_record(spans, host["dir"], host["wmode"], [d for m in members for d in m["decor"]]))
+        gone.update(id(m) for m in members)
+    return [l for l in lines if id(l) not in gone] + joined
+
+
+def native_paragraphs(lines, others, objects, gutters):
+    """Paragraphs of the horizontal lines of a text layer, with the rules group_paragraphs applies to a scan, measured on
+    the text itself. A line continues the paragraph right above it in its column when it is set alike (same_style), its
+    baseline follows at the paragraph's own line pitch (the page's usual pitch for its size before the paragraph has
+    two lines), it starts at the paragraph's margin, the line above runs on to the right edge of the column (or to a
+    figure or text beside it), it is no list item and no rule or picture lies between them. A line under a first line
+    indented by up to four em continues it the same way, and so does a hanging indent under a list item. A paragraph
+    never takes a box over another line (others: every other line of the page, vertical or rotated ones included).
+    Items of a grid (cells of a table without rules, exercise items or choices side by side: a short line with a short
+    line of its size beside it on its baseline, no column gutter between) join nothing above or below them: the cells of
+    one column are separate records."""
+    for line in lines:
+        line["marker"] = bool(LIST_MARKER.match(line["text"]))
+    ordered = sorted(lines, key=lambda l: (l["rect"].y0, l["rect"].x0))
+    everything = ordered + list(others)
+
+    def overlap(a, b):
+        return min(a.x1, b.x1) - max(a.x0, b.x0)
+
+    for line in ordered:
+        r, h = line["rect"], line["size"]
+        line["grid"] = r.width < 12 * h and any(o is not line and abs(o["base"] - line["base"]) <= .3 * h and abs(o["size"] - h) <= .08 * max(o["size"], h) and o["rect"].width < 12 * h
+                                              and (o["rect"].x0 >= r.x1 + .5 * h or o["rect"].x1 <= r.x0 - .5 * h) and not gutters.separates(o["rect"], r) for o in ordered)
+
+    # The right edge each line could reach: its column's lines of its size nearby, or a picture or other text beside it
+    # (with the margin text keeps round a figure and its caption, a line and a half above or below them).
+    for line in ordered:
+        r, h = line["rect"], line["size"]
+        column = [o["rect"] for o in ordered if abs(o["base"] - line["base"]) <= 8 * h and abs(o["size"] - h) <= .08 * max(o["size"], h) and overlap(o["rect"], r) >= .5 * min(o["rect"].width, r.width)]
+        line["room"] = room = max(o.x1 for o in column)
+        line["left"] = min(o.x0 for o in column)
+        beside = [o.x0 for o in objects + [l["rect"] for l in everything if l is not line] if o.y0 - 1.5 * h < r.y1 and o.y1 + 1.5 * h > r.y0 and r.x1 - 1 <= o.x0 < room]
+        # a line of one to three characters is never the wrapped body of a paragraph, however narrow its column
+        line["full"] = sum(s["marks"] for s in line["spans"]) >= 4 and r.x1 >= (min(beside) - 3 * h if beside else room - 1.2 * h)
+        below = [o for o in ordered if o is not line and same_style(o, line) and .9 * h < o["base"] - line["base"] - line["tall"] - o["tall"] < 3.5 * h and overlap(o["rect"], r) > .5 * min(o["rect"].width, r.width)]
+        line["below"] = min(below, key=lambda o: o["base"]) if below else None
+        line["pitch"] = (line["below"]["base"] - line["base"] - line["tall"] - line["below"]["tall"]) / h if below else None
+    # Lines that wrap round something on their right end at one edge: a line short of its column that ends where the
+    # full line under it ends runs on to that edge too, unless it is set apart from the column's left margin (a centred
+    # verse, a caption).
+    for line in sorted(ordered, key=lambda l: -l["base"]):
+        under, h = line["below"], line["size"]
+        if not line["full"] and under is not None and under["full"] and abs(under["rect"].x1 - line["rect"].x1) <= .5 * h and line["rect"].x0 <= line["left"] + 2.5 * h:
+            line["full"] = True
+    ratios = sorted(l["pitch"] for l in ordered if l["pitch"])
+    usual = ratios[len(ratios) // 2] if ratios else 1.6
+    paragraphs = []
+    for line in ordered:
+        r, best = line["rect"], None
+        for p in paragraphs:
+            last, h = p["lines"][-1], max(p["lines"][-1]["size"], line["size"])
+            a = last["rect"]
+            # baselines apart, less what tall formulas on either line add
+            pitch = line["base"] - last["base"] - last["tall"] - line["tall"]
+            if not (.5 * h < line["base"] - last["base"] and pitch <= 3.5 * h) or r.y0 - a.y1 < -.3 * h or overlap(p["rect"], r) <= .5 * min(p["rect"].width, r.width) or not same_style(last, line) or line["marker"] or line["grid"] or last["grid"]:
+                continue
+            own = [b["base"] - a2["base"] - a2["tall"] - b["tall"] for a2, b in zip(p["lines"], p["lines"][1:])]
+            if pitch > (max(own) if own else usual * h) * 1.15 + .5:
+                continue
+            if len(p["lines"]) > 1:
+                follows = last["full"] and abs(r.x0 - p["margin"]) <= .6 * h
+            else:
+                follows = last["full"] and (a.x0 - 4.5 * h <= r.x0 <= a.x0 + .6 * h or (last["marker"] and a.x0 < r.x0 <= a.x0 + 3 * h))
+            if not follows or separated(last, line, objects, h):
+                continue
+            box = p["rect"] | r
+            if any(o is not line and not any(o is m for m in p["lines"]) and box.contains(fitz.Point((o["rect"].x0 + o["rect"].x1) / 2, middle(o["rect"]))) for o in everything if o["rect"].intersects(box)):
+                continue
+            if best is None or r.y0 - a.y1 < best[0]:
+                best = (r.y0 - a.y1, p)
+        if best is None:
+            paragraphs.append({"lines": [line], "rect": fitz.Rect(r), "margin": r.x0})
+        else:
+            p = best[1]
+            p["lines"].append(line)
+            p["rect"] |= r
+            p["margin"] = r.x0 if len(p["lines"]) == 2 else min(p["margin"], r.x0)
+    pieces = []
+    for p in paragraphs:
+        for k in range(0, len(p["lines"]), PARAGRAPH_LINES):
+            part = p["lines"][k:k + PARAGRAPH_LINES]
+            pieces.append({"lines": part, "rect": union_rect([l["rect"] for l in part])})
+    return pieces
+
+
+def by_rows(units):
+    """Units top to bottom and, on one row, left to right (vertical text right to left): a unit is on the row of the
+    first unit above it whose box shares half of the smaller one's height (items set side by side seldom share a top
+    edge to the point)."""
+    rows = []
+    for unit in sorted(units, key=lambda u: u["rect"].y0):
+        r = unit["rect"]
+        row = next((row for row in rows[-3:] if min(row[0].y1, r.y1) - max(row[0].y0, r.y0) >= .5 * min(row[0].height, r.height)), None)
+        if row is None:
+            rows.append((fitz.Rect(r), [unit]))
+        else:
+            row[1].append(unit)
+    return [u for _, members in rows for u in sorted(members, key=lambda u: -u["rect"].x1 if all(m.get("vertical") for m in members) else u["rect"].x0)]
+
+
+def reading_order(units, columns):
+    """Units in reading order: down the page, and where the page is set in columns (columns: the Columns of its lines,
+    as on scans), one column after the other between the units that span them or lie outside them (a heading over both
+    columns, a footer)."""
+    units = by_rows(units)
+    if not columns.gutters:
+        return units
+
+    def column(rect):
+        """The column a unit is in (gutters left of it), or None when it spans a gutter or lies where none runs."""
+        index, inside = 0, False
+        for gutter in columns.gutters:
+            gap = columns.gap(gutter, middle(rect))
+            if gap is None:
+                continue
+            centre = (gap[0] + gap[1]) / 2
+            if rect.x0 < centre < rect.x1:
+                return None
+            inside = True
+            index += rect.x0 >= centre
+        return index if inside else None
+
+    ordered, section = [], []
+    for unit in units:
+        index = column(unit["rect"])
+        if index is None:
+            ordered += [u for _, u in sorted(section, key=lambda s: s[0])]
+            section = []
+            ordered.append(unit)
+        else:
+            section.append((index, unit))
+    return ordered + [u for _, u in sorted(section, key=lambda s: s[0])]
+
+
+def line_room(rect, size, obstacles, area):
+    """The box of a one-line block: its line with up to 2 pt more above and below where the paper is blank, like the
+    margin of a scanned block's crop, and for a word narrower than 25 pt the blank paper beside it on its row up to 1.5
+    em each way, 2.5 pt short of what stops it, as scan_layout gives a word alone in a table cell. A translation is
+    longer than the Chinese it replaces; a box no taller than its line, between a table's rules, holds no second line.
+    obstacles: rects of other lines, of boxes already given and of drawn objects; one drawn round the line or behind it
+    (a frame, a tint) stops nothing."""
+    near = [o for o in obstacles if not (o.x0 <= rect.x0 + .5 and o.y0 <= rect.y0 + .5 and o.x1 >= rect.x1 - .5 and o.y1 >= rect.y1 - .5)]
+    over = [o for o in near if o.x0 < rect.x1 and o.x1 > rect.x0]
+    box = fitz.Rect(rect)
+    box.y0 = min(rect.y0, max(rect.y0 - 2, area.y0, max((o.y1 + .5 for o in over if o.y1 <= rect.y0 + .5), default=area.y0)))
+    box.y1 = max(rect.y1, min(rect.y1 + 2, area.y1, min((o.y0 - .5 for o in over if o.y0 >= rect.y1 - .5), default=area.y1)))
+    if rect.width < 25:
+        reach = 1.5 * size
+        row = [o for o in near if o.y0 < rect.y1 - .2 * rect.height and o.y1 > rect.y0 + .2 * rect.height]
+        box.x0 = min(rect.x0, max(rect.x0 - reach, max((o.x1 for o in row if o.x1 <= rect.x0 + .5), default=area.x0) + 2.5))
+        box.x1 = max(rect.x1, min(rect.x1 + reach, min((o.x0 for o in row if o.x0 >= rect.x1 - .5), default=area.x1) - 2.5))
+    return box
+
+
+def native_layout(page, number, lines, log):
+    """Translation blocks of a born-digital page from its visible text lines: paragraphs of horizontal lines, regions of
+    vertical columns, in reading order. Rotated lines and narrow vertical ones keep their pixels. Returns (blocks, the
+    span rects to remove from the background as (rect, drawn as paths), protected regions, notes)."""
+    objects = [fitz.Rect(r) for kind, r in log if kind in DRAWN and not fitz.Rect(r).is_empty]
+    columns, rest = vertical_columns(lines)
+    flat = [l for l in rest if horizontal(l)]
+    rotated = [l for l in rest if not horizontal(l)]
+    columns = [column_line(c) for c in columns]
+    sizes = [(l["size"], l["han"] or 1) for l in flat] or [(l["size"], 1) for l in lines] or [(10, 1)]
+    gutters = Columns([l["rect"] for l in flat], weighted_median(sizes))
+    flat = inline_pieces(flat, objects, gutters)
+    units = native_paragraphs(flat, columns + rotated, objects, gutters)
+    regions = [{"lines": region, "rect": union_rect([c["rect"] for c in region]), "vertical": True} for region in vertical_regions(columns, objects)]
+    # A translation set in horizontal lines needs room across: a vertical title or a side tab one or two columns wide
+    # would break it a letter or two per line. Next to a wide region (a poem's title and author beside its lines) it is
+    # read with that region; alone it keeps its pixels like rotated text.
+    wide = [r for r in regions if r["rect"].width >= 3 * max(c["size"] for c in r["lines"])]
+    for region in regions:
+        if any(region is w for w in wide):
+            continue
+        r, size = region["rect"], max(c["size"] for c in region["lines"])
+        host = next((w for w in wide if max(w["rect"].x0 - r.x1, r.x0 - w["rect"].x1) <= 2 * max([size] + [c["size"] for c in w["lines"]]) and min(w["rect"].y1, r.y1) - max(w["rect"].y0, r.y0) >= -size), None)
+        if host is None:
+            rotated += region["lines"]
+        else:
+            host["lines"] += region["lines"]
+            host["rect"] |= r
+    for region in wide:
+        region["lines"] = column_order(region["lines"])
+    units += wide
+    units = [u for u in units if any(l["han"] for l in u["lines"])]
+    blocks, redactions, notes, taken = [], [], [], []
+    everything = flat + columns + rotated
+    for unit in reading_order(units, gutters):
+        identity = f"p{number}-b{len(blocks) + 1}"
+        inlines, sources, texts, spans = [], [], [], []
+        for line in unit["lines"]:
+            words = []
+            for span in line["spans"]:
+                value = span["text"]
+                if not span["marks"]:
+                    words.append(value)
+                    continue
+                spans.append(span)
+                if not span["han"] and not punctuation(value):
+                    rect = span["rect"]
+                    token = f"@@PDF_INLINE_{len(inlines) + 1}@@"
+                    inlines.append({"token": token, "text": value, "box": rect_list(rect), "width": round(rect.width, 3), "height": round(rect.height, 3), "image": image_url(page, rect, 2.5)})
+                    words.append(token)
+                else:
+                    words.append(value)
+            sources.append("".join(words))
+            texts.append(line["text"])
+        text = "\n".join(texts).strip()
+        if len(text) > 8000:
+            raise ValueError(f"Trang {number} có block quá dài; cần tách trước khi dịch.")
+        box = union_rect([l["rect"] for l in unit["lines"]]) & page.rect
+        han = [s for s in spans if s["han"]] or spans
+        weights = [(float(s["size"]), s["han"] or s["marks"]) for s in han]
+        main = max(han, key=lambda s: s["han"] or s["marks"])
+        if len(unit["lines"]) == 1 and not unit.get("vertical"):
+            own = unit["lines"][0]
+            box = line_room(box, own["size"], [l["rect"] for l in everything if l is not own] + taken + objects, page.rect)
+        taken.append(box)
+        block = {"id": identity, "text": text, "source": "\n".join(sources).strip(), "box": rect_list(box), "fontSize": round(min(200, max(1, weighted_median(weights))), 3),
+                 "bold": 2 * sum(s["han"] or s["marks"] for s in han if s.get("flags", 0) & 16) >= sum(w for _, w in weights), "color": f"#{int(main.get('color', 0)):06x}", "inlines": inlines}
+        first = unit["lines"][0]["rect"].x0
+        if not unit.get("vertical") and len(unit["lines"]) > 1 and first - min(l["rect"].x0 for l in unit["lines"][1:]) >= max(4, .6 * block["fontSize"]):
+            block["indent"] = round(first - box.x0, 3)
+        blocks.append(block)
+        redactions += [(s["rect"], s["outlined"]) for s in spans + [d for l in unit["lines"] for d in l.get("decor", [])]]
+    if any(u.get("vertical") for u in units):
+        notes.append(f"Trang {number}: chữ dọc được dịch thành các dòng chữ ngang trong cùng vùng; hãy đối chiếu thứ tự đọc với PDF gốc.")
+    protected = [l["rect"] for l in rotated if l["han"]]
+    if protected:
+        notes.append(f"Trang {number}: có {sum(l['han'] for l in rotated)} chữ Hán in dọc hoặc in xoay trong vùng hẹp nên được giữ nguyên ảnh gốc, chưa dịch.")
+    return blocks, redactions, [rect_list(r) for r in protected], notes
+
+
+def scan_reason(page, lines, unreadable, images, log):
+    """Why a page is read from its pixels (OCR) rather than its text layer, or None. 'unreadable': most of its visible
+    text is no text (text_lines). 'scan': too little visible text for a page of text (under 12 characters, no Han) and a
+    picture, or glyphs the text layer does not hold (pixel_han: a scan or its OCR layer, a scan under a stamp or a
+    header, text converted to outlines) that make at least MISSED_CELLS Han and more than the text layer. Returns
+    (reason, cells): the Han-sized cells outside the text layer, measured on pages with paths or pictures only."""
+    visible = sum(s["marks"] for l in lines for s in l["spans"])
+    han = sum(l["han"] for l in lines)
+    if unreadable >= 8 and unreadable >= .3 * (unreadable + visible):
+        return "unreadable", 0
+    if not han and visible < 12 and images:
+        return "scan", 0
+    if not any(kind in DRAWN for kind, _ in log):
+        return None, 0
+    sized = [(l["size"], l["han"]) for l in lines if l["han"]]
+    cells = pixel_han(page, [l["rect"] for l in lines], weighted_median(sized) if sized else None)
+    if (not han and visible < 12 and cells >= 2) or (cells >= MISSED_CELLS and cells > han):
+        return "scan", cells
+    return None, cells
+
+
 def rect_list(rect):
     return [round(float(n), 3) for n in rect]
 
@@ -2769,9 +3545,13 @@ def page_ranges(numbers):
 
 
 def page_pdf_bytes(doc, index, seen):
-    """Approximate bytes a page adds to the selected-pages PDF: its not-yet-counted image and content streams."""
+    """Approximate bytes a page adds to the selected-pages PDF: its not-yet-counted image and content streams. A page
+    MuPDF cannot read counts nothing here; reading it fails right after, naming the page."""
     total = 0
-    xrefs = [x for image in doc.get_page_images(index, full=False) for x in image[:2] if x] + list(doc[index].get_contents())
+    try:
+        xrefs = [x for image in doc.get_page_images(index, full=False) for x in image[:2] if x] + list(doc[index].get_contents())
+    except (ValueError, RuntimeError):
+        return 0
     for xref in xrefs:
         if xref not in seen:
             seen.add(xref)
@@ -2799,6 +3579,15 @@ def selected_pages(value, total):
     return sorted(pages)
 
 
+def page_failure(number, error):
+    """The student's message when MuPDF cannot read page number: it names the page, so a whole-book run sets just this
+    page aside; a damaged file is said so without MuPDF's own words."""
+    detail = (str(error) or type(error).__name__).strip().splitlines()[0][:160]
+    if DAMAGED.search(detail):
+        return ValueError(f"Trang {number}: không đọc được trang này vì tệp PDF bị hỏng ở trang đó. Hãy bỏ trang này khỏi phạm vi hoặc tải lại tệp PDF gốc.")
+    return ValueError(f"Trang {number}: không đọc được trang này ({type(error).__name__}: {detail}). Hãy bỏ trang này khỏi phạm vi.")
+
+
 def extract(payload):
     raw = base64.b64decode(payload["pdfBase64"], validate=True)
     if len(raw) > 25 * 1024 * 1024 or not raw.startswith(b"%PDF-"):
@@ -2808,15 +3597,31 @@ def extract(payload):
         raise ValueError("PDF có mật khẩu; hãy mở khóa trước khi dịch.")
     subset = fitz.open()
     indices = selected_pages(payload.get("pages"), len(doc))
+    if not indices:
+        raise ValueError("PDF không có trang nào để dịch.")
     # A page that can never be rendered safely fails here, in seconds, before any OCR work.
     for index in indices:
-        rect = doc[index].rect
+        try:
+            rect = doc[index].rect
+        except (ValueError, MemoryError):
+            raise
+        except Exception as error:
+            raise page_failure(index + 1, error) from error
         if rect.width > 1800 or rect.height > 2400 or rect.width * rect.height * 1.6 * 1.6 > 6_000_000:
             raise ValueError(f"Trang {index + 1} quá lớn để render an toàn ({round(rect.width)}×{round(rect.height)} pt). Hãy bỏ trang này khỏi phạm vi hoặc giảm kích thước trang.")
+        if rect.width < 10 or rect.height < 10:
+            raise ValueError(f"Trang {index + 1} quá nhỏ để dựng lại bố cục ({round(rect.width, 1)}×{round(rect.height, 1)} pt). Hãy bỏ trang này khỏi phạm vi.")
     pages, page_sizes, page_warnings = [], [], []
     pixel_budget, encoded_budget, pdf_estimate, seen_streams = 0, 0, 0, set()
     stopped_by, label, too_large = None, 1, []
+    # The caller may ask for less time than TIME_BUDGET (payload timeBudget, seconds: its own deadline), never for more.
+    budget, asked = TIME_BUDGET, payload.get("timeBudget")
+    if isinstance(asked, (int, float)) and not isinstance(asked, bool) and asked > 0:
+        budget = min(budget, float(asked))
+    started, begun, slowest, out_of_time = clock(), None, 0.0, False
     for index in indices:
+        if begun is not None:
+            slowest = max(slowest, clock() - begun)
         area = doc[index].rect.width * doc[index].rect.height * 1.6 * 1.6
         page_pdf = page_pdf_bytes(doc, index, seen_streams) * 4 // 3
         # Budgets are checked before the expensive OCR of each page; when the selection does not fit, the pages
@@ -2824,17 +3629,25 @@ def extract(payload):
         if pages and (pixel_budget + area > PIXEL_BUDGET or pdf_estimate + page_pdf + encoded_budget > TOTAL_BUDGET):
             stopped_by = index
             break
-        subset.insert_pdf(doc, from_page=index, to_page=index)
-        page = subset[-1]
-        # Normalize rotation once, so images, boxes and print dimensions share a coordinate system.
-        if page.rotation:
-            page.remove_rotation()
-        native = page.get_text("dict", flags=fitz.TEXTFLAGS_DICT & ~fitz.TEXT_PRESERVE_IMAGES, sort=True)
-        native_text = "".join(s.get("text", "") for b in native["blocks"] if b["type"] == 0 for l in b["lines"] for s in l["spans"])
-        image_infos = page.get_image_info()
-        large_scan = any(fitz.Rect(info["bbox"]).get_area() > page.rect.get_area() * .6 for info in image_infos)
-        body_han = sum(len(HAN.findall(s.get("text", ""))) for b in native["blocks"] if b["type"] == 0 for l in b["lines"] for s in l["spans"] if page.rect.height * .15 < s["bbox"][1] < page.rect.height * .85)
-        scanned = (len(native_text.strip()) < 12 and bool(image_infos)) or (large_scan and body_han < 60)
+        if pages and clock() - started + 1.5 * slowest > budget:
+            stopped_by, out_of_time = index, True
+            break
+        begun = clock()
+        try:
+            subset.insert_pdf(doc, from_page=index, to_page=index)
+            page = subset[-1]
+            # Normalize rotation once, so images, boxes and print dimensions share a coordinate system.
+            if page.rotation:
+                page.remove_rotation()
+            log = page.get_bboxlog()
+            lines, unreadable = text_lines(page, log)
+            image_infos = page.get_image_info()
+            reason, cells = scan_reason(page, lines, unreadable, image_infos, log)
+        except (ValueError, MemoryError):
+            raise
+        except Exception as error:
+            raise page_failure(index + 1, error) from error
+        scanned = reason is not None
         original = image_url(page, photo=scanned)
         # Scanned pages only (OCR is their expensive part, and their cleaned background is about the size of the
         # original): skip OCR for a page that cannot fit anyway. Native pages are cheap and get the exact check below,
@@ -2849,11 +3662,12 @@ def extract(payload):
             stopped_by = index
             break
         notes = []
-        scan_blocks, scan_masks, protected = [], [], []
+        blocks, scan_masks, protected, redactions = [], [], [], []
         if scanned:
             try:
-                scan_blocks, scan_masks, protected, missed = scan_layout(page, index + 1)
-                native = {"blocks": []}
+                blocks, scan_masks, protected, missed = scan_layout(page, index + 1)
+                if reason == "unreadable":
+                    notes.append(f"Trang {index + 1}: lớp chữ của PDF không đọc được (phông chữ thiếu bảng mã Unicode) nên trang được đọc bằng OCR; hãy đối chiếu với PDF gốc.")
                 notes.append(f"Trang {index + 1}: dùng OCR; hãy đối chiếu công thức với PDF gốc.")
                 notes += missed
             except (ValueError, MemoryError):
@@ -2864,59 +3678,30 @@ def extract(payload):
                 # Only Tesseract failures get the installation advice; anything else is a problem with this page.
                 detail = (str(error) or type(error).__name__).strip().splitlines()[0][:160]
                 raise ValueError(f"Trang {index + 1}: không xử lý được trang scan ({type(error).__name__}: {detail}). Hãy thử lại; nếu vẫn lỗi, hãy bỏ trang này khỏi phạm vi.") from error
-        images = [{"box": rect_list(info["bbox"]), "width": info["width"], "height": info["height"]} for info in page.get_image_info()]
+        else:
+            # Lines without Han (diagram labels, numeric axes, standalone formulas) stay in the background.
+            blocks, redactions, protected, found = native_layout(page, index + 1, lines, log)
+            notes += found
+            if cells >= MISSED_CELLS:
+                notes.append(f"Trang {index + 1}: khoảng {cells} chữ Hán nằm trong hình ảnh hoặc nét vẽ, không có trong lớp chữ của PDF, nên sẽ giữ nguyên trong bản xuất; hãy đối chiếu với PDF gốc.")
+            if unreadable >= 8:
+                notes.append(f"Trang {index + 1}: {unreadable} ký tự của lớp chữ không đọc được (phông chữ thiếu bảng mã Unicode) nên giữ nguyên ảnh gốc, chưa dịch.")
+        images = [{"box": rect_list(info["bbox"]), "width": info["width"], "height": info["height"]} for info in image_infos]
         drawings = [rect_list(rect) for rect in page.cluster_drawings()]
-        blocks = scan_blocks
-        for b in native["blocks"]:
-            if b.get("type") != 0:
-                continue
-            spans = [s for line in b["lines"] for s in line["spans"] if s.get("text", "").strip()]
-            text = "\n".join("".join(s.get("text", "") for s in line["spans"]) for line in b["lines"]).strip()
-            if not text or not HAN.search(text):
-                # Diagram labels, numeric axes and standalone mathematical expressions stay in the background.
-                continue
-            bbox = fitz.Rect(b["bbox"]) & page.rect
-            if bbox.is_empty or bbox.width < 2 or bbox.height < 2:
-                continue
-            if len(text) > 8000:
-                raise ValueError(f"Trang {index + 1} có block quá dài; cần tách trước khi dịch.")
-            identity = f"p{index + 1}-b{len(blocks) + 1}"
-            inlines, lines = [], []
-            for line in b["lines"]:
-                words = []
-                for span in line["spans"]:
-                    value = span.get("text", "")
-                    if not value.strip():
-                        words.append(value)
-                        continue
-                    rect = fitz.Rect(span["bbox"]) & page.rect
-                    if not HAN.search(value):
-                        token = f"@@PDF_INLINE_{len(inlines) + 1}@@"
-                        inlines.append({"token": token, "text": value, "box": rect_list(rect), "width": round(rect.width, 3), "height": round(rect.height, 3), "image": image_url(page, rect, 2.5)})
-                        words.append(token)
-                    else:
-                        words.append(value)
-                lines.append("".join(words))
-            sizes = [float(s.get("size", 10)) for s in spans]
-            font_size = sorted(sizes)[len(sizes) // 2] if sizes else 10
-            color = int(spans[0].get("color", 0)) if spans else 0
-            blocks.append({"id": identity, "text": text, "source": "\n".join(lines).strip(), "box": rect_list(bbox), "fontSize": round(font_size, 3), "bold": any(s.get("flags", 0) & 16 for s in spans), "color": f"#{color:06x}", "inlines": inlines})
         # Make a separate background copy. Preserve both embedded images and vector drawings.
         background_doc = fitz.open()
         background_doc.insert_pdf(subset, from_page=len(subset) - 1, to_page=len(subset) - 1)
         background = background_doc[0]
         for rect, fill in scan_masks:
             background.draw_rect(rect, color=None, fill=fill, overlay=True)
-        for b in native["blocks"]:
-            if b.get("type") != 0 or not HAN.search("".join(s.get("text", "") for l in b["lines"] for s in l["spans"])):
-                continue
-            for line in b["lines"]:
-                for span in line["spans"]:
-                    if span.get("text", "").strip():
-                        r = fitz.Rect(span["bbox"]) & background.rect
-                        background.add_redact_annot(r, fill=(1, 1, 1) if scanned else None)
-        if blocks and not scanned:
-            background.apply_redactions(images=0, graphics=0, text=0)
+        # Only the translated spans leave the background; images and drawings, also those under them, stay. Glyphs
+        # drawn as paths (text_cover) go with their text: the paths each span's box covers are removed with it.
+        for outlined in (True, False):
+            chosen = [rect for rect, shape in redactions if shape == outlined]
+            for rect in chosen:
+                background.add_redact_annot(rect & background.rect, fill=None)
+            if chosen:
+                background.apply_redactions(images=fitz.PDF_REDACT_IMAGE_NONE, graphics=fitz.PDF_REDACT_LINE_ART_REMOVE_IF_COVERED if outlined else fitz.PDF_REDACT_LINE_ART_NONE, text=fitz.PDF_REDACT_TEXT_REMOVE)
         cleaned_image = image_url(background, photo=scanned)
         background_doc.close()
         # The OCR crops of the page go into a few sheets; the blocks keep only their sheet and tab label.
@@ -2949,7 +3734,7 @@ def extract(payload):
         encoded_budget -= page_sizes.pop()
         page_warnings.pop()
         subset.delete_page(-1)
-        stopped_by = dropped["number"] - 1
+        stopped_by, out_of_time = dropped["number"] - 1, False
         selected_pdf = base64.b64encode(subset.tobytes(garbage=3, deflate=True)).decode("ascii")
     if len(selected_pdf) + encoded_budget > TOTAL_BUDGET:
         raise ValueError(f"Trang {pages[0]['number']} cùng PDF gốc vượt giới hạn {TOTAL_BUDGET // 1048576} MB của một lượt. Hãy giảm độ phân giải bản scan rồi thử lại.")
@@ -2965,7 +3750,8 @@ def extract(payload):
         done = [p["number"] for p in pages]
         remaining = [i + 1 for i in indices if i >= stopped_by and i + 1 not in skipped]
         if remaining:
-            notices.append(f"Lượt này xử lý {len(done)}/{len(indices)} trang đã chọn (trang {page_ranges(done)}) vì ảnh của các trang vượt giới hạn dung lượng của một lượt. Hãy dịch tiếp trang {page_ranges(remaining)} ở lượt sau.")
+            cause = "đã dùng hết thời gian xử lý của một lượt" if out_of_time else "ảnh của các trang vượt giới hạn dung lượng của một lượt"
+            notices.append(f"Lượt này xử lý {len(done)}/{len(indices)} trang đã chọn (trang {page_ranges(done)}) vì {cause}. Hãy dịch tiếp trang {page_ranges(remaining)} ở lượt sau.")
     warnings = notices + warnings
     return {"document": {"version": 1, "extractionVersion": EXTRACTION_VERSION, "engine": "pymupdf", "totalPages": total, "pages": pages, "warnings": warnings}, "originalPdfBase64": selected_pdf}
 
@@ -2993,16 +3779,23 @@ def user_message(error):
         return "Dữ liệu gửi tới dịch vụ PDF không hợp lệ."
     first = (str(error) or type(error).__name__).strip().splitlines()[0]
     detail = first[:200]
-    if isinstance(error, getattr(fitz, "FileDataError", ())) or re.search(r"(?i)failed to open|cannot open|no objects found|format error|syntax error", detail):
-        return "Không đọc được PDF: tệp bị hỏng hoặc không đúng định dạng PDF."
     # Our own Vietnamese messages end with the remedy, after a folder path that can be long: keep up to the 400
-    # characters the Worker shows (backend/pdf-layout.js) instead of cutting the advice off.
+    # characters the Worker shows (backend/pdf-layout.js) instead of cutting the advice off. They come first: one may
+    # quote MuPDF's own words about the page it names.
     if isinstance(error, ValueError) and first and not first.isascii():
         return first[:400]
+    if isinstance(error, getattr(fitz, "FileDataError", ())) or DAMAGED.search(detail):
+        return "Không đọc được PDF: tệp bị hỏng hoặc không đúng định dạng PDF."
     return f"Dịch vụ PDF gặp lỗi khi xử lý ({type(error).__name__}: {detail})."
 
 
-if __name__ == "__main__":
+def error_answer(error):
+    """What a failed run writes on stdout: the student's message, and code "memory" when memory ran out (a job too
+    heavy for the service, like a process killed for its memory), so no caller has to read the message for it."""
+    return {"error": user_message(error), **({"code": "memory"} if isinstance(error, MemoryError) else {})}
+
+
+def main():
     try:
         payload = json.load(sys.stdin)
         result = merge(payload) if payload.get("operation") == "merge" else extract(payload)
@@ -3011,6 +3804,10 @@ if __name__ == "__main__":
         # Structured error on stdout: native libraries (MuPDF/Tesseract) write their own lines to stderr, so the
         # engine must never have to dig the real cause out of the end of that stream.
         import traceback
-        sys.stdout.write(json.dumps({"error": user_message(error)}, ensure_ascii=False))
+        sys.stdout.write(json.dumps(error_answer(error), ensure_ascii=False))
         sys.stderr.write("\n" + traceback.format_exc()[-4000:])
         sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()

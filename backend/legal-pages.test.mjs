@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {readFileSync,existsSync,readdirSync} from 'node:fs';
-import {footerHtml,SOURCE_URL} from '../frontend/site-footer.js';
+import {footerHtml,SOURCE_URL,SERVICE_SOURCE_URL} from '../frontend/site-footer.js';
 import {placeholderFiles,PLACEHOLDER} from './deploy.mjs';
 import {TERMS_VERSION} from './reader-auth.js';
 
@@ -39,7 +39,7 @@ test('Privacy page states what the code really stores',()=>{
  const iterations=Number(/PBKDF2_ITERATIONS=(\d+)/u.exec(auth)[1]);assert.match(privacy,new RegExp(`PBKDF2-SHA256 \\(${iterations.toLocaleString('vi-VN')} vòng, chuỗi muối ngẫu nhiên 16 byte\\)`,'u'));
  assert.match(auth,/salt=crypto\.getRandomValues\(new Uint8Array\(16\)\)/u);
  const days=/(?:maxAge|SESSION_MAX_AGE)=(\d+)\*24\*60\*60/u.exec(auth)[1];assert.match(privacy,new RegExp(`hết hạn sau ${days} ngày`,'u'));
- for(const name of ['SESSION_COOKIE','STATE_COOKIE','RETURN_COOKIE'])assert.ok(privacy.includes(new RegExp(`const ${name}='([^']+)'`,'u').exec(auth)[1]),name);
+ for(const name of ['SESSION_COOKIE','STATE_COOKIE','RETURN_COOKIE','DEVICE_COOKIE'])assert.ok(privacy.includes(new RegExp(`const ${name}='([^']+)'`,'u').exec(auth)[1]),name);
  assert.match(auth,/cookie\(STATE_COOKIE,state,600,url\)/u);assert.match(privacy,/tự hết hạn sau 10 phút/u);
  assert.match(auth,/SHA-?256|hashToken/u);assert.match(privacy,/chỉ lưu mã băm SHA-256 của cookie/u);
  const preview=Number(/PREVIEW=(\d+)/u.exec(history)[1]);assert.match(privacy,new RegExp(`${preview.toLocaleString('vi-VN')} ký tự đầu`,'u'));
@@ -69,6 +69,13 @@ test('Privacy page states what the code really stores',()=>{
  // The Gemini key: the page promises it is never stored; no browser storage call may mention it.
  assert.match(privacy,/Khóa Gemini của bạn\. Khóa chỉ nằm trong bộ nhớ của tab đang mở/u);assert.doesNotMatch(read('frontend/study.js'),/(?:localStorage|sessionStorage)[^;]*apiKey/u);
  assert.match(privacy,/Không quảng cáo, không công cụ phân tích/u);assert.match(privacy,/18 tuổi/u);
+ // Error reports (browser-check.js → POST /api/client-error): how many, how long and what, as the page and the server
+ // do it; kept only in the server's log.
+ const beacon=read('frontend/browser-check.js'),[,reports,characters]=/MAX_REPORTS=(\d+),MESSAGE_MAX=(\d+)/u.exec(beacon)||[];
+ assert.match(beacon,/navigator\.sendBeacon\('\/api\/client-error',JSON\.stringify\(body\)\)/u);assert.match(beacon,/page:location\.pathname\.slice/u);
+ assert.match(read('backend/client-error.js'),new RegExp(`message:${characters},`,'u'),'the server keeps what the page sends');
+ assert.match(privacy,new RegExp(`tối đa ${reports} báo lỗi mỗi lần mở trang: nội dung lỗi \\(tối đa ${characters} ký tự\\), tệp mã của Hoa Trí cùng dòng gây lỗi, đường dẫn của trang \\(không kèm phần sau dấu \\? hay #`,'u'));
+ assert.match(privacy,/Báo lỗi không được lưu vào cơ sở dữ liệu: máy chủ chỉ ghi nó vào nhật ký kỹ thuật trên Cloudflare/u);assert.match(privacy,/Nhật ký của Cloudflare, gồm cả báo lỗi của trang: tối đa 7 ngày/u);
 });
 
 // Every daily cap the server applies (rate-limit.js {daily,…,label}), with what it counts per: an account or an address.
@@ -91,7 +98,7 @@ test('Terms page limits match the server',()=>{
  const sentence=/Việc ([^.]+) có hạn mức mỗi ngày, đặt lại lúc 0:00 giờ Việt Nam\./u.exec(terms)?.[1]||'';
  assert.deepEqual(named(sentence),[...new Set(caps.map(cap=>cap.label))].sort(),'Terms §6 names every daily cap of the server, and no other');
  assert.match(translation,/source\.length>8000/u);assert.match(terms,/mỗi lượt dịch văn bản tối đa 8\.000 ký tự/u);
- assert.match(translation,/text\.length>2_000_000/u);assert.match(terms,/tối đa 2 triệu ký tự/u);
+ assert.match(translation,/MAX_STUDY_CHARACTERS=2_000_000\b/u);assert.match(translation,/text\.length>MAX_STUDY_CHARACTERS\b/u);assert.match(terms,/tối đa 2 triệu ký tự/u);
  assert.match(read('backend/rate-limit.js'),/0:00 \(giờ Việt Nam\)/u);assert.match(terms,/đặt lại lúc 0:00 giờ Việt Nam/u);
  for(const name of ['PyMuPDF','GNU AGPL-3.0','pdf.js','CC-CEDICT','CVDICT','hanviet-pinyin-wordlist','Unihan','CC BY-SA 4.0','Tesseract','PaddleOCR'])assert.ok(terms.includes(name),name);
  assert.ok(pages.terms.includes(SOURCE_URL),'source link for the AGPL service');
@@ -102,8 +109,8 @@ test('Privacy page: what the PDF service receives and the daily counts kept per 
  // Range mode posts the whole selected file with its page list, and the Worker forwards that file to the service.
  assert.match(study,/form\.set\('file',selectedFile\);form\.set\('pages',range\)/u);assert.match(layout,/service\(env,'extract',null,\{file,pages:String\(form\.get\('pages'\)/u);
  // A whole-book run cuts each chunk on the device, at most CHUNK_PAGES pages; a refresh sends the pages kept from before.
- const chunk=Number(/CHUNK_PAGES=(\d+)/u.exec(wholeBook)?.[1]);assert.match(wholeBook,/export async function cutChunk\(/u);assert.match(layout,/'selected-pages\.pdf'/u);
- assert.match(layout,/service\(env,'render',\{document,translations\b/u);
+ const chunk=Number(/CHUNK_PAGES=(\d+)/u.exec(wholeBook)?.[1]);assert.match(wholeBook,/export async function cutChunk\(/u);assert.match(layout,/env\.FILES\.get\(assetKey\(reader,assetId,'original\.pdf'\)\)/u);assert.match(layout,/service\(env,'extract',null,\{file:\{stream:\(\)=>original\.body\}/u);
+ assert.match(layout,/service\(env,'render',null,\{stream:jsonStream\(\{translations,title\},'document',stored\.body\)\}\)/u);
  assert.match(privacy,new RegExp(`Để tách chữ, dịch vụ nhận tệp PDF bạn tải lên \\(cả tệp, tối đa 25 MB, kèm danh sách trang cần tách\\); khi Dịch cả quyển, dịch vụ chỉ nhận từng phần tối đa ${chunk} trang được cắt sẵn trên thiết bị của bạn; khi cập nhật bố cục, dịch vụ nhận lại các trang đã tách trước đó\\. Để dựng bản PDF tiếng Việt, dịch vụ nhận ảnh trang, vị trí và chữ của các đoạn đã tách cùng bản dịch\\.`,'u'));
  assert.doesNotMatch(privacy,/nhận các trang PDF bạn chọn/u);
  // Counts kept per account (keyed by its id) are named; the per-IP one is the registration count described above them.
@@ -117,7 +124,8 @@ test('Site footer: legal links, source code, dictionary attribution and the AGPL
  const html=footerHtml();
  for(const href of ['/dieu-khoan','/quyen-rieng-tu','/quyen-rieng-tu#lien-he','/dieu-khoan#giay-phep',SOURCE_URL,'https://creativecommons.org/licenses/by-sa/4.0/deed.vi'])assert.ok(html.includes(`href="${href}"`),href);
  for(const words of ['CC-CEDICT (MDBG)','CVDICT (Phong Phan)','CC BY-SA 4.0','hanviet-pinyin-wordlist (MIT)','Unicode, Inc.','PyMuPDF','GNU AGPL-3.0','services/pdf-layout'])assert.ok(html.includes(words),words);
- assert.match(SOURCE_URL,/^https:\/\/github\.com\/[\w.-]+\/[\w.-]+$/u);
+ assert.match(SOURCE_URL,/^https:\/\/github\.com\/[\w.-]+\/[\w.-]+\/tree\/[\w./-]+[\w-]$/u,'the deployed branch or tag, not the default branch');
+ assert.equal(SERVICE_SOURCE_URL,`${SOURCE_URL}/services/pdf-layout`);assert.ok(html.includes(`href="${SERVICE_SOURCE_URL}"`),'the service link');
  assert.doesNotMatch(html,/<script|\son[a-z]+=/u);
 });
 
@@ -142,4 +150,18 @@ test('Legal pages: header with the two sections, the request link and sign-in; l
  }
  // Sample books are local-only unless the owner publishes one: the terms never claim the library has them.
  assert.match(text(pages.terms),/Nếu Thư viện có sách gắn nhãn “Ví dụ mẫu”/u);assert.doesNotMatch(text(pages.terms),/Sách có nhãn “Ví dụ mẫu” trong Thư viện là/u);
+});
+
+// One constant says where the deployed code is published (site-footer.js SOURCE_URL): every link to the repository on the
+// pages is that address or its services/pdf-layout folder, so moving to another branch or tag is one line.
+test('Every link to the source code is SOURCE_URL (the deployed branch), or its services/pdf-layout folder',()=>{
+ for(const page of ['frontend/dieu-khoan.html','frontend/quyen-rieng-tu.html','frontend/404.html','frontend/index.html']){
+  for(const [,href] of read(page).matchAll(/href="(https:\/\/github\.com\/[^"]*)"/gu))assert.ok([SOURCE_URL,SERVICE_SOURCE_URL].includes(href),`${page}: ${href}`);
+ }
+ const terms=pages.terms;
+ assert.match(terms,new RegExp(`<a href="${SOURCE_URL}" rel="noopener" data-source-link="repo">`,'u'),'§12 links the deployed branch and follows SOURCE_URL');
+ assert.match(terms,new RegExp(`<a href="${SERVICE_SOURCE_URL}" rel="noopener" data-source-link="service"><code>services/pdf-layout</code></a>`,'u'));
+ for(const [,kind] of terms.matchAll(/data-source-link="([^"]*)"/gu))assert.ok(['repo','service'].includes(kind),kind);
+ // site-footer.js sets these links from the constant when the page runs it.
+ assert.match(read('frontend/site-footer.js'),/a\[data-source-link\]/u);
 });

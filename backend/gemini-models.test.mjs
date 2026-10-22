@@ -70,7 +70,7 @@ test('Student model discovery uses the tab key and diagnoses a stale PDF model b
 
 test('Student model discovery stops on bad credentials without attempting generation',async t=>{
  const endpoints=[];t.mock.method(globalThis,'fetch',async(endpoint)=>{endpoints.push(String(endpoint));return Response.json({error:{message:'Private diagnostic must not be exposed'}},{status:403});});
- await assert.rejects(()=>route('models',{apiKey:studentKey,purpose:'pdf'}),/khóa hoặc quyền API \(403\)/);
+ await assert.rejects(()=>route('models',{apiKey:studentKey,purpose:'pdf'}),error=>error.code==='gemini_key'&&error.status===403&&/\(403\): khóa Gemini API đang bị chặn/u.test(error.message)&&!/Private diagnostic/u.test(error.message));
  assert.equal(endpoints.length,1);assert.doesNotMatch(endpoints[0],/generateContent/);
 });
 
@@ -107,6 +107,17 @@ test('404 recovery never upgrades a lite request to regular Flash or Pro',async 
  const endpoints=[];t.mock.method(globalThis,'fetch',async(endpoint)=>{const url=new URL(endpoint);endpoints.push(url.pathname);return url.pathname==='/v1beta/models'?Response.json({models:[catalogModel('gemini-3.6-flash'),catalogModel('gemini-3.8-pro')]}):Response.json({error:{message:'not found'}},{status:404});});
  await assert.rejects(()=>route('translate-blocks',{apiKey:studentKey,model:'gemini-2.5-flash-lite',blocks}),/không khả dụng/);
  assert.deepEqual(endpoints,['/v1beta/models/gemini-2.5-flash-lite:generateContent','/v1beta/models']);
+});
+
+test('A version the key cannot use names the real control in Xưởng dịch; the admin pipeline is pointed to its own setting',async t=>{
+ const html=(await import('node:fs')).readFileSync(new URL('../frontend/study.html',import.meta.url),'utf8');
+ const control=html.match(/<button id="check-gemini-model"[^>]*>([^<]+)<\/button>/u)?.[1],advanced=html.match(/<summary>(Nâng cao)\b/u)?.[1];
+ assert.equal(control,'Kiểm tra phiên bản dùng được với khóa');assert.equal(advanced,'Nâng cao');
+ t.mock.method(globalThis,'fetch',async endpoint=>new URL(endpoint).pathname==='/v1beta/models'?Response.json({models:[]}):Response.json({error:{message:'not found'}},{status:404}));
+ let error=null;try{await (await route('translate-blocks',{apiKey:studentKey,model:'gemini-2.5-flash-lite',blocks}));}catch(caught){error=caught;}
+ assert.equal(error?.code,'gemini_model');assert.ok(error.message.includes(`“${advanced}”`)&&error.message.includes(`“${control}”`),error.message);
+ assert.doesNotMatch(error.message,/Kiểm tra model của khóa|Gemini từ chối|Khóa Gemini/u);
+ await assert.rejects(()=>generate({GEMINI_API_KEY:serverKey,GEMINI_MODEL:'gemini-2.5-flash'},[{text:'data'}],'Translate'),error=>error.code==='gemini_model'&&/GEMINI_MODEL/u.test(error.message)&&!error.message.includes(control));
 });
 
 test('Generation authentication errors do not trigger model discovery or any retry',async t=>{

@@ -4,9 +4,12 @@
 FROM node:22.23.3-bookworm-slim
 ENV NODE_ENV=production PYTHONDONTWRITEBYTECODE=1
 # MuPDF inside the PyMuPDF wheel has its own Tesseract and only needs language data (below): no tesseract-ocr packages.
-# Debian versions stay unpinned: the archive drops superseded versions, and a pinned build would then fail.
+# Debian versions stay unpinned: the archive drops superseded versions, and a pinned build would then fail. A plain
+# rebuild reuses this layer from the cache, so security updates only arrive with --pull --no-cache (README A.5).
+# Fonts: exports and the preview set Vietnamese in Liberation Serif, which has the widths of the Times New Roman every
+# fit was tuned with (engine.mjs fontPath); DejaVu Serif fills in symbols it lacks; Noto CJK draws Chinese.
 # hadolint ignore=DL3008
-RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates python3 python3-venv chromium fonts-dejavu-core fonts-noto-cjk && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates python3 python3-venv chromium fonts-liberation2 fonts-dejavu-core fonts-noto-cjk && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 COPY package.json package-lock.json ./
 # Runtime packages without install scripts: the service only needs puppeteer-core and the OCR language data.
@@ -21,9 +24,12 @@ COPY frontend/math-text.js ./frontend/math-text.js
 # tesseract-ocr-* packages ship different models, so OCR in production would not be the OCR that was tested.
 RUN mkdir /tmp/tessdata && for lang in chi_sim eng; do gzip -dc "node_modules/@tesseract.js-data/$lang/4.0.0_best_int/$lang.traineddata.gz" > "/tmp/tessdata/$lang.traineddata"; done && node services/pdf-layout/prepare-ocr.mjs --from /tmp/tessdata --to /opt/tessdata && rm -rf /tmp/tessdata
 ENV PDF_PYTHON=/opt/pdf-venv/bin/python CHROMIUM_EXECUTABLE_PATH=/usr/bin/chromium PDF_LAYOUT_HOST=0.0.0.0 PDF_CHROMIUM_NO_SANDBOX=1 TESSDATA_PREFIX=/opt/tessdata
+# The build stops here if exports would not use Liberation Serif (a base image without fonts-liberation2).
+RUN node -e "import('./services/pdf-layout/engine.mjs').then(({fontPath})=>{const path=fontPath();console.log('PDF font: '+path);if(!path.endsWith('/LiberationSerif-Regular.ttf'))process.exit(1);})"
 # Uploaded PDFs are parsed by native code: run without root (Chromium still needs --no-sandbox inside a container).
 USER node
 EXPOSE 8091
-# /health needs the token too, so the check runs inside the container with the container's own environment.
-HEALTHCHECK --interval=15s --timeout=10s --start-period=30s --retries=3 CMD ["node","-e","fetch('http://127.0.0.1:'+(process.env.PORT||8091)+'/health',{headers:{authorization:'Bearer '+process.env.PDF_LAYOUT_SERVICE_TOKEN}}).then(r=>process.exit(r.ok?0:1),()=>process.exit(1))"]
+# /health needs the token too, so the check runs inside the container with the container's own environment. After
+# 4 failures in a row it stops the service so that the restart policy starts a fresh one (healthcheck.mjs).
+HEALTHCHECK --interval=15s --timeout=10s --start-period=30s --retries=3 CMD ["node","services/pdf-layout/healthcheck.mjs","/health","PDF_LAYOUT_SERVICE_TOKEN"]
 CMD ["node", "services/pdf-layout/server.mjs"]

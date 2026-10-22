@@ -20,7 +20,7 @@ class D1Statement{
 class MemoryFiles{
  constructor(){this.values=new Map();}
  async put(key,value){this.values.set(key,value);}
- async get(key){return this.values.has(key)?{text:async()=>String(this.values.get(key)),json:async()=>JSON.parse(this.values.get(key))}:null;}
+ async get(key){return this.values.has(key)?{text:async()=>String(this.values.get(key)),json:async()=>JSON.parse(this.values.get(key)),arrayBuffer:async()=>new TextEncoder().encode(String(this.values.get(key))).buffer}:null;}
  async delete(keys){for(const key of [keys].flat())this.values.delete(key);}
  async list({prefix='',cursor=''}={}){const keys=[...this.values.keys()].filter(key=>key.startsWith(prefix)&&key>cursor).sort(),page=keys.slice(0,2);return {objects:page.map(key=>({key})),truncated:keys.length>2,cursor:page.at(-1)};}
 }
@@ -102,6 +102,37 @@ test('A Google-only account confirms with its session, and an account is not del
  sqlite.prepare("UPDATE jobs SET lease_until=0 WHERE id='job-private'").run();assert.equal(await deleteAccount(env,lan),'deleted');assert.equal(await deleteAccount(env,lan),'missing');
 });
 
+test('Deleting an account removes its whole-book runs itself, also where foreign keys are not enforced',async t=>{
+ const {sqlite,env,lan}=await environment(t);
+ const run=(id,user,story)=>sqlite.prepare('INSERT INTO book_jobs(id,user_id,source_sha256,filename,title,story_id,total_pages,page_states,chunk_size,domain,mode,glossary,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)').run(id,user,SHA,'sach-rieng.pdf','Sách riêng của Lan',story,3,'...',10,'general','faithful','{"向量":"vectơ"}','2026-10-22T00:00:00Z','2026-10-22T00:00:00Z');
+ run('run-lan',lan,'book-lan');run('run-other','user-other','book-other');
+ // A run keeps the title, file name and glossary of a private book. D1 enforces foreign keys today; the deletion must
+ // not depend on it (a later migration could rebuild the table without one).
+ sqlite.exec('PRAGMA foreign_keys=OFF');
+ assert.equal(await deleteAccount(env,lan),'deleted');
+ assert.deepEqual(sqlite.prepare('SELECT id FROM book_jobs').all().map(row=>row.id),['run-other']);
+});
+
+test('Deleting an account removes the wrong-password counts kept for it; a network\'s count stays',async t=>{
+ const {sqlite,env,lan}=await environment(t),{failureKey}=await import('./reader-auth.js');
+ for(const name of [`password:${lan}`,'login-email:lan@example.test','login-network:203.0.113.9','login-email:user-minh@example.test'])sqlite.prepare('INSERT INTO auth_failures(key,level,updated_at,locked_until) VALUES(?,?,?,0)').run(await failureKey(name),3,Date.now());
+ assert.equal(await deleteAccount(env,lan),'deleted');
+ // Minh signs in with Google only: passwords typed for her address were counted under it too.
+ assert.equal(await deleteAccount(env,'user-minh'),'deleted');
+ assert.deepEqual(sqlite.prepare('SELECT key FROM auth_failures').all().map(row=>row.key),[await failureKey('login-network:203.0.113.9')]);
+});
+
+test('Deleting an account removes the daily counts kept under its id, the new-history cap included; others stay',async t=>{
+ const {sqlite,env,lan}=await environment(t);
+ // Every daily cap counted per account (rate-limit.js daily keys): requests, PDF extracts and exports, kept originals and
+ // new history items (study-history.js 'history:<id>').
+ // Lan's registration was counted for her network ('register:local' in tests): that count is not hers.
+ const own=['upload:','pdf-extract:','pdf-render:','pdf-source:','history:'].map(prefix=>prefix+lan),kept=['history:user-other','register:203.0.113.9','register:local'];
+ for(const key of [...own,...kept])sqlite.prepare('INSERT OR REPLACE INTO rate_limits(key,window_start,count) VALUES(?,?,?)').run(key,20000,3);
+ assert.equal(await deleteAccount(env,lan),'deleted');
+ assert.deepEqual(sqlite.prepare('SELECT key FROM rate_limits ORDER BY key').all().map(row=>row.key),kept);
+});
+
 test('An admin deletes an account by id; only the admin can',async t=>{
  const {sqlite,env}=await environment(t);
  const admin=(id,token=ADMIN)=>worker.fetch(new Request(`${origin}/api/users/${id}`,{method:'DELETE',headers:{Authorization:`Bearer ${token}`,Origin:origin}}),env,{});
@@ -150,7 +181,8 @@ const PNG='data:image/png;base64,AA==',SERVICE={PDF_LAYOUT_SERVICE_URL:'https://
 const pdfDocument=number=>({version:1,totalPages:3,pages:[{number,width:600,height:800,background:PNG,original:PNG,blocks:[{id:`p${number}-b0`,source:'定义向量。',box:[20,20,200,80],fontSize:12}]}]});
 const lanKeys=(env,lan)=>[...env.FILES.values.keys()].filter(key=>key.startsWith(`study/${lan}/`));
 
-test('An extraction or export still running when the account is deleted removes what it writes afterwards',async t=>{
+// A request that fails before it reaches the gate would leave the test waiting: the timeout turns that into a failure.
+test('An extraction or export still running when the account is deleted removes what it writes afterwards',{timeout:60000},async t=>{
  const {sqlite,env,lan,cookie}=await environment(t);Object.assign(env,SERVICE);
  const call=(path,init)=>worker.fetch(new Request(origin+path,{...init,headers:{Origin:origin,Cookie:cookie,...init.headers}}),env,{});
  let step=gated();
@@ -172,7 +204,7 @@ test('An extraction or export still running when the account is deleted removes 
  const exported=await exporting;assert.equal(exported.status,410);assert.deepEqual(lanKeys(again.env,again.lan),[]);
 });
 
-test('A whole original still uploading when the account is deleted is removed once stored',async t=>{
+test('A whole original still uploading when the account is deleted is removed once stored',{timeout:60000},async t=>{
  const {env,lan,cookie}=await environment(t),bytes=new TextEncoder().encode('%PDF-1.7\nwhole book\n%%EOF'),sha=[...new Uint8Array(await crypto.subtle.digest('SHA-256',bytes))].map(x=>x.toString(16).padStart(2,'0')).join('');
  const step=gated(),put=env.FILES.put.bind(env.FILES);env.FILES.put=async(key,value,options)=>{if(key.includes('/sources/')){step.entered();await step.gate;}return put(key,value,options);};
  const uploading=worker.fetch(new Request(`${origin}/api/my/study/sources/${sha}`,{method:'PUT',headers:{Origin:origin,Cookie:cookie,'Content-Type':'application/pdf','Content-Length':String(bytes.length),'X-PDF-Pages':'3','X-Source-Filename':'sach.pdf'},body:bytes}),env,{});

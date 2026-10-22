@@ -40,12 +40,16 @@ async function open(path,{width=390,height=844,api=()=>undefined}={}){
  return {context,page,errors,sent,csp:()=>page.evaluate(()=>globalThis.__csp||[]),sideways:()=>page.evaluate(()=>document.documentElement.scrollWidth-document.documentElement.clientWidth)};
 }
 
-test('Password reset link at 390 px under the CSP: the token leaves the address and is traded, errors stay in the form, success confirms',{skip},async()=>{
+test('Password reset link at 390 px under the CSP: the token leaves the address, is only checked until "Tiếp tục", errors stay in the form, success confirms',{skip},async()=>{
  let signedIn=false;
- const {context,page,errors,sent,csp,sideways}=await open(`/#dat-lai-mat-khau?token=${TOKEN}`,{api:(method,path)=>path==='/api/me'?[200,signedIn?ME_IN:ME_OUT]:path==='/api/auth/password-reset/open'?[200,{token:FRESH}]:path==='/api/auth/password-reset'?(signedIn=true,[200,{ok:true}]):undefined});
- await page.waitForSelector('#password-reset-form');
- assert.deepEqual(sent.map(item=>[item.path,JSON.parse(item.body)]),[['/api/auth/password-reset/open',{token:TOKEN}]],'the link is opened once');sent.length=0;
+ const {context,page,errors,sent,csp,sideways}=await open(`/#dat-lai-mat-khau?token=${TOKEN}`,{api:(method,path)=>path==='/api/me'?[200,signedIn?ME_IN:ME_OUT]:path==='/api/auth/password-reset/check'?[200,{ok:true,expiresAt:'2026-10-22T08:30:00.000Z'}]:path==='/api/auth/password-reset/open'?[200,{token:FRESH}]:path==='/api/auth/password-reset'?(signedIn=true,[200,{ok:true}]):undefined});
+ // A chat app or mail scanner that opens the link runs this page too: it only checks the link, which stays usable.
+ await page.waitForSelector('#reset-continue');
+ assert.deepEqual(sent.map(item=>[item.path,JSON.parse(item.body)]),[['/api/auth/password-reset/check',{token:TOKEN}]],'only checked on load');sent.length=0;
  assert.equal(await page.evaluate(()=>location.href),`${ORIGIN}/#dat-lai-mat-khau`,'no token in the address bar');
+ await page.click('#reset-continue');await page.waitForSelector('#password-reset-form');
+ assert.deepEqual(sent.map(item=>[item.path,JSON.parse(item.body)]),[['/api/auth/password-reset/open',{token:TOKEN}]],'traded once, on the click');sent.length=0;
+ assert.equal(await page.evaluate(()=>document.activeElement.tagName),'H1');
  await page.fill('[name=password]','mat-khau-moi-123');await page.fill('[name=confirm]','mat-khau-moi-124');await page.click('#password-reset-form [type=submit]');
  await page.waitForSelector('#password-reset-error:not([hidden])');
  assert.deepEqual(await page.evaluate(()=>({focus:document.activeElement.id,invalid:document.querySelector('[name=confirm]').getAttribute('aria-invalid'),visible:document.querySelector('#password-reset-error').getBoundingClientRect().height>0})),{focus:'password-reset-error',invalid:'true',visible:true});
@@ -91,9 +95,24 @@ test('Admin at 1440 px: "Tạo link đặt lại mật khẩu" shows the full li
  assert.match(await page.textContent('#modal'),/Liên kết chỉ hiện một lần[\s\S]*hết hạn lúc \d\d:\d\d 22\/10\/2026/u);
  await page.click('#copy-reset-link');await page.waitForFunction(()=>document.querySelector('#reset-link-status').textContent.length>0);
  assert.equal(await page.evaluate(()=>navigator.clipboard.readText()),`${ORIGIN}/#dat-lai-mat-khau?token=${TOKEN}`);
+ // The focus is back as the dialog closes, not one task later on its close event: until then it sat on the hidden
+ // dialog's button (the opener lost it while disabled during the request, so the browser itself restores nothing).
+ await page.evaluate(()=>{const dialog=document.querySelector('#modal');new MutationObserver((list,observer)=>{if(dialog.open)return;observer.disconnect();globalThis.__focusAtClose=document.activeElement?.dataset?.userReset||document.activeElement?.tagName;}).observe(dialog,{attributes:true,attributeFilter:['open']});});
  await page.click('#modal .primary');await page.waitForFunction(()=>!document.querySelector('#modal').open);
+ assert.equal(await page.evaluate(()=>globalThis.__focusAtClose),'u1','the focus is on the button when the dialog closes');
  assert.equal(await page.evaluate(()=>document.activeElement.dataset.userReset),'u1','the focus is back on the button');
  assert.deepEqual(await csp(),[]);assert.deepEqual(errors,[]);
+ await context.close();
+});
+
+test('Admin on a phone (390 px): translation requests waiting are counted on "Yêu cầu dịch", for a screen reader too, and in the title',{skip},async()=>{
+ const requests=[{id:'r1',title:'Sử ký',status:'pending',visibility:'private',notes:'',reader_name:'Lan'},{id:'r2',title:'Luận ngữ',status:'pending',visibility:'public',notes:'',reader_name:'Minh'},{id:'r3',title:'Mạnh Tử',status:'done',visibility:'private',notes:''}];
+ const {context,page,errors,csp,sideways}=await open('/admin#translate',{api:(method,path)=>path==='/api/requests'?[200,requests]:undefined});
+ await page.waitForSelector('.sidebar [data-route="requests"] .count',{state:'attached'});
+ const badge=await page.evaluate(()=>{const button=document.querySelector('.sidebar [data-route="requests"]'),count=button.querySelector('.count'),box=count.getBoundingClientRect(),own=button.getBoundingClientRect();return {text:count.textContent,shown:box.width>0&&box.height>0,inside:box.left>=own.left&&box.right<=own.right+1,title:document.title};});
+ assert.deepEqual(badge,{text:'2',shown:true,inside:true,title:'(2) Hoa Trí — Quản trị'});
+ assert.equal(await page.getByRole('button',{name:'Yêu cầu dịch (2 yêu cầu mới)',exact:true}).count(),1,'its name says what the number means');
+ assert.equal(await sideways(),0);assert.deepEqual(await csp(),[]);assert.deepEqual(errors,[]);
  await context.close();
 });
 
@@ -102,12 +121,21 @@ test('A request started signed out survives a reload and the Google round trip (
  const {context,page,errors,csp}=await open('/',{width:1440,height:900,api:(method,path)=>path==='/api/me'?[200,signedIn?ME_IN:ME_OUT]:undefined});
  await page.waitForSelector('#home-title');await page.click('#reader-request');await page.waitForSelector('#reader-login-form');
  const google=()=>page.getAttribute('#google-login','href');
- assert.equal(await google(),'/api/auth/google/start?accept_terms=1&return_to=%2F%23yeu-cau');
+ assert.equal(await google(),'/api/auth/google/start?return_to=%2F%23yeu-cau','no consent in the link before a box is ticked');
+ await page.check('#google-terms-row input');assert.equal(await google(),'/api/auth/google/start?accept_terms=1&return_to=%2F%23yeu-cau');
  await page.reload();await page.waitForSelector('#reader-login-form');
- assert.equal(await google(),'/api/auth/google/start?accept_terms=1&return_to=%2F%23yeu-cau','kept across a reload');
+ assert.equal(await google(),'/api/auth/google/start?return_to=%2F%23yeu-cau','kept across a reload');
  signedIn=true;await page.goto('about:blank');await page.goto(`${ORIGIN}/#yeu-cau`);
  await page.waitForSelector('#modal[open] [name=title]');
  assert.equal(await page.evaluate(()=>sessionStorage.getItem('hoa-tri-request-draft')),null,'used once');
  assert.deepEqual(await csp(),[]);assert.deepEqual(errors,[]);
+ await context.close();
+});
+
+test('A Google sign-in that came back with a reason (#account?loi=…): the reason is read first, the address is clean, the way back is kept',{skip},async()=>{
+ const {context,page,errors,csp,sideways}=await open('/#account?loi=google_cancelled&sau=xuong-dich');
+ await page.waitForSelector('.auth-failure');
+ assert.deepEqual(await page.evaluate(()=>({hash:location.hash,focus:document.activeElement.className,text:document.querySelector('.auth-failure').textContent,role:document.querySelector('.auth-failure').getAttribute('role'),google:document.querySelector('#google-login').getAttribute('href')})),{hash:'#account',focus:'form-error auth-failure',text:'Bạn đã hủy đăng nhập bằng Google.',role:'alert',google:'/api/auth/google/start?return_to=%2Fstudy'});
+ assert.equal(await sideways(),0);assert.deepEqual(await csp(),[]);assert.deepEqual(errors,[]);
  await context.close();
 });

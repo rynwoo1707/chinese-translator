@@ -8,11 +8,26 @@ services:
       context: ../..
       dockerfile: services/pdf-layout/Dockerfile
     image: hoa-tri-pdf-layout:local
+    # Started again whenever it stops: a crash, an out-of-memory kill, a reboot, or the health check below.
     restart: unless-stopped
-    # tini reaps the Chromium and Python children of every job.
+    # tini reaps the Chromium and Python children of every job, and passes the health check's stop on to the service.
     init: true
     environment:
       PDF_LAYOUT_SERVICE_TOKEN: ${PDF_LAYOUT_SERVICE_TOKEN:?Đặt PDF_LAYOUT_SERVICE_TOKEN trong .env (openssl rand -hex 32)}
+      # Jobs at once; keep the Worker's PDF_LAYOUT_SLOTS (wrangler.jsonc vars) at the same number.
+      PDF_LAYOUT_JOBS: ${PDF_LAYOUT_JOBS:-2}
+      PDF_HEALTH_RESTART_AFTER: ${PDF_HEALTH_RESTART_AFTER:-4}
+      # Seconds one extraction may use (extract.py): the pages done by then are answered and the rest left for the next
+      # run. Keep it below the 240 s at which the engine stops the Python process.
+      PDF_EXTRACT_SECONDS: ${PDF_EXTRACT_SECONDS:-170}
+    # GET /health with the token every 15 s. Docker itself never restarts a container that is only unhealthy, so after 4
+    # failures in a row (about a minute) healthcheck.mjs stops the service and restart: unless-stopped starts it again.
+    healthcheck:
+      test: ["CMD", "node", "services/pdf-layout/healthcheck.mjs", "/health", "PDF_LAYOUT_SERVICE_TOKEN"]
+      interval: 15s
+      timeout: 10s
+      start_period: 30s
+      retries: 3
     # Reachable only by Caddy on the compose network: no published port.
     expose:
       - "8091"
@@ -31,7 +46,6 @@ services:
           cpus: "${PDF_LAYOUT_CPUS:-2}"
           memory: ${PDF_LAYOUT_MEMORY:-3g}
           pids: 1024
-    # Health: the HEALTHCHECK of services/pdf-layout/Dockerfile (GET /health with the token, every 15 s).
     logging:
       driver: local
       options:

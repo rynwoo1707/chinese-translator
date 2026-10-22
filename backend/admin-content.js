@@ -1,4 +1,4 @@
-import mammoth from 'mammoth/mammoth.browser.js';
+import {extractDocxText} from './document-limits.js';
 import {chapterPosition,chapterSource} from './library-books.js';
 const json=(body,status=200)=>Response.json(body,{status});
 const required=(value,max)=>{if(typeof value!=='string'||!value.trim()||value.length>max)throw new Error('Nội dung trống hoặc vượt giới hạn.');return value.trim();};
@@ -11,7 +11,7 @@ export async function readPublication(file){
  }
  let content;
  if(ext==='txt')content=new TextDecoder('utf-8',{fatal:true}).decode(bytes);
- else if(ext==='docx')content=(await mammoth.extractRawText({arrayBuffer:bytes})).value;
+ else if(ext==='docx')content=await extractDocxText(bytes);
  else throw new Error('Hỗ trợ TXT (UTF-8), DOCX và PDF.');
  return {mime:'text/plain',content:required(content,500000),bytes};
 }

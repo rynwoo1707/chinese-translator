@@ -69,17 +69,18 @@ test('In domain mode Google creates accounts only for verified school addresses,
  const {sqlite,env}=environment(t,{GOOGLE_CLIENT_ID:'client',GOOGLE_CLIENT_SECRET:'secret',REGISTRATION_MODE:'domain',ALLOWED_EMAIL_DOMAINS:'truong.edu.vn'});
  const state=new URL((await worker.fetch(new Request(origin+'/api/auth/google/start?accept_terms=1'),env,{})).headers.get('Location')).searchParams.get('state');
  let profile;t.mock.method(globalThis,'fetch',async url=>String(url).startsWith('https://oauth2.googleapis.com/token')?Response.json({access_token:'test-access'}):Response.json(profile));
- const callback=async(p,vars={})=>{profile=p;const response=await worker.fetch(new Request(`${origin}/api/auth/google/callback?state=${state}&code=test-code`,{headers:{Cookie:`cat_hien_oauth_state=${state}`}}),{...env,...vars},{});return [response.status,response.status===302?null:(await response.json()).error];};
+ // A sign-in that cannot finish goes back to the account page with a code the page explains (#account?loi=<code>).
+ const callback=async(p,vars={})=>{profile=p;const response=await worker.fetch(new Request(`${origin}/api/auth/google/callback?state=${state}&code=test-code`,{headers:{Cookie:`cat_hien_oauth_state=${state}`}}),{...env,...vars},{});return [response.status,/#account\?loi=([a-z_]+)$/u.exec(response.headers.get('Location'))?.[1]||null];};
  const users=()=>sqlite.prepare('SELECT COUNT(*) AS count FROM reader_users').get().count;
- assert.deepEqual(await callback({sub:'g-1',email:'hieutruong@truong.edu.vn',email_verified:false}),[403,'Tài khoản Google cần có email đã xác minh.']);
- assert.deepEqual(await callback({sub:'g-2',email:'x@truong.edu.vn.evil.example',email_verified:true}),[403,'Chỉ email thuộc truong.edu.vn được tạo tài khoản.']);
+ assert.deepEqual(await callback({sub:'g-1',email:'hieutruong@truong.edu.vn',email_verified:false}),[302,'google_unverified']);
+ assert.deepEqual(await callback({sub:'g-2',email:'x@truong.edu.vn.evil.example',email_verified:true}),[302,'registration_domain']);
  // Checked whole: cut to 320 characters, this address would end in the school's domain.
- assert.deepEqual(await callback({sub:'g-3',email:`x@${'a'.repeat(304)}.truong.edu.vn.evil.example`,email_verified:true}),[403,'Email của tài khoản Google không hợp lệ.']);
+ assert.deepEqual(await callback({sub:'g-3',email:`x@${'a'.repeat(304)}.truong.edu.vn.evil.example`,email_verified:true}),[302,'google_email_invalid']);
  assert.equal(users(),0);
  // REQUIRE_GOOGLE_WORKSPACE: a personal Google account made with a school address is not enough; hd names the school.
- const workspace={REQUIRE_GOOGLE_WORKSPACE:'1'},refused='Chỉ tài khoản Google do truong.edu.vn quản lý được tạo tài khoản.';
- assert.deepEqual(await callback({sub:'g-4',email:'an@truong.edu.vn',email_verified:true},workspace),[403,refused]);
- assert.deepEqual(await callback({sub:'g-4',email:'an@truong.edu.vn',email_verified:true,hd:'truong.edu.vn.evil.example'},workspace),[403,refused]);
+ const workspace={REQUIRE_GOOGLE_WORKSPACE:'1'},refused='registration_workspace';
+ assert.deepEqual(await callback({sub:'g-4',email:'an@truong.edu.vn',email_verified:true},workspace),[302,refused]);
+ assert.deepEqual(await callback({sub:'g-4',email:'an@truong.edu.vn',email_verified:true,hd:'truong.edu.vn.evil.example'},workspace),[302,refused]);
  assert.deepEqual(await callback({sub:'g-4',email:'an@truong.edu.vn',email_verified:true,hd:'truong.edu.vn'},workspace),[302,null]);
  assert.deepEqual(await callback({sub:'g-5',email:'binh@hs.truong.edu.vn',email_verified:true}),[302,null],'without the option a verified school address is enough');
  assert.deepEqual(sqlite.prepare('SELECT email FROM reader_users ORDER BY email').all().map(row=>row.email),['an@truong.edu.vn','binh@hs.truong.edu.vn']);
@@ -95,15 +96,16 @@ test('The daily registration cap counts an IPv6 network by its /64 and an IPv4 c
 test('Google sign-in needs the terms ticked, creates new accounts only where registration allows, and records consent',async t=>{
  const {sqlite,env}=environment(t,{GOOGLE_CLIENT_ID:'client',GOOGLE_CLIENT_SECRET:'secret'});
  const start=query=>worker.fetch(new Request(origin+'/api/auth/google/start'+query),env,{});
- const unticked=await start('');assert.equal(unticked.status,400);assert.equal((await unticked.json()).code,'terms_required');
+ const unticked=await start('');assert.equal(unticked.status,302);assert.equal(unticked.headers.get('Location'),origin+'/#account?loi=terms_required');
  const started=await start('?accept_terms=1&return_to=%2Fstudy.html');assert.equal(started.status,302);
  const state=new URL(started.headers.get('Location')).searchParams.get('state');
  // Google is played by a test double: no request leaves the machine.
  let profile;t.mock.method(globalThis,'fetch',async url=>String(url).startsWith('https://oauth2.googleapis.com/token')?Response.json({access_token:'test-access'}):Response.json(profile));
  const callback=vars=>worker.fetch(new Request(`${origin}/api/auth/google/callback?state=${state}&code=test-code`,{headers:{Cookie:`cat_hien_oauth_state=${state}; cat_hien_oauth_return=%2Fstudy.html`}}),{...env,...vars},{});
  profile={sub:'google-1',email:'Minh@Gmail.com',email_verified:true,name:'Minh',picture:''};
- const closed=await callback({REGISTRATION_MODE:'closed'});assert.equal(closed.status,403);assert.equal((await closed.json()).code,'registration_closed');assert.equal(sqlite.prepare('SELECT COUNT(*) AS count FROM reader_users').get().count,0);
- const outside=await callback({REGISTRATION_MODE:'domain',ALLOWED_EMAIL_DOMAINS:'truong.edu.vn'});assert.equal(outside.status,403);
+ // Refusals go back to the account page with their code, and with where the student was going (sau=xuong-dich).
+ const closed=await callback({REGISTRATION_MODE:'closed'});assert.equal(closed.status,302);assert.equal(closed.headers.get('Location'),origin+'/#account?loi=registration_closed&sau=xuong-dich');assert.equal(sqlite.prepare('SELECT COUNT(*) AS count FROM reader_users').get().count,0);
+ const outside=await callback({REGISTRATION_MODE:'domain',ALLOWED_EMAIL_DOMAINS:'truong.edu.vn'});assert.equal(outside.headers.get('Location'),origin+'/#account?loi=registration_domain&sau=xuong-dich');
  const created=await callback({});assert.equal(created.status,302);assert.equal(created.headers.get('Location'),origin+'/study.html');
  const user=sqlite.prepare('SELECT id,terms_version,terms_accepted_at FROM reader_users WHERE google_sub=?').get('google-1');assert.equal(user.terms_version,TERMS_VERSION);assert.ok(user.terms_accepted_at);
  assert.equal((await me(env,sessionCookie(created))).user.provider,'google');
@@ -111,7 +113,8 @@ test('Google sign-in needs the terms ticked, creates new accounts only where reg
  sqlite.prepare('UPDATE reader_users SET terms_version=NULL,terms_accepted_at=NULL WHERE id=?').run(user.id);
  assert.equal((await callback({REGISTRATION_MODE:'closed'})).status,302);assert.equal(sqlite.prepare('SELECT terms_version FROM reader_users WHERE id=?').get(user.id).terms_version,TERMS_VERSION);
  sqlite.prepare('UPDATE reader_users SET disabled_at=CURRENT_TIMESTAMP WHERE id=?').run(user.id);
- const locked=await callback({});assert.equal(locked.status,403);assert.deepEqual(await locked.json(),{error:'Tài khoản này đang bị tạm khóa. Hãy liên hệ quản trị viên.',code:'account_disabled'});
+ const locked=await callback({});assert.equal(locked.status,302);assert.equal(locked.headers.get('Location'),origin+'/#account?loi=account_disabled&sau=xuong-dich');
+ assert.equal(locked.headers.getSetCookie().some(line=>line.startsWith('cat_hien_session=')),false,'a locked account gets no session');
 });
 
 test('A locked account cannot log in or use its sessions until an admin unlocks it',async t=>{

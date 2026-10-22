@@ -4,6 +4,7 @@
 // glossary) lives on the server, so a reload or another day continues where it stopped; the Gemini key stays in the tab.
 // pdf.js and pdf-lib load only when used; everything else here also runs under node --test.
 import {openPdf} from './cover-detect.js';
+import {keyRefused} from './gemini-key.js';
 
 export const PAGE_STATES=Object.freeze({pending:'.',done:'d',blank:'b',cover:'c',skipped:'s',failed:'f'});
 const NAMES=Object.fromEntries(Object.entries(PAGE_STATES).map(([name,char])=>[char,name]));
@@ -108,18 +109,42 @@ export function formatTokens(value){
 
 // ---- Errors: what to do with a failed request ----
 // Gemini quota errors reach the browser as 429 {code:'quota_minute'|'quota_day'|'quota', retryAfter}; a refused key as
-// {code:'gemini_key'}; Hoa Trí's own limiter as {code:'rate_limited', retryAfter}. Older servers sent the same cases as
-// plain messages, which are recognised too.
+// {code:'gemini_key'}, and only that code means the key (backend/gemini-errors.js); Gemini not serving the place the
+// server called from as 503 {code:'gemini_location', retryAfter}; Hoa Trí's own limiter as {code:'rate_limited',
+// retryAfter}. Older servers sent the same cases as plain messages, which are recognised when no code came. The PDF
+// service's (backend/pdf-layout.js): 503 pdf_service_busy with retryAfter (every place of the service is taken), 503
+// pdf_unavailable (out of reach), 413 pdf_timeout, pdf_memory, pdf_too_large or pdf_crash (this chunk is too heavy for
+// one job), 429 pdf_busy (this account's other PDF call). Saving a part (backend/study-history.js): 413 history_full or
+// too_many_parts, 409 history_conflict (another tab or device saved that part since).
 const BACKOFF=[5,10,20,40,60,60];
+// A busy PDF service is shared by the whole site: a class running books at once can keep it full for a while, so a run
+// waits about half an hour (30 tries, at most a minute apart) before it pauses.
+export const SERVICE_BUSY_RETRIES=30;
+const HEAVY_PDF=new Set(['pdf_timeout','pdf_memory','pdf_too_large']);
 export function classifyError(error,step=''){
  const status=error?.status,data=error?.data||{},code=String(data.code||error?.code||''),message=String(error?.message||''),after=Number(data.retryAfter??error?.retryAfter);
  const retryAfter=Number.isFinite(after)&&after>0?after:null;
  if(code==='quota_day'||/hết hạn mức (?:yêu cầu )?trong ngày/u.test(message))return {reason:'quota_day'};
  if(code==='quota_minute'||code==='quota'&&retryAfter!==null&&retryAfter<=300||!code&&/Gemini trả lỗi 429/u.test(message))return {reason:'quota_minute',wait:Math.min(300,Math.max(5,retryAfter??60)),retries:20};
  if(code==='quota')return {reason:'quota'};
- if(code==='gemini_key'||/Gemini từ chối yêu cầu \(4\d\d\)|Khóa Gemini API không hợp lệ|Khóa hoặc model Gemini/u.test(message))return {reason:'gemini_key'};
+ if(keyRefused(error))return {reason:'gemini_key'};
+ // The key is fine: Google does not serve the place the server called from. A later call may run from elsewhere.
+ if(code==='gemini_location')return {reason:'gemini_location',wait:Math.min(300,Math.max(30,retryAfter??60)),retries:5};
+ // The account's history has no room for the part, or the part has more blocks than one save takes: before the
+ // generic 413 below, which means a chunk too heavy for the PDF service.
+ if(code==='history_full')return {reason:'history_full'};
+ if(code==='too_many_parts')return {reason:'too_many_parts'};
+ if(code==='history_conflict')return {reason:'conflict'};
  // Another device's run holds the job (409): this run stops before it pays for anything.
  if(code==='job_busy')return {reason:'busy'};
+ // Waited out like a lost connection, never shorter than the server asks, a little spread so that the students it
+ // turned away do not all come back at once; a hidden tab keeps counting down (a book runs in the background).
+ if(code==='pdf_service_busy')return {reason:'pdf_busy',backoff:true,retries:SERVICE_BUSY_RETRIES,wait:Math.min(300,Math.max(5,retryAfter??20)),early:false,jitter:true};
+ if(code==='pdf_unavailable')return {reason:'network',backoff:true,retries:BACKOFF.length,...(retryAfter!==null?{wait:Math.min(300,retryAfter)}:{})};
+ // Out of time, memory or room in one job: the chunk is tried again with half the pages, and later chunks keep the size
+ // that worked (heavy). A crash is handled like a page the service refuses: halving finds that page.
+ if(HEAVY_PDF.has(code))return {reason:'too_large',heavy:true};
+ if(code==='pdf_crash')return {reason:'too_large'};
  // A daily cap answers with the time left until midnight; only a short wait is worth sitting through.
  if(code==='rate_limited'||status===429)return retryAfter!==null&&retryAfter>300?{reason:'limit'}:{reason:'rate_limited',wait:Math.min(300,Math.max(2,retryAfter??30)),retries:20};
  // Gemini overloaded or out of reach after the server's own attempts (503 gemini_unavailable; older servers sent a
@@ -167,6 +192,10 @@ export function pauseMessage(reason,error,now=Date.now()){
   case 'quota_minute':return 'Gemini vẫn giới hạn số yêu cầu mỗi phút sau nhiều lần chờ. Tiến độ đã lưu; bấm Tiếp tục dịch cả quyển sau ít phút.';
   case 'gemini_key':return 'Gemini không chấp nhận khóa này. Hãy dán một khóa Gemini hợp lệ rồi bấm Tiếp tục dịch cả quyển.';
   case 'rate_limited':return 'Hoa Trí đang giới hạn tốc độ. Tiến độ đã lưu; bấm Tiếp tục dịch cả quyển sau ít phút.';
+  case 'pdf_busy':return 'Dịch vụ PDF vẫn bận vì nhiều người dùng cùng lúc sau nhiều lần chờ. Tiến độ đã lưu; bấm Tiếp tục dịch cả quyển sau ít phút.';
+  case 'gemini_location':return 'Gemini vẫn chưa phục vụ khu vực của máy chủ Hoa Trí sau nhiều lần thử. Khóa của bạn vẫn dùng được và các lần thử này không tốn token. Tiến độ đã lưu; bấm Tiếp tục dịch cả quyển sau ít phút. Nếu lỗi lặp lại, hãy báo quản trị viên.';
+  case 'history_full':return `${detail||'Lịch sử dịch của tài khoản đã đầy.'} Tiến độ của quyển đã lưu; dọn bớt xong, bấm Tiếp tục dịch cả quyển.`;
+  case 'conflict':return 'Phần đang dịch vừa được lưu từ một thẻ hoặc thiết bị khác, nên thẻ này dừng để không ghi đè phần đó. Tiến độ của quyển đã lưu; bấm Tiếp tục dịch cả quyển để mở bản mới nhất và dịch tiếp.';
   case 'network':return 'Mất kết nối tới máy chủ. Tiến độ đã lưu; khi mạng ổn định, bấm Tiếp tục dịch cả quyển.';
   case 'limit':return `${detail||'Đã hết lượt dùng trong ngày.'} Tiến độ đã lưu.`;
   default:return `${detail||'Có lỗi khi dịch.'} Tiến độ đã lưu; bấm Tiếp tục dịch cả quyển để thử lại.`;
@@ -177,6 +206,8 @@ export function waitMessage(reason,seconds){
  switch(reason){
   case 'quota_minute':return `Gemini đang giới hạn số yêu cầu mỗi phút của khóa này. Tự tiếp tục sau ${left}…`;
   case 'rate_limited':return `Hoa Trí đang giới hạn tốc độ để bảo vệ máy chủ. Tự tiếp tục sau ${left}…`;
+  case 'pdf_busy':return `Dịch vụ PDF đang bận vì nhiều người dùng cùng lúc. Tự thử lại sau ${left}…`;
+  case 'gemini_location':return `Gemini chưa phục vụ khu vực của máy chủ vừa gửi yêu cầu; khóa của bạn vẫn dùng được. Tự thử lại sau ${left}…`;
   case 'network':return `Mất kết nối. Tự thử lại sau ${left}; nếu bạn chuyển sang ứng dụng khác, việc dịch chờ đến khi bạn quay lại tab này.`;
   case 'server':return `Máy chủ gặp lỗi tạm thời. Tự thử lại sau ${left}…`;
   case 'gemini_unavailable':return `Gemini đang quá tải hoặc tạm thời không phản hồi. Tự thử lại sau ${left}…`;
@@ -207,6 +238,13 @@ export function findChunkSession(items,job,page){
  const rank=item=>item.status==='complete'?2:item.status==='translating'?1:0;
  return jobSessions(items,job).filter(item=>Number.isInteger(item.page_start)&&item.page_start<=page&&page<=(item.page_end??item.page_start))
   .sort((a,b)=>rank(b)-rank(a)||(Number(b.translated_parts)||0)-(Number(a.translated_parts)||0)||(parseTime(b.updated_at)??0)-(parseTime(a.updated_at)??0))[0]||null;
+}
+// The id a chunk's session is saved under: the same for a job and the chunk's first page on every device and in every
+// tab, so a run continued anywhere asks the server for that session by its id (GET history/:id) instead of looking for
+// it in a list it loaded earlier (or in the newest 100 sessions the list holds). Shaped as a v4 UUID, as the server takes.
+export async function chunkSessionId(jobId,page){
+ const hex=await digestHex(new TextEncoder().encode(`hoa-tri-chunk:${jobId}:${page}`));
+ return `${hex.slice(0,8)}-${hex.slice(8,12)}-4${hex.slice(13,16)}-${(8|parseInt(hex[16],16)&3).toString(16)}${hex.slice(17,20)}-${hex.slice(20,32)}`;
 }
 // Terms a chunk added or changed; the job merges them into the book's glossary.
 export function glossaryUpdates(known,next){
@@ -379,7 +417,7 @@ const emptyUsage=()=>({prompt:0,output:0,thinking:0,total:0,requests:0});
 // source.cut(pages) returns a chunk's bytes. Every chunk ends with one PATCH: page states, tokens, model, book, glossary.
 // The run holds the job under `runner` (one id per browser): the server refuses another device's run meanwhile. Its
 // tokens go out as reports with an id each; `reports` keeps those the server did not confirm, for the next PATCH.
-export function createBookRun({api,steps,source,ui={},sleep=countdown,shouldStop=()=>false,maxPages=CHUNK_PAGES,maxBytes=CHUNK_MAX_BYTES,runner=newId(),reports=sharedReports,renewEvery=RENEW_SECONDS*1000,now=()=>Date.now()}){
+export function createBookRun({api,steps,source,ui={},sleep=countdown,shouldStop=()=>false,maxPages=CHUNK_PAGES,maxBytes=CHUNK_MAX_BYTES,runner=newId(),reports=sharedReports,renewEvery=RENEW_SECONDS*1000,now=()=>Date.now(),random=Math.random}){
  let job=null,usage=emptyUsage(),fit=maxPages,probe=maxPages,claimed=false,renewed=0;
  const notify=()=>ui.job?.(job,usage);
  const owes=()=>USAGE_KEYS.some(key=>usage[key])||reports.load(job?.id).length>0;
@@ -388,11 +426,12 @@ export function createBookRun({api,steps,source,ui={},sleep=countdown,shouldStop
    try{return await task();}
    catch(error){
     if(error instanceof BookPause)throw error;
-    const kind=classifyError(error,step),wait=kind.backoff?Math.max(BACKOFF[Math.min(failure,BACKOFF.length-1)],kind.wait||0):kind.wait;
+    const kind=classifyError(error,step),base=kind.backoff?Math.max(BACKOFF[Math.min(failure,BACKOFF.length-1)],kind.wait||0):kind.wait;
+    const wait=base&&kind.jitter?Math.round(base*(1+random()/4)):base;
     if(!wait||failure>=(kind.retries||0)||shouldStop())throw error;
     // A long wait (a quota, a lost connection) keeps the job held.
     if(step!=='save')await renew();
-    const stopped=await sleep(wait,{onTick:left=>ui.waiting?.(kind.reason,left),stopped:shouldStop,early:Boolean(kind.backoff)});
+    const stopped=await sleep(wait,{onTick:left=>ui.waiting?.(kind.reason,left),stopped:shouldStop,early:kind.early??Boolean(kind.backoff)});
     ui.waiting?.(null,0);if(stopped)throw new BookPause('stopped');
    }
   }
@@ -422,7 +461,8 @@ export function createBookRun({api,steps,source,ui={},sleep=countdown,shouldStop
  const smaller=pages=>{probe=Math.max(1,Math.ceil(pages.length/2));return pages.slice(0,probe);};
  async function fail(page,message){probe=maxPages;await patch({pages:{[page]:'failed'}});ui.warn?.(message);return null;}
  async function extract(chunk){
-  let pages=chunk.pages;
+  // heavy: this chunk was halved because a job ran out of time, memory or room; the size that then worked is kept.
+  let pages=chunk.pages,heavy=false;
   for(;;){
    const bytes=await source.cut(pages);
    if(bytes.byteLength>maxBytes){
@@ -432,16 +472,16 @@ export function createBookRun({api,steps,source,ui={},sleep=countdown,shouldStop
    let result;
    try{result=await retrying('extract',()=>api('pdf-layout/extract',{method:'POST',body:extractForm(bytes,pages,job)}));}
    catch(error){
-    const {reason}=classifyError(error,'extract');
+    const kind=classifyError(error,'extract'),{reason}=kind;
     if(reason==='no_blocks'){
      // The server names the pages it read; fewer than were sent means the service's size budget stopped it.
      probe=maxPages;const blank=Array.isArray(error.data?.pages)?error.data.pages.filter(page=>pages.includes(page)):[];if(blank.length&&blank.length<pages.length)fit=blank.length;
      await patch({pages:statesFor(blank.length?blank:pages,'blank')});return null;
     }
-    if(reason==='too_large'||reason==='page'){if(pages.length>1){pages=smaller(pages);continue;}return fail(pages[0],/^Trang \d+/u.test(error.message)?error.message:`Trang ${pages[0]}: ${error.message}`);}
+    if(reason==='too_large'||reason==='page'){if(pages.length>1){heavy||=Boolean(kind.heavy);pages=smaller(pages);continue;}return fail(pages[0],/^Trang \d+/u.test(error.message)?error.message:`Trang ${pages[0]}: ${error.message}`);}
     throw error;
    }
-   probe=maxPages;const found=chunkPages(result.document);
+   probe=maxPages;if(heavy)fit=Math.min(fit,pages.length);const found=chunkPages(result.document);
    // The service stops early when a selection's images do not fit one run; later chunks are cut to what fitted.
    if(found.processed&&found.processed<pages.length)fit=found.processed;
    if(!found.done.length){await patch({pages:statesFor(found.blank.length?found.blank:pages,'blank')});return null;}
@@ -461,8 +501,16 @@ export function createBookRun({api,steps,source,ui={},sleep=countdown,shouldStop
     let document=(await retrying('open',()=>steps.open(job,chunk)))?.document;
     if(!document){
      const result=await extract(chunk);if(!result)continue;
-     // One session id for this chunk, however often its first save is tried.
-     const sessionId=newId();document=result.document;await renew();await retrying('save',()=>steps.start(result,job,{sessionId}));
+     // One session id for this chunk, however often its first save is tried, and the one open() asks for next time.
+     const sessionId=await chunkSessionId(job.id,chunk.start);document=result.document;await renew();
+     try{await retrying('save',()=>steps.start(result,job,{sessionId}));}
+     catch(error){
+      // More blocks than one save takes (pages full of table cells): the chunk is extracted again, half as long.
+      if(classifyError(error,'save').reason!=='too_many_parts')throw error;
+      const pages=chunkPages(result.document).processed||chunk.pages.length;
+      if(pages<=1){await fail(chunk.start,/^Trang \d+/u.test(error.message)?error.message:`Trang ${chunk.start}: ${error.message}`);continue;}
+      fit=Math.max(1,Math.floor(pages/2));continue;
+     }
     }
     const found=chunkPages(document);ui.chunk?.({...chunk,pages:found.done.concat(found.blank).sort((a,b)=>a-b)},document);
     await renew();const outcome=await retrying('translate',()=>steps.translate({shouldStop,renew}));

@@ -14,8 +14,9 @@ import {bilingualSource} from '../frontend/bilingual-reader.js';
 const source=(await readFile(new URL('../frontend/app.js',import.meta.url),'utf8')).replace(/^import .*\r?\n/gmu,'');
 const settle=()=>new Promise(done=>setTimeout(done,20));
 const TOKEN='AbCdEfGhIjKlMnOpQrStUvWxYz0123456789_-abcde',FRESH='Fr'+'e'.repeat(41);
-// Opening the link trades its token for a fresh one (POST /api/auth/password-reset/open).
-const opens=url=>url==='/api/auth/password-reset/open'?[200,{token:FRESH}]:null;
+// A link is first checked without being used up (POST /api/auth/password-reset/check), then, on "Tiếp tục", traded for
+// a fresh token (POST /api/auth/password-reset/open).
+const opens=url=>url==='/api/auth/password-reset/check'?[200,{ok:true,expiresAt:'2026-10-22T08:30:00.000Z'}]:url==='/api/auth/password-reset/open'?[200,{token:FRESH}]:null;
 const ME_OUT={authenticated:false,googleConfigured:true,registration:{mode:'open',domains:[]}};
 const ME_IN={authenticated:true,googleConfigured:true,registration:{mode:'open',domains:[]},user:{id:'u1',name:'Nguyễn Thị Phương Thảo',email:'thao@example.test',picture:'http://insecure.example/a.png',provider:'local'}};
 // One handler per event type, as on an element the page has just drawn (each render draws new ones).
@@ -42,44 +43,58 @@ function app({pathname='/',hash='',answers=()=>null,elements={},lists={},stored=
  const clipboard={text:'',async writeText(text){this.text=text;}};
  const document={title:'',querySelector:selector=>known[selector]||null,querySelectorAll:selector=>lists[selector]||[]};
  const context=vm.createContext({musicMarkup:()=>'',bindMusic(){},renderMathText,mathStyles,termMatcher,highlightTerms,bindTermPopover,hideTermPopover(){},attachHanziLookup(){},openHanziPanel(){},closeHanziPanel(){},setHanziTheme(){},footerHtml,isSample,sampleBadge,sampleCardNote,sampleIntro,sampleReaderNotice,SAMPLE_LABEL,bilingualSource,mountBilingual(){return {destroy(){}};},mountPdfPages(){return {destroy(){}};},releaseBilingual(){},
-  location,history,document,sessionStorage,navigator:{clipboard},matchMedia:()=>({matches:false,addEventListener(){}}),localStorage:{getItem:()=>null},window:{addEventListener(){}},setTimeout:(fn,ms)=>{const timer=setTimeout(fn,ms);timer.unref?.();return timer;},clearTimeout,clearInterval,FormData:FakeFormData,console});
+  location,history,document,sessionStorage,navigator:{clipboard},matchMedia:()=>({matches:false,addEventListener(){}}),localStorage:{getItem:()=>null},window:{addEventListener(){}},setTimeout:(fn,ms)=>{const timer=setTimeout(fn,ms);timer.unref?.();return timer;},clearTimeout,clearInterval,FormData:FakeFormData,URL,console});
  context.fetch=async(url,init={})=>{calls.push({url,method:init.method||'GET',body:init.body});await new Promise(done=>setTimeout(done,1));const [status,body]=answers(url,init)||[200,url==='/api/me'?ME_OUT:url==='/api/status'?{authenticated:true}:[]];return {ok:status<300,status,json:async()=>body};};
  vm.runInContext(source,context);
  return {root,calls,location,toast,modal,modalForm,modalError,session,clipboard,run:code=>vm.runInContext(code,context)};
 }
 
-test('A reset link: the token leaves the address at once and is traded for a fresh one kept in memory; then the form',async()=>{
+test('A reset link: the token leaves the address at once, is only checked on load, and is traded for a fresh one on "Tiếp tục"; then the form',async()=>{
  const page=app({hash:`#dat-lai-mat-khau?token=${TOKEN}`,answers:opens});
  assert.equal(page.location.hash,'#dat-lai-mat-khau','the address keeps no token');assert.equal(page.run('state.route'),'dat-lai-mat-khau');
  assert.doesNotMatch(page.root.innerHTML,/password-reset-form/u,'no form before the link is opened (nothing typed is lost to a later render)');
  await settle();
+ // A chat app or a mail scanner that opens the link runs this page too: nothing is used up until the student acts.
+ const checked=page.calls.find(call=>call.url==='/api/auth/password-reset/check');
+ assert.equal(checked.method,'POST');assert.deepEqual(JSON.parse(checked.body),{token:TOKEN});
+ assert.ok(!page.calls.some(call=>call.url==='/api/auth/password-reset/open'),'not traded on load');
+ assert.match(page.root.innerHTML,/<div class="reset-ready"><h2 class="auth-form-title">Liên kết dùng được<\/h2><p>Liên kết còn hiệu lực tới [^<]*2026\. Bấm “Tiếp tục” khi bạn sẵn sàng chọn mật khẩu mới: từ lúc đó, liên kết không mở lại được nữa\.<\/p><button type="button" class="primary" id="reset-continue">Tiếp tục<\/button><\/div>/u);
+ assert.doesNotMatch(page.root.innerHTML,/password-reset-form/u);assert.doesNotMatch(page.root.innerHTML,new RegExp(TOKEN,'u'));
+ await page.run('openResetLink()');
  const opened=page.calls.find(call=>call.url==='/api/auth/password-reset/open');
  assert.equal(opened.method,'POST');assert.deepEqual(JSON.parse(opened.body),{token:TOKEN});assert.equal(page.run('state.resetToken'),FRESH);
+ assert.equal(page.run('state.resetLink'),null,'the checked token is dropped once traded');
  const html=page.root.innerHTML;
  assert.equal(page.run('document.title'),'Đặt lại mật khẩu — Hoa Trí');
  assert.match(html,/<form id="password-reset-form" class="auth-form" aria-labelledby="reset-form-title">/u);
- assert.match(html,/<label>Mật khẩu mới<input name="password" type="password" autocomplete="new-password" required minlength="8" maxlength="128" aria-describedby="password-reset-rule"><small id="password-reset-rule">Từ 8 đến 128 ký tự\.<\/small><\/label>/u);
+ assert.match(html,/<label>Mật khẩu mới<input name="password" type="password" autocomplete="new-password" required minlength="8" maxlength="128" aria-describedby="password-reset-rule"><small id="password-reset-rule">Từ 8 đến 128 ký tự; tránh mật khẩu phổ biến như 12345678 hay matkhau123, ngày sinh, hàng phím, tên hay email của bạn\.<\/small><\/label>/u);
  assert.match(html,/<label>Nhập lại mật khẩu<input name="confirm" type="password" autocomplete="new-password" required minlength="8" maxlength="128"><\/label>/u);
  assert.match(html,/<p class="form-error" id="password-reset-error" role="alert" tabindex="-1" hidden><\/p>/u);
  assert.doesNotMatch(html,new RegExp(`${TOKEN}|${FRESH}`,'u'),'the tokens are never written into the page');
  // Reloaded (or typed) without a token: how to get a working link, no form.
  const reloaded=app({hash:'#dat-lai-mat-khau'});await settle();
  assert.doesNotMatch(reloaded.root.innerHTML,/password-reset-form/u);
- assert.match(reloaded.root.innerHTML,/Chưa có liên kết đặt lại mật khẩu<\/h2><p>Vì an toàn, liên kết chỉ mở được một lần và mã của nó không được giữ lại[^<]*xin giáo viên hoặc quản trị viên một liên kết mới\.<\/p><a class="hero-cta" href="\/#account">Đến trang đăng nhập<\/a>/u);
+ assert.match(reloaded.root.innerHTML,/Chưa có liên kết đặt lại mật khẩu<\/h2><p>Vì an toàn, liên kết chỉ mở được một lần và mã của nó không được giữ lại[^<]*xin quản trị viên Hoa Trí một liên kết mới\.<\/p><p class="reset-contact">Địa chỉ của quản trị viên ở <a href="\/dieu-khoan#lien-he" target="_blank" rel="noopener">mục Liên hệ của Điều khoản sử dụng<\/a>\.<\/p><a class="hero-cta" href="\/#account">Đến trang đăng nhập<\/a>/u);
+ assert.doesNotMatch(reloaded.root.innerHTML,/giáo viên/u,'teachers cannot create reset links: only the administrator can');
  // A link opened while the app is already open (hashchange) is taken the same way.
  const open=app({answers:opens});await settle();open.location.hash=`#dat-lai-mat-khau?token=${TOKEN}`;open.run('routeFromUrl()');
  assert.equal(open.location.hash,'#dat-lai-mat-khau');assert.equal(open.run('state.route'),'dat-lai-mat-khau');
- await settle();assert.match(open.root.innerHTML,/password-reset-form/u);
+ await settle();assert.match(open.root.innerHTML,/id="reset-continue"/u);await open.run('openResetLink()');assert.match(open.root.innerHTML,/password-reset-form/u);
  // A link opened before (its address is in the browser's history) is refused at once: no form, how to get a new one.
- const used=app({hash:`#dat-lai-mat-khau?token=${TOKEN}`,answers:url=>url==='/api/auth/password-reset/open'?[400,{error:'Liên kết đặt lại mật khẩu không hợp lệ hoặc đã hết hạn. Hãy xin quản trị viên một liên kết mới.',code:'reset_link_invalid'}]:null});await settle();
- assert.doesNotMatch(used.root.innerHTML,/password-reset-form/u);assert.match(used.root.innerHTML,/Không dùng được liên kết này<\/h2><p>Liên kết đặt lại mật khẩu không hợp lệ/u);
+ const used=app({hash:`#dat-lai-mat-khau?token=${TOKEN}`,answers:url=>url==='/api/auth/password-reset/check'?[400,{error:'Liên kết đặt lại mật khẩu không hợp lệ hoặc đã hết hạn. Hãy xin quản trị viên một liên kết mới.',code:'reset_link_invalid'}]:null});await settle();
+ assert.doesNotMatch(used.root.innerHTML,/password-reset-form|reset-continue/u);assert.match(used.root.innerHTML,/Không dùng được liên kết này<\/h2><p>Liên kết đặt lại mật khẩu không hợp lệ/u);
+ assert.ok(!used.calls.some(call=>call.url==='/api/auth/password-reset/open'));
+ // Used in another tab between the check and the click: said the same way.
+ const late=app({hash:`#dat-lai-mat-khau?token=${TOKEN}`,answers:url=>url==='/api/auth/password-reset/open'?[400,{error:'Liên kết đặt lại mật khẩu không hợp lệ hoặc đã hết hạn. Hãy xin quản trị viên một liên kết mới.',code:'reset_link_invalid'}]:opens(url)});await settle();
+ await late.run('openResetLink()');
+ assert.doesNotMatch(late.root.innerHTML,/password-reset-form|reset-continue/u);assert.match(late.root.innerHTML,/Không dùng được liên kết này<\/h2>/u);
 });
 
 test('New password: a mismatch is said on the second field without a request; success signs in and confirms on the account page',async()=>{
  let signedIn=false;
  const reset=form('password-reset-form',['password','confirm'],{password:'mat-khau-moi-1',confirm:'mat-khau-moi-2'},{password:'password-reset-rule'});
  const page=app({hash:`#dat-lai-mat-khau?token=${TOKEN}`,elements:{'#password-reset-form':reset},answers:url=>url==='/api/auth/password-reset'?(signedIn=true,[200,{ok:true}]):url==='/api/me'?[200,signedIn?ME_IN:ME_OUT]:opens(url)});
- await settle();
+ await settle();await page.run('openResetLink()');
  await reset.fire('submit');
  assert.equal(reset.box.hidden,false);assert.equal(reset.box.textContent,'Hai mật khẩu chưa khớp. Hãy nhập lại cho giống nhau.');assert.equal(reset.box.focused,true);
  assert.equal(reset.input('confirm').getAttribute('aria-invalid'),'true');assert.equal(reset.input('confirm').getAttribute('aria-describedby'),'password-reset-error');
@@ -97,13 +112,13 @@ test('New password: a mismatch is said on the second field without a request; su
 test('New password refused: a used or expired link is explained with how to get a new one; a weak password keeps the form',async()=>{
  const reset=form('password-reset-form',['password','confirm'],{password:'mat-khau-moi-1',confirm:'mat-khau-moi-1'});
  const page=app({hash:`#dat-lai-mat-khau?token=${TOKEN}`,elements:{'#password-reset-form':reset},answers:url=>url==='/api/auth/password-reset'?[400,{error:'Liên kết đặt lại mật khẩu không hợp lệ hoặc đã hết hạn. Hãy xin quản trị viên một liên kết mới.',code:'reset_link_invalid'}]:opens(url)});
- await settle();await reset.fire('submit');
+ await settle();await page.run('openResetLink()');await reset.fire('submit');
  assert.equal(page.run('state.resetToken'),null);assert.equal(page.run('state.route'),'dat-lai-mat-khau');
- assert.match(page.root.innerHTML,/<div class="reset-unavailable" role="alert"><h2 class="auth-form-title" tabindex="-1" data-focus-first>Không dùng được liên kết này<\/h2><p>Liên kết đặt lại mật khẩu không hợp lệ hoặc đã hết hạn\. Hãy xin quản trị viên một liên kết mới\.<\/p>/u);
+ assert.match(page.root.innerHTML,/<div class="reset-unavailable" role="alert"><h2 class="auth-form-title" tabindex="-1" data-focus-first>Không dùng được liên kết này<\/h2><p>Liên kết đặt lại mật khẩu không hợp lệ hoặc đã hết hạn\. Hãy xin quản trị viên một liên kết mới\.<\/p><p class="reset-contact">Địa chỉ của quản trị viên ở <a href="\/dieu-khoan#lien-he"/u,'where to ask for a new link');
  assert.doesNotMatch(page.root.innerHTML,/password-reset-form/u);
  const again=form('password-reset-form',['password','confirm'],{password:'mat-khau-moi-1',confirm:'mat-khau-moi-1'});
  const weak=app({hash:`#dat-lai-mat-khau?token=${TOKEN}`,elements:{'#password-reset-form':again},answers:url=>url==='/api/auth/password-reset'?[400,{error:'Mật khẩu cần từ 8 đến 128 ký tự.'}]:opens(url)});
- await settle();await again.fire('submit');
+ await settle();await weak.run('openResetLink()');await again.fire('submit');
  assert.equal(again.box.textContent,'Mật khẩu cần từ 8 đến 128 ký tự.');assert.equal(again.input('password').getAttribute('aria-invalid'),'true');
  assert.equal(weak.run('state.resetToken'),FRESH,'the link can be tried again');assert.equal(again.button.disabled,false);
 });
@@ -133,10 +148,16 @@ test('Sign-in errors stay in the form (alert, focus, aria-invalid); a double pre
  assert.match(kept.box.textContent,/trình duyệt chưa giữ phiên đăng nhập/u);assert.equal(third.run('state.reader.authenticated'),false);
 });
 
-test('Sign-in page: "Quên mật khẩu?" explains the teacher link, tab panels wrap the forms, nothing about Google without it',()=>{
+test('Sign-in page: "Quên mật khẩu?" says where to ask the administrator for a link, tab panels wrap the forms, nothing about Google without it',async()=>{
  const {run}=app(),view=reader=>run(`state.loaded=true;state.route='account';state.pendingRequest=false;state.reader=${JSON.stringify(reader)};accountView()`);
  const open=view(ME_OUT);
- assert.match(open,/<details class="auth-forgot"><summary>Quên mật khẩu\?<\/summary><p>Hoa Trí không gửi email đặt lại mật khẩu\. Hãy nhờ giáo viên hoặc quản trị viên tạo cho bạn một liên kết đặt lại mật khẩu, rồi mở liên kết đó để chọn mật khẩu mới\. Liên kết chỉ mở được một lần, trong vòng 24 giờ: mở ra là đặt mật khẩu mới ngay\.<\/p><p>Nếu bạn đăng nhập bằng Google thì tài khoản không có mật khẩu riêng: hãy bấm “Tiếp tục bằng Google”\.<\/p><\/details>/u);
+ // No e-mail is sent and teachers cannot make links: the student writes to the administrator, at the address the Terms
+ // give in their contact section (a blank the operator fills in before launch).
+ assert.match(open,/<details class="auth-forgot"><summary>Quên mật khẩu\?<\/summary><p>Hoa Trí không gửi email đặt lại mật khẩu\. Hãy viết cho quản trị viên Hoa Trí theo địa chỉ ở <a href="\/dieu-khoan#lien-he" target="_blank" rel="noopener">mục Liên hệ của Điều khoản sử dụng<\/a>, ghi rõ email bạn dùng để đăng nhập, để xin một liên kết đặt lại mật khẩu; rồi mở liên kết đó để chọn mật khẩu mới\. Liên kết chỉ mở được một lần, trong vòng 24 giờ: mở ra là đặt mật khẩu mới ngay\.<\/p><p>Nếu bạn đăng nhập bằng Google thì tài khoản không có mật khẩu riêng: hãy bấm “Tiếp tục bằng Google”\.<\/p><\/details>/u);
+ assert.doesNotMatch(open,/giáo viên/u,'only the administrator creates reset links');
+ const contact=/<section id="lien-he"[^>]*>[\s\S]*?<\/section>/u.exec(await readFile(new URL('../frontend/dieu-khoan.html',import.meta.url),'utf8'))?.[0]||'';
+ assert.match(contact,/xin liên kết đặt lại mật khẩu/u,'the Terms\' contact section is where a reset link is asked for');
+ assert.match(contact,/\[\[CHƯA ĐIỀN: email liên hệ\]\]|[\w.+-]+@[\w-]+\.[\w.-]+/u,'with its address');
  assert.match(open,/aria-controls="auth-panel-login"[\s\S]*aria-controls="auth-panel-register"/u);
  assert.match(open,/<div class="auth-panel" role="tabpanel" id="auth-panel-login" aria-labelledby="auth-tab-login"><form id="reader-login-form" class="auth-form">/u);
  assert.match(open,/<div class="auth-panel" role="tabpanel" id="auth-panel-register" aria-labelledby="auth-tab-register" hidden><form id="reader-register-form" class="auth-form">/u);
@@ -170,6 +191,22 @@ test('Account page: the header\'s initials, failed lists as error cards with "Th
  const retry=app({hash:'#account',answers:url=>url==='/api/me'?[200,ME_IN]:null});await settle();
  retry.calls.length=0;await retry.run(`retryLoad('account')`);
  assert.deepEqual(retry.calls.map(call=>call.url).sort(),['/api/library','/api/me','/api/my/library','/api/my/requests']);
+});
+
+// One name for the student's library ("Thư viện riêng"), dates as the reader's own day (dd/mm/yyyy), and the sign-in
+// page says that Xưởng dịch needs an account (study.js sends a signed-out student there).
+test('Account copy: request dates read dd/mm/yyyy, the library is "Thư viện riêng", the sign-in intro names Xưởng dịch',()=>{
+ const {run}=app();
+ const requests=[{id:'r1',title:'Sử ký',status:'done',visibility:'private',filename:'su-ky.pdf',created_at:'2026-10-01 12:00:00',story_id:'s1'},{id:'r2',title:'Luận ngữ',status:'pending',visibility:'public',source_url:'https://example.com/a',created_at:'2026-09-30T12:00:00.000Z'},{id:'r3',title:'Cũ',status:'pending',visibility:'private',created_at:null}];
+ const html=run(`state.loaded=true;state.route='account';state.errors={};state.reader=${JSON.stringify(ME_IN)};state.myLibrary=[];state.myRequests=${JSON.stringify(requests)};accountView()`);
+ assert.match(html,/<h3>Sử ký<\/h3><p>Tệp: su-ky\.pdf · gửi ngày 01\/10\/2026<\/p><small>Tài liệu đã được đưa vào Thư viện riêng của bạn\.<\/small>/u);
+ assert.match(html,/<h3>Luận ngữ<\/h3><p>Đã gửi liên kết nguyên tác · gửi ngày 30\/09\/2026<\/p>/u);
+ assert.match(html,/<h3>Cũ<\/h3><p>Nguồn chưa cập nhật<\/p>/u,'no date when the server has none');
+ assert.doesNotMatch(html,/\d{4}-\d\d-\d\d/u,'no ISO date on the page');
+ const intro=/<div class="auth-intro">[\s\S]*?<\/div><\/div>/u.exec(run(`state.reader=${JSON.stringify(ME_OUT)};accountView()`))?.[0]||'';
+ assert.match(intro,/<p>Xưởng dịch cần tài khoản Hoa Trí: nguyên tác, bản dịch và tiến độ dịch được lưu vào tài khoản của bạn\.[^<]*Thư viện chung đọc được mà không cần đăng nhập\.<\/p>/u);
+ assert.match(intro,/<span><svg[^>]*>[\s\S]*?<\/svg> Thư viện riêng<\/span>/u);
+ assert.doesNotMatch(run(`accountView()`)+run(`state.reader=${JSON.stringify(ME_IN)};accountView()`),/[Tt]hư viện cá nhân|thư viện riêng/u,'one spelling: Thư viện riêng');
 });
 
 test('Request intent: kept in sessionStorage while signing in (Google returns to /#yeu-cau); an expired session keeps the draft',async()=>{
@@ -220,15 +257,34 @@ test('Request dialog: one of a file or a link, said and marked when both are mis
  assert.equal(page.modalError.textContent,'Hãy chọn một tệp hoặc nhập liên kết nguyên tác.');assert.equal(page.modalError.hidden,false);assert.equal(page.modal.open,true);
  assert.equal(file.getAttribute('aria-invalid'),'true');assert.equal(link.getAttribute('aria-invalid'),'true');
  assert.ok(!page.calls.some(call=>call.url==='/api/requests'),'nothing sent');
+ assert.match(html,/<small>Lưu trong Thư viện riêng của bạn<\/small>/u,'one name for the student\'s library');
+});
+
+test('Request dialog: a link that is not a web address (javascript:, data:, "https://") is refused on its field before sending',async()=>{
+ const file=new Element(),link=new Element();let answer=[201,{ok:true}];
+ const page=app({answers:url=>url==='/api/me'?[200,ME_IN]:url==='/api/requests'?answer:null,elements:{'#modal [name="file"]':file,'#modal [name="source_url"]':link}});await settle();
+ const send=source_url=>page.modalForm.onsubmit({preventDefault(){},submitter:new Element(),target:{values:{title:'Hàm số',file:{size:0,name:''},source_url,notes:'',visibility:'private'}}});
+ for(const bad of ['javascript:alert(document.cookie)','data:text/html,<b>x</b>','https://','www.example.com/sach','ftp://example.com/a']){
+  page.run('requestStory()');page.modalError.hidden=true;await send(bad);
+  assert.equal(page.modalError.textContent,'Liên kết nguyên tác phải là một địa chỉ web bắt đầu bằng http:// hoặc https://, ví dụ https://www.example.com/sach.',bad);
+  assert.equal(page.modalError.hidden,false);assert.equal(link.getAttribute('aria-invalid'),'true',bad);assert.equal(file.getAttribute('aria-invalid'),null,bad);
+ }
+ assert.ok(!page.calls.some(call=>call.url==='/api/requests'),'nothing sent');
+ // A refusal of the server about the link (an older page, another rule) is marked on the same field.
+ answer=[400,{error:'Liên kết phải là một địa chỉ web bắt đầu bằng http:// hoặc https://'}];page.run('requestStory()');await send('https://example.com/sach');
+ assert.equal(page.modalError.textContent,'Liên kết phải là một địa chỉ web bắt đầu bằng http:// hoặc https://');assert.equal(link.getAttribute('aria-invalid'),'true');
+ answer=[201,{ok:true}];page.run('requestStory()');await send('https://example.com/sach');
+ assert.equal(page.calls.filter(call=>call.url==='/api/requests').length,2,'a web address is sent');assert.equal(page.modal.open,false);
 });
 
 test('Admin: a reset link for a password account (shown once, full address, expiry, copy); Google accounts say why not',async()=>{
  const copy=new Element(),status=new Element(),link=new Element(),button=new Element({isConnected:true});
  const users=[{id:'u1',email:'lan@example.test',name:'Lan',provider:'local'},{id:'u2',email:'minh@example.test',name:'Minh',provider:'google'}];
  let answer=[201,{resetUrl:`/#dat-lai-mat-khau?token=${TOKEN}`,expiresAt:'2026-10-22T08:30:00.000Z'}];
- const page=app({pathname:'/admin',hash:'#users',elements:{'#copy-reset-link':copy,'#reset-link-status':status,'#reset-link':link},answers:url=>url==='/api/users/u1/password-reset'?answer:url==='/api/users'?[200,users]:null});
- await settle();
- const view=page.run(`state.userStories=[];state.requests=[];usersView()`);
+ const page=app({pathname:'/admin',hash:'#users',elements:{'#copy-reset-link':copy,'#reset-link-status':status,'#reset-link':link,'[data-user-reset="u1"]':button},answers:url=>url==='/api/users/u1/password-reset'?answer:url==='/api/users'?[200,users]:null});
+ // The console's first load (status, then four lists) may take longer than one settle on a busy machine.
+ for(let wait=0;wait<100&&page.run('state.users.length')<2;wait++)await settle();
+ const view=page.run(`state.requests=[];usersView()`);
  assert.match(view,/<button type="button" data-user-reset="u1">Tạo link đặt lại mật khẩu<\/button>/u);
  assert.doesNotMatch(view,/data-user-reset="u2"/u);assert.match(view,/<span class="user-reset-note">Đăng nhập bằng Google nên không có mật khẩu để đặt lại\.<\/span>/u);
  await page.run('createResetLink')('u1',button);
@@ -241,6 +297,12 @@ test('Admin: a reset link for a password account (shown once, full address, expi
  assert.equal(link.selected,true,'the link is selected, ready to copy by hand');assert.equal(button.disabled,false);
  await copy.fire('click');
  assert.equal(page.clipboard.text,`https://hoatri.test/#dat-lai-mat-khau?token=${TOKEN}`);assert.equal(status.textContent,'Đã sao chép. Hãy dán vào tin nhắn riêng cho học sinh.');
+ // "Đóng": the focus is back on the button as the dialog closes, before the browser's close event (one task later,
+ // never fired here); that event, when it comes, changes nothing.
+ assert.equal(button.focused,undefined);
+ await page.modalForm.onsubmit({preventDefault(){},submitter:new Element(),target:{values:{}}});
+ assert.equal(page.modal.open,false);assert.equal(button.focused,true,'the focus is back on "Tạo link đặt lại mật khẩu"');
+ button.focused=false;page.modal.fire('close');assert.equal(button.focused,false,'given back once');
  // 404 and 409: the server's reason (the caller shows it in the toast), the list loaded again.
  for(const [code,error] of [[404,'Không tìm thấy tài khoản.'],[409,'Tài khoản này đăng nhập bằng Google nên không có mật khẩu để đặt lại.']]){
   answer=[code,{error,...(code===409?{code:'no_password'}:{})}];page.calls.length=0;

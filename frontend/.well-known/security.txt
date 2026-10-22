@@ -1,0 +1,5 @@
+# Hoa Trí: nơi báo lỗ hổng bảo mật (RFC 9116). Xin gửi mô tả và các bước tái hiện;
+# khi thử, đừng truy cập hay sửa dữ liệu của người khác.
+Contact: mailto:[[CHƯA ĐIỀN: email liên hệ]]
+Expires: 2027-10-01T00:00:00.000Z
+Preferred-Languages: vi, en

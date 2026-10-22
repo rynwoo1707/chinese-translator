@@ -41,7 +41,8 @@ class MemoryDB{
   if(query.startsWith('UPDATE stories SET title=? WHERE')){const [title,id,owner]=args,row=this.stories.get(id);if(row?.owner_user_id===owner)Object.assign(row,{title});return;}
   // Study code addresses one chapter by id (a book holds one chapter per page range), always within the reader's own stories.
   if(query.startsWith('UPDATE chapters SET title=? WHERE id=?')){const [title,chapterId,owner]=args,row=this.chapters.get(chapterId);if(this.stories.get(row?.story_id)?.owner_user_id===owner)row.title=title;return;}
-  if(query.startsWith('UPDATE stories SET glossary=json_patch(')){const [patch,genre,id,owner]=args,row=this.stories.get(id);if(row?.owner_user_id===owner)Object.assign(row,{glossary:JSON.stringify({...JSON.parse(row.glossary||'{}'),...JSON.parse(patch)}),genre:[...this.chapters.values()].filter(item=>item.story_id===id).length<=1?genre:row.genre});return;}
+  // The book's terms merged with the range's, unless that passes the size cap (then the book keeps its terms).
+  if(query.startsWith('UPDATE stories SET glossary=CASE WHEN length(')){const [patch,genre,id,owner]=args,row=this.stories.get(id);if(row?.owner_user_id===owner){const merged=JSON.stringify({...JSON.parse(row.glossary||'{}'),...JSON.parse(patch)});Object.assign(row,{glossary:new TextEncoder().encode(merged).length<=131072?merged:row.glossary,genre:[...this.chapters.values()].filter(item=>item.story_id===id).length<=1?genre:row.genre});}return;}
   if(query.startsWith('UPDATE chapters SET content=?,text_key=? WHERE id=?')){const [content,text_key,chapterId,owner]=args,row=this.chapters.get(chapterId);if(this.stories.get(row?.story_id)?.owner_user_id===owner)Object.assign(row,{content,text_key});return;}
   throw new Error('Unexpected SQL in study history mock: '+query.slice(0,80));
  }

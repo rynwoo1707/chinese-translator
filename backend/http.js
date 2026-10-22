@@ -6,6 +6,18 @@ const MB=1024*1024,KB=1024;
 export class UserError extends Error{constructor(message,status=400,code,{retryAfter}={}){super(message);this.name='UserError';this.status=status;if(code)this.code=code;if(retryAfter!==undefined)this.retryAfter=retryAfter;}}
 export const json=(data,status=200,headers={})=>Response.json(data,{status,headers:{'Cache-Control':'no-store','X-Content-Type-Options':'nosniff',...headers}});
 export const isLoopback=hostname=>['127.0.0.1','localhost','::1','[::1]'].includes(hostname);
+// Hosts reached without TLS on purpose: wrangler dev on this machine, or from a phone on the same local network.
+export function localHost(hostname){
+ const host=String(hostname||'').toLowerCase().replace(/^\[|\]$/gu,'');
+ return isLoopback(hostname)||/^(?:127|10)\.\d{1,3}\.\d{1,3}\.\d{1,3}$|^192\.168\.\d{1,3}\.\d{1,3}$|^172\.(?:1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3}$|^169\.254\.\d{1,3}\.\d{1,3}$/u.test(host)||/^(?:fe[89ab][0-9a-f]|f[cd][0-9a-f]{2}):/u.test(host)||/(?:^|\.)localhost$|\.local$/u.test(host);
+}
+// Plain http to a public host (Cloudflare's "Always Use HTTPS" switched off): a GET or HEAD is sent to https, anything
+// else is refused rather than redirected, since its body (a password, a session cookie) has already crossed in clear.
+export function insecureRequest(request,url){
+ if(url.protocol!=='http:'||localHost(url.hostname))return null;
+ if(['GET','HEAD'].includes(request.method)){const target=new URL(url.href);target.protocol='https:';target.port='';return new Response(null,{status:301,headers:{Location:target.href,'Cache-Control':'no-store'}});}
+ return json({error:'Hoa Trí chỉ nhận thao tác này qua kết nối an toàn. Hãy mở trang bằng địa chỉ https:// rồi thử lại.',code:'https_required'},403);
+}
 // The eight 16-bit groups of an IPv6 address in any of its spellings, or null.
 function ipv6Groups(text){
  let value=text.toLowerCase().replace(/%.*$/su,'').replace(/^\[|\]$/gu,'');

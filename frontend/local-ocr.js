@@ -68,11 +68,18 @@ async function worker(){
  return workerPromise;
 }
 
+// A signal that aborts after `ms`. AbortSignal.timeout needs Safari 16 and the site runs from iOS/Safari 15.4, where an
+// AbortController and a timer give the same signal; done() drops that timer once the request has settled.
+export function timeoutSignal(ms){
+ if(typeof AbortSignal.timeout==='function')return {signal:AbortSignal.timeout(ms),done(){}};
+ const controller=new AbortController(),timer=setTimeout(()=>controller.abort(new DOMException('Quá thời gian chờ máy chủ trả lời.','TimeoutError')),ms);
+ return {signal:controller.signal,done:()=>clearTimeout(timer)};
+}
 // '' when this install serves PaddleOCR, else why not. An install without its models has no worker.js: the server
 // answers 404 (a host that falls back to a page answers HTML), and that answer holds for the tab. A check without a
-// clear answer (no connection, a server error) counts for this page only and is asked again next time.
+// clear answer (no connection, a server error, no answer within 15 s) counts for this page only and is asked again next time.
 function paddleProblem(){
- installCheck??=Promise.resolve().then(()=>fetch(new URL('/vendor/paddle/worker.js',location.href),{method:'HEAD',cache:'no-store',signal:AbortSignal.timeout?.(15_000)})).then(response=>{
+ installCheck??=Promise.resolve().then(()=>{const {signal,done}=timeoutSignal(15_000);return fetch(new URL('/vendor/paddle/worker.js',location.href),{method:'HEAD',cache:'no-store',signal}).finally(done);}).then(response=>{
   if(response.ok&&!/^text\/html/iu.test(response.headers.get('Content-Type')||''))return '';
   if(response.ok||[404,410].includes(response.status))return NOT_INSTALLED;
   installCheck=null;return `Máy chủ báo lỗi khi kiểm tra PaddleOCR (HTTP ${response.status}).`;

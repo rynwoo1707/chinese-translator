@@ -34,6 +34,8 @@ test('Missing citation marker triggers a stronger retry only for that passage',a
  const {env}=environment(),models=[],configs=[];t.mock.method(globalThis,'fetch',async(endpoint,options)=>{models.push(endpoint);configs.push(JSON.parse(options.body).generationConfig);const translation=models.length===1?'Bản dịch thiếu dẫn chứng.':'Bản dịch có dẫn chứng [12].';return Response.json({usageMetadata:{promptTokenCount:10,candidatesTokenCount:8,totalTokenCount:18},candidates:[{finishReason:'STOP',content:{parts:[{text:JSON.stringify({translation,contextUpdate:'',glossaryUpdates:{}})}]}}]});});
  const data=await (await studyRoute(request({apiKey:'student-key-long-enough',source:'原文[12]。',mode:'balanced'}),env,url,path)).json();
  assert.equal(models.length,2);assert.match(models[0],/gemini-3\.1-flash-lite/);assert.equal(configs[0].thinkingConfig.thinkingLevel,'minimal');assert.match(models[1],/gemini-2\.5-flash/);assert.match(data.translation,/\[12\]/);assert.equal(data.usage.total,36);
+ // The full retry keeps a bounded reasoning budget: unbounded default thinking on 2.5 Flash would bill hidden tokens.
+ assert.deepEqual(configs[1].thinkingConfig,{thinkingBudget:1024});
 });
 
 test('Missing marker in an aligned paragraph repairs only that paragraph',async t=>{
@@ -90,6 +92,31 @@ test('Student OCR sends only an optimized image with the student key',async t=>{
  const ocrPath='/api/my/study/ocr',ocrUrl=new URL('https://example.test'+ocrPath);
  const response=await studyRoute(new Request(ocrUrl,{method:'POST',headers:{Cookie:'cat_hien_session=temporary',Origin:'https://example.test'},body:form}),env,ocrUrl,ocrPath);
  const data=await response.json();assert.equal(response.status,200);assert.equal(data.text,'識別文字');assert.equal(data.usage.total,52);assert.equal(data.model,'gemini-3.6-flash');assert.equal(requests.length,1);assert.match(requests[0].endpoint,/gemini-3\.6-flash/);assert.equal(writes(),0);
+});
+
+test('Look-alike ideographs pasted from a PDF (Kangxi radicals, compatibility forms) are unified before glossary matching and translation',async t=>{
+ const {env}=environment(),sent=[],cp=(...codes)=>String.fromCodePoint(...codes);
+ // 力 as the Kangxi radical U+2F12, 一 as U+2F00, 人 as U+2F08 and 理 as the compatibility ideograph U+F9E4; the radical
+ // U+2E81 has no unified form and stays.
+ const pasted=`${cp(0x2F12)}学是物${cp(0xF9E4)}学的${cp(0x2F00)}部分，${cp(0x2F08)}民需要${cp(0x2F12)}学${cp(0x2E81)}。`,unified=`力学是物理学的一部分，人民需要力学${cp(0x2E81)}。`;
+ let answer={translation:'Cơ học là một phần của vật lý; người dân cần cơ học.',contextUpdate:'',glossaryUpdates:{}};
+ t.mock.method(globalThis,'fetch',async(endpoint,options)=>{sent.push(JSON.parse(JSON.parse(options.body).contents[0].parts[0].text));return Response.json({usageMetadata:{promptTokenCount:10,candidatesTokenCount:8,totalTokenCount:18},candidates:[{finishReason:'STOP',content:{parts:[{text:JSON.stringify(answer)}]}}]});});
+ // The student's own term typed with the radical form too.
+ const data=await (await studyRoute(request({apiKey:'student-key-long-enough',source:pasted,mode:'economy',glossary:{'力学':'cơ học',[`${cp(0x2F08)}民`]:'nhân dân'},previousSource:`前文${cp(0x2F00)}`}),env,url,path)).json();
+ assert.equal(sent[0].source,unified);assert.equal(sent[0].previousSource,'前文一');
+ assert.deepEqual(Object.keys(sent[0].glossary).filter(key=>['力学','人民'].includes(key)).sort(),['人民','力学']);
+ // The term check reads the unified text as well: "nhân dân" is missing from the answer.
+ assert.ok(data.warnings.some(warning=>/人民 → nhân dân/u.test(warning)),JSON.stringify(data.warnings));assert.ok(!data.warnings.some(warning=>/力学/u.test(warning)));
+ // Kept-layout blocks: the sources Gemini reads and the terms matched against them are unified the same way.
+ answer={blocks:[{id:'p1-b1',translation:'Cơ học.'}],contextUpdate:'',glossaryUpdates:{}};
+ const blocksPath='/api/my/study/translate-blocks',blocksUrl=new URL('https://example.test'+blocksPath);
+ const blocks=await studyRoute(new Request(blocksUrl,{method:'POST',headers:{Cookie:'cat_hien_session=temporary','Content-Type':'application/json',Origin:'https://example.test'},body:JSON.stringify({apiKey:'student-key-long-enough',blocks:[{id:'p1-b1',source:`${cp(0x2F12)}学。`}],glossary:{[`${cp(0x2F12)}学`]:'cơ học'}})}),env,blocksUrl,blocksPath);
+ assert.equal(blocks.status,200);assert.equal(sent[1].blocks[0].source,'力学。');assert.equal(sent[1].glossary['力学'],'cơ học');
+ // Wherever terms are matched on the server (the admin pipeline, older manifests), look-alikes match too.
+ const {relevantGlossary,missingGlossaryTerms}=await import('./ai.js');
+ assert.deepEqual(relevantGlossary({'力学':'cơ học','化学':'hóa học'},`${cp(0x2F12)}学`),{'力学':'cơ học'});
+ assert.deepEqual(relevantGlossary({[`${cp(0x2F12)}学`]:'cơ học'},'力学是物理学的一部分'),{'力学':'cơ học'});
+ assert.deepEqual(missingGlossaryTerms(`${cp(0x2F12)}学`,'Vật lý',{'力学':'cơ học'}),['力学 → cơ học']);
 });
 
 test('Local academic review flags likely omissions without another model request',()=>{

@@ -86,11 +86,12 @@
     <ul>
      <li>Cookie <code>cat_hien_session</code> (HttpOnly, SameSite=Lax, hết hạn sau 30 ngày). Máy chủ chỉ lưu mã băm SHA-256 của cookie này.</li>
      <li>Khi đăng nhập bằng Google có thêm hai cookie tạm <code>cat_hien_oauth_state</code> và <code>cat_hien_oauth_return</code>, tự hết hạn sau 10 phút.</li>
+     <li>Cookie <code>cat_hien_device</code> (HttpOnly, SameSite=Strict, chỉ gửi tới <code>/api/auth/</code>, hết hạn sau 1 năm) được đặt khi bạn tạo tài khoản, đăng nhập hoặc đổi mật khẩu: một mã ngẫu nhiên kèm chữ ký của máy chủ, không chứa email hay mật khẩu. Nhờ nó, người khác nhập sai mật khẩu tài khoản của bạn ở nơi khác không làm trình duyệt quen của bạn bị chặn đăng nhập.</li>
     </ul>
     <h3>Tài liệu và bản dịch</h3>
     <ul>
      <li>Nguyên tác, bản dịch, tiến độ dịch và bảng thuật ngữ của từng lượt dịch trong Xưởng dịch. Với tệp TXT, DOCX, EPUB, AZW3, Hoa Trí chỉ lưu phần chữ trích ra, không lưu tệp.</li>
-     <li>Với PDF dịch giữ bố cục: bản PDF gốc đầy đủ (mỗi tệp lưu một lần cho mỗi tài khoản, để ghép lại cả quyển như bản gốc và đọc song ngữ), các trang đã chọn cùng ảnh trang và hình trích từ trang, và PDF tiếng Việt đã xuất.</li>
+     <li>Với PDF dịch giữ bố cục (kể cả PDF mà Xưởng dịch ghép từ các ảnh chụp trang ngay trên thiết bị của bạn): bản PDF gốc đầy đủ (mỗi tệp lưu một lần cho mỗi tài khoản, để ghép lại cả quyển như bản gốc và đọc song ngữ), các trang đã chọn cùng ảnh trang và hình trích từ trang, và PDF tiếng Việt đã xuất.</li>
      <li>Ảnh bìa sách trong Thư viện riêng.</li>
      <li>Trong cơ sở dữ liệu: tên tài liệu, tên tệp, 1.200 ký tự đầu của nguyên tác và bản dịch (để hiện trong Lịch sử dịch), khoảng trang, mã SHA-256 của tệp, và tối đa 20.000 ký tự đầu của mỗi phần trong Thư viện riêng.</li>
      <li>Yêu cầu dịch bạn gửi: tên tài liệu, liên kết, ghi chú, tệp đính kèm và lựa chọn chia sẻ.</li>
@@ -98,14 +99,21 @@
     <h3>Chống lạm dụng</h3>
     <ul>
      <li>Để chặn việc tạo tài khoản hàng loạt, Hoa Trí đếm số tài khoản được tạo từ mỗi địa chỉ IP trong ngày. Bản ghi chứa địa chỉ IP được xóa ở lượt đếm đầu tiên của ngày mới (giờ Việt Nam), thường chỉ sau khoảng một ngày.</li>
-     <li>Số lượt gửi yêu cầu dịch, tách PDF, xuất PDF tiếng Việt và tải tệp PDF gốc lên của mỗi tài khoản trong ngày, để áp dụng hạn mức.</li>
+     <li>Số lượt gửi yêu cầu dịch, tách PDF, xuất PDF tiếng Việt, tải tệp PDF gốc lên và lưu bản dịch mới của mỗi tài khoản trong ngày, để áp dụng hạn mức.</li>
+     <li>Số lần nhập sai mật khẩu, đếm theo email, theo địa chỉ IP, theo trình duyệt và theo tài khoản: máy chủ chỉ lưu mã băm SHA-256 của thứ được đếm kèm số lần sai, và xóa bản ghi khoảng một ngày sau lần sai cuối.</li>
      <li>Số lần đăng nhập và thao tác trong từng phút, đếm tạm theo email, địa chỉ IP hoặc tài khoản trên hạ tầng Cloudflare, không lưu lại sau đó.</li>
+    </ul>
+    <h3>Báo lỗi của trang</h3>
+    <ul>
+     <li>Khi một trang của Hoa Trí gặp lỗi trong trình duyệt của bạn, trình duyệt gửi về máy chủ một báo lỗi ngắn, tối đa 5 báo lỗi mỗi lần mở trang: nội dung lỗi (tối đa 300 ký tự), tệp mã của Hoa Trí cùng dòng gây lỗi, đường dẫn của trang (không kèm phần sau dấu ? hay #, nơi liên kết đặt lại mật khẩu mang mã của nó) và loại trình duyệt kèm số phiên bản chính. Trước khi gửi, trình duyệt bỏ khỏi nội dung lỗi mọi địa chỉ email, chuỗi mã dài và phần sau dấu ? hay # của mọi địa chỉ web; máy chủ làm lại việc này trước khi ghi.</li>
+     <li>Báo lỗi không được lưu vào cơ sở dữ liệu: máy chủ chỉ ghi nó vào nhật ký kỹ thuật trên Cloudflare (mục 5), không kèm cookie, tài khoản hay địa chỉ IP của bạn. Cũng như mọi yêu cầu khác, yêu cầu gửi báo lỗi vẫn có trong nhật ký yêu cầu của Cloudflare mô tả ở mục 5.</li>
     </ul>
     <h3>Trên trình duyệt của bạn</h3>
     <ul>
      <li>Bộ nhớ cục bộ (localStorage) giữ vài lựa chọn giao diện: màu trang và cỡ chữ khi đọc (<code>readerTheme</code>, <code>readerFontSize</code>), nhạc nền (<code>hoaTriMusic</code>), bật hay tắt chạm để tra chữ Hán (<code>hoatri.hanziTap</code>).</li>
      <li>Khi bạn dùng Dịch cả quyển, bộ nhớ cục bộ còn giữ <code>hoa-tri-runner</code>: một mã ngẫu nhiên cố định của trình duyệt này, gửi lên máy chủ kèm tiến độ dịch để mỗi quyển chỉ được một thiết bị dịch tại một thời điểm. Máy chủ chỉ giữ mã này trong lúc lượt dịch đang chạy. Mỗi quyển đang dịch có thêm một mục <code>hoa-tri-book-usage:…</code> ghi số token Gemini đã dùng mà máy chủ chưa xác nhận; mục này tự xóa khi máy chủ đã nhận.</li>
      <li>Bộ nhớ phiên (sessionStorage) giữ tạm <code>hoa-tri-request-draft</code> khi bạn bấm “Yêu cầu dịch” lúc chưa đăng nhập: tên tài liệu, liên kết, ghi chú và lựa chọn chia sẻ bạn đã nhập (không giữ tệp), để hộp yêu cầu tự mở lại sau khi đăng nhập. Mục này bị xóa ngay khi hộp yêu cầu mở lại hoặc khi bạn rời trang đăng nhập, và mất khi đóng tab.</li>
+     <li>Bộ nhớ phiên còn giữ <code>hoa-tri-reader-place</code>: tài liệu, phần và chỗ bạn đang đọc, để tải lại trang (hoặc khi điện thoại tự tải lại thẻ) thì mở đúng chỗ đó. Mục này mất khi đóng tab.</li>
      <li>Trình duyệt có thể lưu sẵn mô hình nhận dạng chữ (OCR) để không phải tải lại. Đây là tệp chung của ứng dụng, không chứa dữ liệu của bạn.</li>
     </ul>
    </section>
@@ -125,8 +133,8 @@
     <h2 id="su-dung-title">4. Hoa Trí dùng dữ liệu để làm gì</h2>
     <ul>
      <li>Đăng nhập, giữ phiên làm việc và bảo vệ tài khoản.</li>
-     <li>Dịch, lưu, hiển thị lại bản dịch và thư viện riêng của bạn; xử lý yêu cầu dịch bạn gửi.</li>
-     <li>Áp dụng giới hạn sử dụng, ngăn lạm dụng và tìm lỗi kỹ thuật.</li>
+     <li>Dịch, lưu, hiển thị lại bản dịch và Thư viện riêng của bạn; xử lý yêu cầu dịch bạn gửi.</li>
+     <li>Áp dụng giới hạn sử dụng, ngăn lạm dụng và tìm lỗi kỹ thuật (kể cả từ báo lỗi của trang).</li>
     </ul>
     <p>Chỉ bạn xem được tài liệu riêng của mình trong ứng dụng. Bên vận hành có quyền kỹ thuật để xem danh sách tài khoản, yêu cầu dịch và tài liệu trong Thư viện riêng, và chỉ dùng khi cần để vận hành, hỗ trợ bạn, xử lý vi phạm hoặc theo yêu cầu của cơ quan có thẩm quyền.</p>
     <p>Khi bạn chọn “Chia sẻ cộng đồng” cho một yêu cầu dịch, tài liệu hoàn thành có thể được đưa vào Thư viện chung để mọi người cùng đọc. Tên tài khoản của bạn không hiển thị trong Thư viện chung.</p>
@@ -159,7 +167,7 @@
      <li>Tài khoản, tài liệu và bản dịch được giữ cho tới khi bạn xóa. Bạn xóa từng bản dịch trong Lịch sử dịch, hoặc xóa cả tài khoản trong trang Tài khoản.</li>
      <li>Xóa tài khoản sẽ xóa ngay lịch sử dịch, sách trong Thư viện riêng, PDF gốc và bản dịch, yêu cầu dịch cùng tệp đính kèm, phiên đăng nhập và mật khẩu. Tài liệu bạn đã chia sẻ vào Thư viện chung vẫn được giữ nhưng không còn gắn với tài khoản nào.</li>
      <li>Tệp xóa khỏi kho tệp bị xóa vĩnh viễn ngay. Bản sao lưu tự động của cơ sở dữ liệu vẫn có thể khôi phục các dòng đã xóa trong tối đa 30 ngày, sau đó không còn.</li>
-     <li>Nhật ký của Cloudflare: tối đa 7 ngày. Bản ghi đếm theo địa chỉ IP: khoảng một ngày.</li>
+     <li>Nhật ký của Cloudflare, gồm cả báo lỗi của trang: tối đa 7 ngày. Bản ghi đếm theo địa chỉ IP: khoảng một ngày. Bản ghi đếm số lần nhập sai mật khẩu: khoảng một ngày sau lần sai cuối.</li>
      <li>Tài khoản bị khóa vẫn giữ nguyên dữ liệu cho tới khi được mở khóa hoặc bị xóa.</li>
     </ul>
    </section>
@@ -170,7 +178,7 @@
      <li><strong>Xem và tải về:</strong> bản dịch và PDF trong Thư viện riêng và Lịch sử dịch.</li>
      <li><strong>Sửa:</strong> tên tài liệu và nội dung bản dịch trong Xưởng dịch.</li>
      <li><strong>Xóa:</strong> từng bản dịch, hoặc cả tài khoản (Tài khoản → Xóa tài khoản). Xóa tài khoản cũng là cách rút lại sự đồng ý của bạn.</li>
-     <li><strong>Yêu cầu khác:</strong> hỏi về dữ liệu đang lưu, yêu cầu chỉnh sửa, phản đối hoặc hạn chế việc xử lý, khiếu nại. Hãy gửi email tới địa chỉ ở mục Liên hệ. Hiện Hoa Trí chưa có chức năng tự đổi mật khẩu hoặc tải toàn bộ dữ liệu một lần; bên vận hành hỗ trợ qua email.</li>
+     <li><strong>Yêu cầu khác:</strong> hỏi về dữ liệu đang lưu, yêu cầu chỉnh sửa, phản đối hoặc hạn chế việc xử lý, khiếu nại. Hãy gửi email tới địa chỉ ở mục Liên hệ. Bạn có thể tự đổi mật khẩu và đăng xuất khỏi mọi thiết bị trong trang Tài khoản; hiện Hoa Trí chưa có chức năng tải toàn bộ dữ liệu một lần, bên vận hành hỗ trợ qua email.</li>
     </ul>
     <p>Bên vận hành trả lời yêu cầu trong thời hạn pháp luật Việt Nam quy định.</p>
    </section>
@@ -198,7 +206,7 @@
    </section>
   </article>
  </main>
- <footer class="site-footer" data-site-footer><div class="site-footer-inner"><p class="site-footer-brand"><strong>Hoa Trí</strong> © 2026</p><nav class="site-footer-links" aria-label="Thông tin về Hoa Trí"><a href="/dieu-khoan">Điều khoản sử dụng</a><a href="/quyen-rieng-tu">Quyền riêng tư</a><a href="https://github.com/rynwoo1707/chinese-translator">Mã nguồn</a></nav></div></footer>
+ <footer class="site-footer" data-site-footer><div class="site-footer-inner"><p class="site-footer-brand"><strong>Hoa Trí</strong> © 2026</p><nav class="site-footer-links" aria-label="Thông tin về Hoa Trí"><a href="/dieu-khoan">Điều khoản sử dụng</a><a href="/quyen-rieng-tu">Quyền riêng tư</a><a href="https://github.com/rynwoo1707/chinese-translator/tree/handoff/2026-10-16">Mã nguồn</a></nav></div></footer>
  <script type="module" src="/site-footer.js"></script>
  <script type="module" src="/site-header.js"></script>
 </body>

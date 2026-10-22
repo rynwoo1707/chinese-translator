@@ -5,7 +5,7 @@ import {readdirSync,readFileSync} from 'node:fs';
 import {fileURLToPath} from 'node:url';
 import worker from './worker.js';
 import {studyRoute} from './study-translation.js';
-import {overDailyCap,vietnamDay,secondsToReset,dailyMax,limited,takeLease} from './rate-limit.js';
+import {overDailyCap,vietnamDay,secondsToReset,dailyMax,limited,rateLimit,tooMany,TOO_FAST} from './rate-limit.js';
 import {addressKey,clientIp} from './http.js';
 
 const origin='https://hoa-tri.example',reader={id:'reader-1',email:'lan@example.test',name:'Lan',picture:''};
@@ -56,27 +56,25 @@ test('Wrong passwords sent on purpose do not lock a student out of her account; 
  assert.equal((await post('/api/auth/login',{email:'lan@example.test',password:'doan-sai'},'192.0.2.200')).status,429);
 });
 
+test('A limit can bring its own message and say whose it is (scope); without them the answer is as before',async t=>{
+ const {DB}=sqliteDatabase(t),env={DB,AUTH_LIMITER:limiter(['k'])},network='Mạng này vừa dùng hết lượt trong một phút.';
+ assert.deepEqual(await (await rateLimit(env,[{binding:'AUTH_LIMITER',key:'k1'}])).json(),{error:TOO_FAST,code:'rate_limited',retryAfter:60});
+ const own=await rateLimit(env,[{binding:'AUTH_LIMITER',key:'k2',message:network,scope:'network'}]);
+ assert.equal(own.status,429);assert.equal(own.headers.get('Retry-After'),'60');assert.deepEqual(await own.json(),{error:network,code:'rate_limited',retryAfter:60,scope:'network'});
+ const daily=()=>rateLimit(env,[{daily:'register:x',max:1,message:'Mạng này đã tạo đủ tài khoản hôm nay.',scope:'network'}]);
+ assert.equal(await daily(),null);const refused=await daily(),body=await refused.json();
+ assert.equal(body.error,'Mạng này đã tạo đủ tài khoản hôm nay.');assert.equal(body.scope,'network');assert.equal(Number(refused.headers.get('Retry-After')),body.retryAfter);
+ const upload=()=>rateLimit(env,[{daily:'upload:x',max:1,label:'tải lên'}]);assert.equal(await upload(),null);
+ assert.deepEqual(Object.keys(await (await upload()).json()).sort(),['code','error','retryAfter'],'no scope unless a check names one');
+ assert.deepEqual(await tooMany(30,'Đợi đã.',{scope:'failures'}).json(),{error:'Đợi đã.',code:'rate_limited',retryAfter:30,scope:'failures'});
+});
+
 test('Limits count an IPv6 client by its /64 network and an IPv4 client by its address',()=>{
  for(const spelling of ['2001:db8:1:2::1','2001:DB8:0001:0002:abcd::','2001:db8:1:2:ffff:ffff:ffff:ffff','[2001:db8:1:2::9]'])assert.equal(addressKey(spelling),'2001:db8:1:2::/64',spelling);
  assert.equal(addressKey('2001:db8:1:3::1'),'2001:db8:1:3::/64');assert.equal(addressKey('203.0.113.9'),'203.0.113.9');
  assert.equal(addressKey('::ffff:203.0.113.9'),'203.0.113.9','an IPv4 client written as IPv6 is that IPv4 address');assert.equal(addressKey('::1'),'0:0:0:0::/64');
  for(const odd of ['1::2:3:4:5:6:7:8','gibberish:zz','2001:db8::1.2.3.256'])assert.equal(addressKey(odd),odd,'what is not an address is counted as it is');
  assert.equal(clientIp(new Request(origin,{headers:{'CF-Connecting-IP':'2001:db8:1:2::7'}})),'2001:db8:1:2::/64');assert.equal(clientIp(new Request(origin)),'local');
-});
-
-test('A lease lets one call at a time hold a key, frees itself when its holder stops, and fails open',async t=>{
- const {sqlite,DB}=sqliteDatabase(t),env={DB},now=Date.parse('2026-10-19T08:00:00Z');
- const first=await takeLease(env,'pdf:a',300000,now);assert.ok(first);
- assert.equal(await takeLease(env,'pdf:a',300000,now+1000),null,'held');
- assert.ok(await takeLease(env,'pdf:b',300000,now+1000),'another key is free');
- await first.release();const second=await takeLease(env,'pdf:a',300000,now+2000);assert.ok(second,'released');
- // A holder that never released (its Worker stopped) loses the lease when its time is up; its late release frees nothing.
- const third=await takeLease(env,'pdf:a',300000,now+2000+300000);assert.ok(third);
- await second.release();assert.equal(await takeLease(env,'pdf:a',300000,now+2000+300001),null);
- await third.release();assert.equal(sqlite.prepare("SELECT COUNT(*) AS n FROM service_leases WHERE key='pdf:a'").get().n,0);
- const lines=[];t.mock.method(console,'error',line=>lines.push(line));
- assert.ok(await takeLease({},'pdf:a',1000),'no database');assert.ok(await takeLease({DB:{prepare(){throw new Error('D1 down');}}},'pdf:a',1000),'a storage error');
- assert.equal(JSON.parse(lines[0]).event,'lease_error');
 });
 
 test('Study routes are limited per account: uploads and PDF service calls on the heavy limiter, other changes on the API one',async()=>{

@@ -39,7 +39,7 @@ test('Domain mode: no registration form, Google with the school domain; a server
  assert.doesNotMatch(domain,/reader-register-form|data-auth-tab|acceptTerms|role="tablist"/u,'no local registration in domain mode');
  assert.match(domain,/<form id="reader-login-form" class="auth-form" aria-labelledby="auth-login-title"><h2 class="auth-form-title" id="auth-login-title">Đăng nhập<\/h2>/u,'existing accounts still sign in with their password');
  assert.match(domain,/<p class="auth-note" role="note">Tài khoản mới chỉ tạo được bằng nút Tiếp tục bằng Google, với email thuộc truong\.edu\.vn hoặc &lt;b&gt;x&lt;\/b&gt;\.<\/p>/u);
- assert.match(domain,/id="google-login" href="\/api\/auth\/google\/start\?accept_terms=1&amp;return_to=%2F%23account" aria-disabled="true" aria-describedby="google-terms-hint google-domain-hint"/u);
+ assert.match(domain,/id="google-login" href="\/api\/auth\/google\/start\?return_to=%2F%23account" aria-disabled="true" aria-describedby="google-terms-hint google-domain-hint"/u);
  assert.match(domain,/<small class="google-terms" id="google-domain-hint">Tài khoản Google mới cần email thuộc truong\.edu\.vn hoặc &lt;b&gt;x&lt;\/b&gt;\.<\/small>/u);
  assert.match(domain,/id="google-terms-row"><input type="checkbox" data-terms-check>/u,'the Google button still waits for the terms box');
  const noGoogle=view({...signedOut({mode:'domain',domains:['truong.edu.vn']}),googleConfigured:false});

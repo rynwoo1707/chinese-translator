@@ -2,6 +2,8 @@ import {normalizeVietnameseText} from './vietnamese-text.js';
 import {listStudyModels,selectStudyModel,isStudyModel} from './gemini-models.js';
 import {normalizeVectorMath} from '../frontend/math-text.js';
 import {UserError} from './http.js';
+import {geminiRejection} from './gemini-errors.js';
+import {unifyHan} from './han-text.js';
 
 export function chunks(text, limit=10000){
  if(!Number.isInteger(limit)||limit<2)throw new Error('Chunk limit must be an integer >= 2');
@@ -94,42 +96,57 @@ function quotaError({code,retryAfter,resetAt}){
 // browser gets 503 with a wait and may try again (a whole-book run backs off and retries by itself before pausing).
 const UNAVAILABLE_WAIT=30;
 const unavailable=(message,retryAfter=UNAVAILABLE_WAIT)=>new UserError(message,503,'gemini_unavailable',{retryAfter});
-// 401/403 and an invalid, expired, blocked or region-locked key mean the student must fix the key: code gemini_key.
-// Google's own text is never shown: some of it quotes the key. Any other 400 is about the request, not the key.
-async function rejection(response){
- const body=await response.clone().json().catch(()=>null),error=body?.error||{},status=response.status,prefix=`Gemini từ chối yêu cầu (${status})`;
- const reasons=(Array.isArray(error.details)?error.details:[]).map(detail=>String(detail?.reason||'')).join(' ');
- if(status===403||/BLOCKED|SUSPENDED|SERVICE_DISABLED|LEAKED|DENIED/u.test(reasons))return new UserError(`${prefix}: khóa Gemini API đang bị chặn, bị tạm ngưng hoặc chưa được phép dùng Gemini API. Hãy kiểm tra khóa và dự án trong Google AI Studio.`,403,'gemini_key');
- if(error.status==='FAILED_PRECONDITION')return new UserError(`${prefix}: dự án của khóa này chưa dùng được Gemini API ở khu vực hiện tại hoặc cần bật Billing. Hãy kiểm tra trong Google AI Studio.`,403,'gemini_key');
- if(status===401||/API_KEY/u.test(reasons)||/api[ _-]?key/iu.test(String(error.message||'')))return new UserError(`${prefix}: khóa Gemini API không hợp lệ hoặc đã hết hạn. Hãy kiểm tra lại khóa trong Google AI Studio.`,400,'gemini_key');
- return new Error(`${prefix}: dữ liệu gửi đi không hợp lệ hoặc quá lớn. Hãy chia nhỏ phần dịch rồi thử lại.`);
-}
 // GEMINI_THINKING: 'minimal' (no reasoning), 'low' (small bounded budget) or unset (model default, which is
-// unbounded dynamic thinking on 2.5 Flash and high on Gemini 3 — the largest hidden token cost).
+// unbounded dynamic thinking on 2.5 Flash and high on Gemini 3 — the largest hidden token cost). Models are matched by
+// family, so a dated, -preview or -001 id of the same family gets the same bound.
 const THINKING_BUDGET={minimal:0,low:1024};
-function thinkingConfigFor(model,level){
+const BUDGET_FAMILY=/^gemini-2\.5-flash(?:-lite)?(?:-|$)/u,LEVEL_FAMILY=/^gemini-3(?:[.-]|$)/u;
+export function thinkingConfigFor(model,level){
  if(!Object.hasOwn(THINKING_BUDGET,level))return null;
- if(model==='gemini-2.5-flash'||model==='gemini-2.5-flash-lite')return {thinkingBudget:THINKING_BUDGET[level]};
- return model.startsWith('gemini-3.')?{thinkingLevel:level}:null;
+ if(BUDGET_FAMILY.test(model))return {thinkingBudget:THINKING_BUDGET[level]};
+ return LEVEL_FAMILY.test(model)?{thinkingLevel:level}:null;
 }
 // Google recommends the default temperature (1.0) for Gemini 3; lower values can cause looping, which
 // shows up as repeated text and truncated, token-hungry responses. Older models keep a low temperature.
 const temperatureFor=model=>model.startsWith('gemini-3')?{}:{temperature:0.1};
+// None of these blames the key (see gemini-errors.js).
 const FINISH_MESSAGES={
  MAX_TOKENS:'Gemini dừng vì bản dịch vượt giới hạn độ dài. Hãy chia tài liệu nhỏ hơn và thử lại.',
- RECITATION:'Gemini từ chối trả kết quả vì trùng khớp nguyên văn với nội dung có bản quyền. Hãy thử lại với đoạn ngắn hơn.',
- SAFETY:'Gemini chặn kết quả theo bộ lọc an toàn. Hãy kiểm tra đoạn nguồn hoặc chia nhỏ rồi thử lại.',
- default:'Gemini chưa trả kết quả đầy đủ. Hãy chia tài liệu nhỏ hơn và thử lại.'
+ RECITATION:'Gemini không trả kết quả vì đoạn này trùng khớp nguyên văn với nội dung có bản quyền.',
+ SAFETY:'Gemini chặn kết quả của đoạn này theo bộ lọc an toàn.',
+ default:'Gemini không trả kết quả cho đoạn này.'
 };
+// A failure about this text (a refusal, a cut-off or unreadable answer) rather than the key, the quota or the network:
+// sending a smaller piece of the same text can succeed.
+export const contentFailure=error=>['gemini_refused','gemini_truncated','gemini_malformed'].includes(error?.code);
 export function withThinking(env,level){return new Proxy(env,{get(target,property){return property==='GEMINI_THINKING'?level:Reflect.get(target,property);}});}
 async function cacheKey(env,payload){const bytes=await crypto.subtle.digest('SHA-256',new TextEncoder().encode(JSON.stringify({version:CACHE_VERSION,model:env.GEMINI_MODEL||'gemini-2.5-flash',thinking:env.GEMINI_THINKING||'default',payload})));return `ai-cache/${CACHE_VERSION}/${[...new Uint8Array(bytes)].map(value=>value.toString(16).padStart(2,'0')).join('')}.json`;}
-async function cachedTranslationGenerate(env,payload){
- if(!env.FILES?.get||!env.FILES?.put)return generate(env,[{text:JSON.stringify(payload)}],TRANSLATION_INSTRUCTION);
+// accept(result) throws when an answer cannot be used. Only an answer it takes is stored, and a stored one it refuses
+// (corrupt, or kept by an older version) is asked for again: one bad answer can never stop a job for good.
+async function cachedTranslationGenerate(env,payload,accept){
+ const request=()=>generate(env,[{text:JSON.stringify(payload)}],TRANSLATION_INSTRUCTION);
+ if(!env.FILES?.get||!env.FILES?.put)return request();
  const key=await cacheKey(env,payload),saved=await env.FILES.get(key);
- if(saved){try{const result=await saved.json();Object.defineProperty(result,'__usage',{value:{...emptyUsage(),cacheHits:1},enumerable:false});return result;}catch{/* Ignore corrupt cache and regenerate safely. */}}
- const result=await generate(env,[{text:JSON.stringify(payload)}],TRANSLATION_INSTRUCTION);
+ if(saved){try{const result=await saved.json();accept(result);Object.defineProperty(result,'__usage',{value:{...emptyUsage(),cacheHits:1},enumerable:false});return result;}catch{/* Regenerate and replace it. */}}
+ const result=await request();
+ try{accept(result);}catch(error){throw spentOn(error,result.__usage);}
  await env.FILES.put(key,JSON.stringify(result),{httpMetadata:{contentType:'application/json'}});
  return result;
+}
+// A book that belongs to a student, or is private, is never cached: deleting the account, the job or the book has to
+// remove every copy of its text, and cache entries are named by a hash of the text alone.
+export const privateStory=story=>Boolean(story?.owner_user_id)||story?.visibility==='private';
+const UNSAFE_KEYS=new Set(['__proto__','constructor','prototype']);
+// The parts of an answer the pipeline uses. The translation must be there with every formula token in place; the
+// optional notes are trimmed to their limits instead of failing a translation that was billed (at most 500 characters
+// of context and 30 terms of at most 100 characters each).
+export function translationAnswer(result,formulas=[]){
+ if(typeof result?.translation!=='string'||!result.translation.trim())throw new UserError('Gemini trả bản dịch rỗng hoặc sai định dạng.',400,'gemini_malformed');
+ const translation=restoreMathExpressions(normalizeVietnameseText(result.translation),formulas);
+ const rawContext=result.contextUpdate??result.context,rawGlossary=result.glossaryUpdates??result.glossary;
+ const contextUpdate=typeof rawContext==='string'?normalizeVietnameseText(rawContext.trim()).slice(0,500):'';
+ const glossaryUpdates=rawGlossary&&typeof rawGlossary==='object'&&!Array.isArray(rawGlossary)?Object.fromEntries(Object.entries(rawGlossary).filter(([key,value])=>key&&key.length<=100&&!UNSAFE_KEYS.has(key)&&typeof value==='string'&&value.trim()&&value.length<=100).slice(0,30).map(([key,value])=>[key,normalizeVietnameseText(value.trim())])):{};
+ return {translation,contextUpdate,glossaryUpdates};
 }
 export async function generate(env,parts,instruction,json=true,{schema,maxOutputTokens=32768}={}){
  if(!env.GEMINI_API_KEY)throw new Error('Chưa cấu hình GEMINI_API_KEY trên máy chủ. Tài liệu vẫn được giữ để dịch sau.');
@@ -156,27 +173,30 @@ export async function generate(env,parts,instruction,json=true,{schema,maxOutput
    continue;
   }
   if(!response.ok){
-   if([400,401,403].includes(response.status))throw fail(await rejection(response));
+   if([400,401,403].includes(response.status))throw fail(await geminiRejection(response));
    if(response.status===404){
     rejectedModels.add(model);
     if(env.GEMINI_MODEL_RECOVERY&&isStudyModel(model)&&attempt<2){const models=(await listStudyModels(env.GEMINI_API_KEY)).filter(m=>!rejectedModels.has(m.id)),replacement=selectStudyModel(models,model,env.GEMINI_PREFERRED_MODEL||'gemini-3.6-flash');if(replacement){model=replacement;continue;}}
-    throw fail(new Error(`Model Gemini “${model}” không khả dụng với khóa này. Bấm Kiểm tra model của khóa và chọn một model khả dụng để tiếp tục.`));
+    // Students choose the version in Xưởng dịch (frontend/study.html, under "Nâng cao"); the admin pipeline uses the
+    // server's GEMINI_MODEL.
+    throw fail(new UserError(env.GEMINI_MODEL_RECOVERY?`Phiên bản Gemini “${model}” không khả dụng với khóa này. Hãy mở “Nâng cao”, bấm “Kiểm tra phiên bản dùng được với khóa” rồi chọn một phiên bản trong danh sách để tiếp tục.`:`Phiên bản Gemini “${model}” không khả dụng với khóa của máy chủ. Hãy đặt GEMINI_MODEL trong cấu hình máy chủ thành một phiên bản khóa này dùng được.`,400,'gemini_model'));
    }
-   throw fail(new Error(`Gemini trả lỗi ${response.status}. Kiểm tra hạn mức và thử lại sau.`));
+   throw fail(new UserError(`Gemini trả lỗi ${response.status}. Kiểm tra hạn mức và thử lại sau.`,400,'gemini_error'));
   }
   const result=await response.json();const candidate=result.candidates?.[0];addUsage(spent,usageFrom(result.usageMetadata));
-  if(candidate?.finishReason!=='STOP'){const error=new Error(FINISH_MESSAGES[candidate?.finishReason]||FINISH_MESSAGES.default);error.finishReason=candidate?.finishReason||'NONE';throw fail(error);}
-  const text=candidate.content?.parts?.filter(p=>!p.thought).map(p=>p.text||'').join('');if(!text)throw fail(new Error('Gemini không trả nội dung.'));
+  if(candidate?.finishReason!=='STOP'){const reason=candidate?.finishReason||'NONE',error=new UserError(FINISH_MESSAGES[reason]||FINISH_MESSAGES.default,400,reason==='MAX_TOKENS'?'gemini_truncated':'gemini_refused');error.finishReason=reason;throw fail(error);}
+  const text=candidate.content?.parts?.filter(p=>!p.thought).map(p=>p.text||'').join('');if(!text)throw fail(new UserError('Gemini không trả nội dung.',400,'gemini_malformed'));
   if(!json)return text;
-  try{const parsed=JSON.parse(text.trim().replace(/^```(?:json)?\s*/i,'').replace(/\s*```$/,''));Object.defineProperty(parsed,'__usage',{value:{...spent},enumerable:false});Object.defineProperty(parsed,'__model',{value:model,enumerable:false});return parsed;}catch{if(attempt<2)continue;throw fail(new Error('Gemini trả dữ liệu sai định dạng sau 3 lần thử. Tiến độ đã lưu; hãy bấm Tiếp tục dịch.'));}
+  try{const parsed=JSON.parse(text.trim().replace(/^```(?:json)?\s*/i,'').replace(/\s*```$/,''));Object.defineProperty(parsed,'__usage',{value:{...spent},enumerable:false});Object.defineProperty(parsed,'__model',{value:model,enumerable:false});return parsed;}catch{if(attempt<2)continue;throw fail(new UserError('Gemini trả dữ liệu sai định dạng sau 3 lần thử. Tiến độ đã lưu; hãy bấm Tiếp tục dịch.',400,'gemini_malformed'));}
  }
 }
 // The prompt carries at most `limit` terms. Teacher/editor terms are authoritative and must never be the ones
 // dropped, so they come first, then terms learned earlier in the book, then built-in textbook vocabulary.
 // Within a group longer (more specific) terms win, e.g. 空间向量 before 向量.
+// Terms and text are compared with look-alike ideographs unified (han-text.js), and the prompt names each term so.
 export function relevantGlossary(glossary,text,{priority={},builtIn={}}={},limit=60){
- const rank=key=>Object.hasOwn(priority,key)?0:Object.hasOwn(builtIn,key)?2:1;
- return Object.fromEntries(Object.entries(glossary).filter(([key])=>text.includes(key)).sort(([a],[b])=>rank(a)-rank(b)||b.length-a.length).slice(0,limit));
+ const rank=key=>Object.hasOwn(priority,key)?0:Object.hasOwn(builtIn,key)?2:1,haystack=unifyHan(text);
+ return Object.fromEntries(Object.entries(glossary).filter(([key])=>haystack.includes(unifyHan(key))).sort(([a],[b])=>rank(a)-rank(b)||b.length-a.length).slice(0,limit).map(([key,value])=>[unifyHan(key),value]));
 }
 const SPLIT_MIN=1000;
 export async function translate(env,source,story){
@@ -190,8 +210,12 @@ export async function translate(env,source,story){
   const protectedMath=protectMathExpressions(part),payload={source:protectedMath.source,context,genre:story.genre,glossary:relevant,previousSource:String(story.previousSource||'').slice(-350),previousTranslation:(translation||story.previousTranslation||'').slice(-500)};
   // story.noCache lets a deliberate retry (translateAndVerify's full-retry fallback) skip the content
   // cache; otherwise it would just replay the same deficient translation it is trying to fix.
-  let result;
-  try{result=protectedMath.formulas.length||story.noCache?await generate(env,[{text:JSON.stringify(payload)}],TRANSLATION_INSTRUCTION):await cachedTranslationGenerate(env,payload);}
+  const accept=result=>translationAnswer(result,protectedMath.formulas);
+  let result,answer;
+  try{
+   result=protectedMath.formulas.length||story.noCache||privateStory(story)?await generate(env,[{text:JSON.stringify(payload)}],TRANSLATION_INSTRUCTION):await cachedTranslationGenerate(env,payload,accept);
+   try{answer=accept(result);}catch(error){throw spentOn(error,result.__usage);}
+  }
   catch(error){
    // The cut-off answer was billed in full, so it is counted before the two halves are requested.
    addUsage(usage,error?.usage);
@@ -201,9 +225,7 @@ export async function translate(env,source,story){
   }
   addUsage(usage,result.__usage);
   model=result.__model||model;
-  const contextUpdate=result.contextUpdate??result.context??'',glossaryUpdates=result.glossaryUpdates??result.glossary??{};
-  if(typeof result.translation!=='string'||!result.translation.trim()||typeof contextUpdate!=='string'||contextUpdate.length>500||!glossaryUpdates||typeof glossaryUpdates!=='object'||Array.isArray(glossaryUpdates)||Object.entries(glossaryUpdates).length>40||Object.entries(glossaryUpdates).some(([k,v])=>!k||k.length>100||typeof v!=='string'||!v.trim()||v.length>100))throw new Error('Bản dịch hoặc dữ liệu ngữ cảnh sai định dạng.');
-  translation+=restoreMathExpressions(normalizeVietnameseText(result.translation),protectedMath.formulas)+'\n\n';if(contextUpdate.trim()){const combined=(context?context+'\n':'')+normalizeVietnameseText(contextUpdate.trim());context=combined.length<=1200?combined:combined.slice(0,350)+'\n'+combined.slice(-840);}glossary={...glossary,...Object.fromEntries(Object.entries(glossaryUpdates).map(([key,value])=>[key,normalizeVietnameseText(value)])),...fixedGlossary};
+  translation+=answer.translation+'\n\n';if(answer.contextUpdate){const combined=(context?context+'\n':'')+answer.contextUpdate;context=combined.length<=1200?combined:combined.slice(0,350)+'\n'+combined.slice(-840);}glossary={...glossary,...answer.glossaryUpdates,...fixedGlossary};
  }}catch(error){throw spentOn(error,usage);}
  return {translation:translation.trim(),context,glossary,usage,model};
 }
@@ -227,9 +249,9 @@ export function missingTranslationMarkers(source,translation){
 // verbatim. Built-in textbook entries are skipped because they legitimately vary with context (định nghĩa /
 // xác định); teacher-set and book-learned terms are the ones that must stay consistent.
 export function missingGlossaryTerms(source,translation,glossary){
- const text=normalizeVietnameseText(translation).toLocaleLowerCase('vi'),builtIn={...TEXTBOOK_GLOSSARY,...MATH_GLOSSARY},missed=[];
+ const text=normalizeVietnameseText(translation).toLocaleLowerCase('vi'),builtIn={...TEXTBOOK_GLOSSARY,...MATH_GLOSSARY},missed=[],chinese=unifyHan(source);
  for(const [key,value] of Object.entries(glossary||{})){
-  if(typeof value!=='string'||!value.trim()||!String(source).includes(key)||builtIn[key]===value)continue;
+  if(typeof value!=='string'||!value.trim()||!chinese.includes(unifyHan(key))||builtIn[unifyHan(key)]===value)continue;
   const options=value.split(/\s*[\/;]\s*/u).map(option=>normalizeVietnameseText(option).toLocaleLowerCase('vi').trim()).filter(Boolean);
   if(!options.some(option=>text.includes(option)))missed.push(`${key} → ${value}`);
  }

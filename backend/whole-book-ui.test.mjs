@@ -7,6 +7,8 @@ import {createRequire} from 'node:module';
 import {createHash,randomUUID} from 'node:crypto';
 import {fileURLToPath} from 'node:url';
 import {extname,normalize,join} from 'node:path';
+import {overflowMessage,blockLabel} from '../services/pdf-layout/engine.mjs';
+import {serviceFailure} from './pdf-layout.js';
 
 // "Dịch cả quyển" in Microsoft Edge: the real study.html, study.js and whole-book.js against a fake Hoa Trí that keeps
 // jobs, history, books and the stored original as the Worker does. The Gemini-backed routes (translate-blocks,
@@ -37,7 +39,7 @@ async function bookPdf(){
 
 // blocksPerPage/blockChars: long blocks go to Gemini one per request, so a stop can land in the middle of a page.
 function fakeHoaTri({blocksPerPage=1,blockChars=0}={}){
- const state={log:[],sources:new Map(),jobs:[],history:new Map(),books:[],manifests:new Map(),chunks:[],translations:[],usage:0,translateCalls:0,translateHook:null,translateGate:null};
+ const state={log:[],sources:new Map(),jobs:[],history:new Map(),books:[],manifests:new Map(),chunks:[],translations:[],usage:0,translateCalls:0,translateHook:null,translateGate:null,ocrSlim:[]};
  const send=(res,status,body,headers={})=>{res.writeHead(status,{'Content-Type':'application/json','Cache-Control':'no-store',...headers});res.end(body===undefined?'':JSON.stringify(body));};
  const read=req=>new Promise((resolve,reject)=>{const chunks=[];req.on('data',chunk=>chunks.push(chunk));req.on('end',()=>resolve(Buffer.concat(chunks)));req.on('error',reject);});
  const job=id=>state.jobs.find(entry=>entry.id===id);
@@ -45,10 +47,13 @@ function fakeHoaTri({blocksPerPage=1,blockChars=0}={}){
  const held=found=>Boolean(found.runnerId)&&found.leaseUntil>Date.now();
  const view=({runnerId,leaseUntil,counted,...found})=>({...found,runner:held({runnerId,leaseUntil})?runnerId:null,leaseSeconds:held({runnerId,leaseUntil})?Math.ceil((leaseUntil-Date.now())/1000):0});
  const partOf=(row,manifest)=>({id:row.library_chapter_id,title:row.title,position:null,mime:row.exported?'application/pdf':'text/plain',sessionId:row.id,filename:row.filename,pageStart:row.page_start,pageEnd:row.page_end,totalPages:row.source_total_pages,sha256:row.source_sha256,pages:manifest.pages.map(page=>page.number),updatedAt:row.updated_at,translatedAt:row.updated_at});
+ // As backend/study-history.js: a first save may name its session (body.id); a save naming an older revision is refused.
  function saveHistory(id,body){
-  const prior=id?state.history.get(id):null,sessionId=id||randomUUID(),stateBody=body.state,manifest=state.manifests.get(stateBody.pdfLayout?.assetId),complete=stateBody.done===stateBody.parts.length&&stateBody.translationParts.every(text=>text?.trim());
+  id||=body.id&&state.history.has(body.id)?body.id:null;
+  const prior=id?state.history.get(id):null,sessionId=id||body.id||randomUUID(),stateBody=body.state,manifest=state.manifests.get(stateBody.pdfLayout?.assetId),complete=stateBody.done===stateBody.parts.length&&stateBody.translationParts.every(text=>text?.trim());
+  if(prior&&body.revision!==undefined&&body.revision!==prior.row.revision)return [409,{error:'Bản dịch này vừa được lưu từ một thẻ hoặc thiết bị khác.',code:'history_conflict',revision:prior.row.revision}];
   const pages=manifest?manifest.pages.map(page=>page.number):[];
-  const row={...(prior?.row||{created_at:sqlTime()}),id:sessionId,title:body.title,filename:body.filename,domain:body.domain,mode:body.mode,status:complete?'complete':stateBody.done?'translating':'draft',translated_parts:stateBody.done,total_parts:stateBody.parts.length,page_start:pages.length?Math.min(...pages):null,page_end:pages.length?Math.max(...pages):null,source_total_pages:manifest?.totalPages??null,source_sha256:manifest?.sourceSha256||body.sha256||null,updated_at:sqlTime()};
+  const row={...(prior?.row||{created_at:sqlTime()}),id:sessionId,title:body.title,filename:body.filename,domain:body.domain,mode:body.mode,status:complete?'complete':stateBody.done?'translating':'draft',translated_parts:stateBody.done,total_parts:stateBody.parts.length,page_start:pages.length?Math.min(...pages):null,page_end:pages.length?Math.max(...pages):null,source_total_pages:manifest?.totalPages??null,source_sha256:manifest?.sourceSha256||body.sha256||null,updated_at:sqlTime(),revision:(prior?.row.revision||0)+1};
   row.library_story_id=prior?.row.library_story_id||(Object.hasOwn(body,'bookId')?body.bookId||null:null);row.library_chapter_id=prior?.row.library_chapter_id||null;
   if(complete&&!row.library_chapter_id){
    let book=state.books.find(entry=>entry.id===row.library_story_id);
@@ -58,7 +63,7 @@ function fakeHoaTri({blocksPerPage=1,blockChars=0}={}){
    for(const part of book.parts)if(book.parts.length>1&&part.title===book.title)part.title=part.pageStart===part.pageEnd?`Trang ${part.pageStart}`:`Trang ${part.pageStart}–${part.pageEnd}`;
   }
   state.history.set(sessionId,{row,state:{...stateBody,pdfLayout:{...stateBody.pdfLayout,...(prior?.state.pdfLayout?.exported?{exported:true,renderVersion:3}:{})}}});
-  return {id:sessionId,status:row.status,libraryStoryId:row.library_story_id,libraryChapterId:row.library_chapter_id,updatedAt:new Date().toISOString()};
+  return [prior?200:201,{id:sessionId,status:row.status,libraryStoryId:row.library_story_id,libraryChapterId:row.library_chapter_id,updatedAt:new Date().toISOString(),revision:row.revision}];
  }
  async function extract(form){
   const file=form.get('file'),offset=Number(form.get('pageOffset')),sha=form.get('sourceSha256'),stored=state.sources.get(sha);
@@ -110,12 +115,13 @@ function fakeHoaTri({blocksPerPage=1,blockChars=0}={}){
    if(input.runner&&(!held(found)||mine))Object.assign(found,found.status==='running'?{runnerId:input.runner,leaseUntil:now+600000}:{runnerId:null,leaseUntil:0});
    state.patches=(state.patches||0)+1;return send(res,200,{job:view(found)});
   }
-  if(path==='/api/my/study/history'&&method==='GET')return send(res,200,[...state.history.values()].map(entry=>entry.row).sort((a,b)=>b.updated_at.localeCompare(a.updated_at)));
-  if(path==='/api/my/study/history'&&method==='POST')return send(res,201,saveHistory(null,json()));
+  // The newest 100, as backend/study-history.js lists them.
+  if(path==='/api/my/study/history'&&method==='GET')return send(res,200,[...state.history.values()].map(entry=>entry.row).sort((a,b)=>b.updated_at.localeCompare(a.updated_at)).slice(0,100));
+  if(path==='/api/my/study/history'&&method==='POST')return send(res,...saveHistory(null,json()));
   if((match=path.match(/^\/api\/my\/study\/history\/([\w-]+)$/u))){
    const entry=state.history.get(match[1]);if(!entry)return send(res,404,{error:'Không tìm thấy lịch sử dịch.'});
    if(method==='GET')return send(res,200,{...entry.row,state:entry.state});
-   if(method==='PUT')return send(res,200,saveHistory(match[1],json()));
+   if(method==='PUT')return send(res,...saveHistory(match[1],json()));
    if(method==='DELETE'){
     state.history.delete(match[1]);const book=state.books.find(item=>item.id===entry.row.library_story_id);let removedBookId=null;
     if(book){book.parts=book.parts.filter(part=>part.sessionId!==entry.row.id);if(!book.parts.length){state.books=state.books.filter(item=>item!==book);removedBookId=book.id;}}
@@ -127,17 +133,22 @@ function fakeHoaTri({blocksPerPage=1,blockChars=0}={}){
   if((match=path.match(/^\/api\/my\/study\/pdf-layout\/assets\/([\w-]+)\/manifest$/u)))return send(res,200,state.manifests.get(match[1]));
   if(path==='/api/my/study/pdf-layout/extract'){const form=await new Request('http://fake/extract',{method:'POST',headers:{'content-type':req.headers['content-type']},body}).formData(),[status,result]=await extract(form);return send(res,status,result);}
   if(path==='/api/my/study/pdf-layout/ocr-blocks'){
-   const input=json(),document=state.manifests.get(input.assetId);assert.equal(input.apiKey,KEY);
-   for(const block of document.pages.flatMap(page=>page.blocks))if(input.blockIds.includes(block.id)){block.ocrCorrected=true;block.source=block.text;}
-   document.ocrCorrectedVersion=1;state.usage+=1500;return send(res,200,{document,usage:{prompt:1200,output:300,thinking:0,total:1500,requests:1},warnings:[],model:input.model});
+   const input=json(),document=state.manifests.get(input.assetId),warnings=[];assert.equal(input.apiKey,KEY);
+   // state.ocrKept {id: code}: a block Gemini could not read again keeps its machine text, stored as read with its mark
+   // and named in a warning (backend/pdf-block-ocr.js).
+   for(const page of document.pages)for(const [index,block] of page.blocks.entries())if(input.blockIds.includes(block.id)){block.ocrCorrected=true;if(state.ocrKept?.[block.id]){block.ocrKept=state.ocrKept[block.id];warnings.push(`Trang ${page.number} · đoạn ${index+1}: Gemini không trả bản đọc vì trùng khớp nguyên văn với nội dung có bản quyền. Đoạn này giữ chữ OCR máy, có thể sai; hãy đối chiếu với trang gốc.`);}else block.source=block.text;}
+   document.ocrCorrectedVersion=1;document.ocrWarnings=[...(document.ocrWarnings||[]),...warnings];state.usage+=1500;state.ocrSlim.push(input.slim===true);const usage={prompt:1200,output:300,thinking:0,total:1500,requests:1};
+   // slim (backend/pdf-layout.js ocrBlockFields): only the blocks read, never the manifest with its images.
+   if(input.slim===true)return send(res,200,{blocks:document.pages.flatMap(page=>page.blocks).filter(block=>input.blockIds.includes(block.id)).map(({id,source,text,ocrCorrected,ocrKept})=>({id,source,text,ocrCorrected,...(ocrKept?{ocrKept}:{})})),ocrCorrectedVersion:1,ocrWarnings:document.ocrWarnings,usage,warnings,model:input.model});
+   return send(res,200,{document,usage,warnings,model:input.model});
   }
   if(path==='/api/my/study/translate-blocks'){
    const input=json(),call=++state.translateCalls;assert.equal(input.apiKey,KEY);state.translations.push(input);
    const hooked=state.translateHook?.(input,call);if(hooked)return send(res,hooked[0],hooked[1]);if(state.translateGate)await state.translateGate;
    state.usage+=867;
-   return send(res,200,{blocks:input.blocks.map(block=>({id:block.id,translation:`Bản dịch ${block.id.split('-')[0].replace('p','trang ')}.`})),context:'Sách thử.',glossary:{...input.glossary,[`术语${call}`]:`thuật ngữ ${call}`},usage:{prompt:600,output:267,thinking:0,total:867,requests:1},warnings:[],model:'gemini-2.5-flash-lite'});
+   return send(res,200,{blocks:input.blocks.map(block=>({id:block.id,translation:`Bản dịch ${block.id.split('-')[0].replace('p','trang ')}.`})),...(input.partial?{failedBlocks:[]}:{}),context:'Sách thử.',glossary:{...input.glossary,[`术语${call}`]:`thuật ngữ ${call}`},usage:{prompt:600,output:267,thinking:0,total:867,requests:1},warnings:[],model:'gemini-2.5-flash-lite'});
   }
-  if(path==='/api/my/study/pdf-layout/render'){const input=json(),entry=state.history.get(input.historyId);entry.row.exported=true;entry.state.pdfLayout={...entry.state.pdfLayout,exported:true,renderVersion:3};for(const book of state.books)for(const part of book.parts)if(part.sessionId===entry.row.id)part.mime='application/pdf';state.renders=(state.renders||0)+1;return send(res,200,{url:`/api/my/study/pdf-layout/assets/${input.assetId}/translated`,renderVersion:3});}
+  if(path==='/api/my/study/pdf-layout/render'){const input=json(),entry=state.history.get(input.historyId),hooked=state.renderHook?.(input,state.manifests.get(input.assetId));if(hooked)return send(res,hooked[0],hooked[1]);entry.row.exported=true;entry.state.pdfLayout={...entry.state.pdfLayout,exported:true,renderVersion:3};for(const book of state.books)for(const part of book.parts)if(part.sessionId===entry.row.id)part.mime='application/pdf';state.renders=(state.renders||0)+1;return send(res,200,{url:`/api/my/study/pdf-layout/assets/${input.assetId}/translated`,renderVersion:3});}
   return send(res,404,{error:`fake: ${method} ${path}`});
  }
  const server=createServer(async(req,res)=>{
@@ -170,7 +181,9 @@ async function pickBook(page,pdf){
 const statusText=page=>page.$eval('#whole-book-status',node=>node.textContent);
 
 // Each scenario has its own fake server and browser context, so they run side by side.
-describe('Dịch cả quyển in Edge',{concurrency:true},()=>{
+// At most four pages at a time, like study-ui-layout: every run here draws PDFs with pdf.js, and too many at once can
+// make Edge close mid-run on a machine short of memory.
+describe('Dịch cả quyển in Edge',{concurrency:4},()=>{
 test('Dịch cả quyển: upload once, chunks of at most 20 pages with their offset, blank and cover pages free, quota wait, grouped history',{skip,timeout:180000},async()=>{
  const fake=fakeHoaTri(),base=await fake.listen(),pdf=await bookPdf(),sha=createHash('sha256').update(pdf).digest('hex');
  // The first Gemini call hits the per-minute quota: the run must wait and go on by itself.
@@ -199,6 +212,9 @@ test('Dịch cả quyển: upload once, chunks of at most 20 pages with their of
   // The book's glossary goes with every chunk: the term chunk 1 learned is in chunk 2's request.
   assert.ok(Object.hasOwn(job.glossary,'术语2'));assert.equal(state.translations.at(-1).glossary['术语2'],'thuật ngữ 2');
   assert.equal(state.translateCalls,3);
+  // The scanned page was read with slim answers: the manifest with its images never came back for a reading.
+  assert.ok(state.ocrSlim.length&&state.ocrSlim.every(Boolean),JSON.stringify(state.ocrSlim));
+  assert.ok(state.translations.every(input=>input.partial===true),'every block batch asks for what passed and what failed');
   const statuses=await page.evaluate(()=>window.__statuses);
   assert.ok(statuses.some(text=>/giới hạn số yêu cầu mỗi phút .*Tự tiếp tục sau \d+ giây/u.test(text)),statuses.join('\n'));
   // Both parts joined one book, were exported, and the book got its cover image.
@@ -338,5 +354,86 @@ test('Dịch cả quyển: a second device never runs the book another device is
   assert.deepEqual([...fake.state.runners],[holder],'every report came from the laptop');
   assert.deepEqual(laptop.errors,[]);assert.deepEqual(phone.errors,[]);assert.deepEqual(fake.state.failures,undefined);
  }finally{await laptop.context.close();await phone?.context.close();await fake.close();}
+});
+
+test('Dịch cả quyển: a tab opened before the chunk was saved, with over 100 newer sessions since, continues the paused chunk from the server by its id; nothing is extracted or paid twice',{skip,timeout:180000},async()=>{
+ const fake=fakeHoaTri({blocksPerPage:2,blockChars:2600}),base=await fake.listen(),pdf=await bookPdf();let dayQuota=true;
+ // Chunk 1 (pages 2–21): page 2's two blocks are translated, then the key's day quota stops the run inside the chunk.
+ fake.state.translateHook=(input,call)=>dayQuota&&call===3?[429,{error:'Gemini báo khóa này đã dùng hết hạn mức trong ngày.',code:'quota_day',retryAfter:null}]:null;
+ // This tab opens now, before the book is started anywhere, and keeps the history list it loaded.
+ const stale=await openStudy(base),other=await openStudy(base);
+ try{
+  await pickBook(other.page,pdf);await other.page.fill('#content-title','Sách hai thẻ');await other.page.fill('#api-key',KEY);await other.page.click('#translate');
+  await other.page.waitForFunction(()=>/hết hạn mức trong ngày/u.test(document.querySelector('#whole-book-status').textContent),null,{timeout:120000});
+  const [job]=fake.state.jobs,[paused]=[...fake.state.history.values()];assert.equal(job.status,'paused');assert.equal(paused.state.done,2);assert.equal(fake.state.chunks.length,1);
+  // 101 sessions of other documents are saved after it: the newest 100 the history lists no longer hold the paused chunk.
+  for(let i=0;i<101;i++){const id=`9a0b1c2d-3e4f-4a5b-8c6d-${String(i).padStart(12,'0')}`;fake.state.history.set(id,{row:{id,title:`Bài khác ${i+1}`,filename:'khac.txt',domain:'general',mode:'economy',status:'complete',translated_parts:1,total_parts:1,library_story_id:null,library_chapter_id:null,page_start:null,page_end:null,source_total_pages:null,source_sha256:null,created_at:'2099-01-01 00:00:00',updated_at:`2099-01-01 0${Math.floor(i/60)}:${String(i%60).padStart(2,'0')}:00`,revision:1},state:{}});}
+  await other.context.close();
+  // The old tab picks the same file: the run goes on in the paused chunk instead of extracting it again.
+  dayQuota=false;await pickBook(stale.page,pdf);await stale.page.fill('#api-key',KEY);
+  await stale.page.waitForFunction(()=>document.querySelector('#translate').textContent.trim()==='Tiếp tục dịch cả quyển →');await stale.page.click('#translate');
+  await stale.page.waitForFunction(()=>/Đã dịch xong cả quyển/u.test(document.querySelector('#whole-book-status').textContent),null,{timeout:120000});
+  assert.equal(fake.state.chunks.length,2,'chunk 1 extracted once, chunk 2 once');
+  const paid=fake.state.translations.flatMap(input=>input.blocks.map(block=>block.id));
+  assert.equal(paid.filter(id=>id==='p2-b1').length,1,'the blocks translated before the pause are not paid again');assert.equal(paid.filter(id=>id==='p2-b2').length,1);
+  assert.equal(job.status,'done');assert.equal(job.pageStates,'c'+'d'.repeat(BLANK-2)+'b'+'d'.repeat(TOTAL-BLANK));
+  assert.equal([...fake.state.history.values()].filter(entry=>entry.row.source_sha256===job.sourceSha256).length,2,'one session per chunk');
+  assert.deepEqual(stale.errors,[]);assert.deepEqual(fake.state.failures,undefined);
+ }finally{await stale.context.close();await fake.close();}
+});
+
+test('Dịch cả quyển: a block Gemini will not translate keeps its Chinese with a note that stays; the book goes on and is finished',{skip,timeout:180000},async()=>{
+ const fake=fakeHoaTri(),base=await fake.listen(),pdf=await bookPdf();
+ const REFUSED='Gemini không trả kết quả vì đoạn này trùng khớp nguyên văn với nội dung có bản quyền.';
+ fake.state.translateHook=input=>{
+  if(!input.blocks.some(block=>block.id==='p5-b1'))return null;
+  if(!input.partial)return [400,{error:REFUSED,code:'gemini_refused'}];
+  return [200,{blocks:input.blocks.filter(block=>block.id!=='p5-b1').map(block=>({id:block.id,translation:`Bản dịch ${block.id}.`})),failedBlocks:[{id:'p5-b1',code:'gemini_refused',message:REFUSED}],context:'',glossary:{},usage:{prompt:900,output:300,thinking:0,total:1200,requests:2},warnings:[],model:'gemini-2.5-flash-lite'}];
+ };
+ const {context,page,errors}=await openStudy(base);
+ try{
+  await pickBook(page,pdf);await page.fill('#content-title','Sách có đoạn bị từ chối');await page.fill('#api-key',KEY);await page.click('#translate');
+  await page.waitForFunction(()=>/Đã dịch xong cả quyển|Tạm dừng|Tiến độ đã lưu/u.test(document.querySelector('#whole-book-status').textContent),null,{timeout:120000});
+  const [job]=fake.state.jobs;assert.equal(job.status,'done');assert.equal(job.pageStates,'c'+'d'.repeat(BLANK-2)+'b'+'d'.repeat(TOTAL-BLANK));
+  const chunk=[...fake.state.history.values()].find(entry=>entry.row.page_start===2),index=chunk.state.parts.findIndex(text=>text.startsWith('第5页'));
+  assert.equal(chunk.state.translationParts[index],chunk.state.parts[index],'the refused block keeps its Chinese, so the part is complete and exported');assert.equal(chunk.row.status,'complete');
+  // The note is kept past the chunk: it is still there once the book is finished.
+  assert.match(await page.$eval('#warnings',node=>node.textContent),/Trang 5 · đoạn 1: giữ nguyên chữ gốc\. Gemini không trả kết quả vì đoạn này trùng khớp nguyên văn với nội dung có bản quyền\. Có thể dịch tay đoạn này trong “Chỉnh bản dịch từng đoạn”\./u);
+  assert.equal(fake.state.renders,2);assert.deepEqual(errors,[]);assert.deepEqual(fake.state.failures,undefined);
+ }finally{await context.close();await fake.close();}
+});
+
+test('Dịch cả quyển: a scanned block Gemini could not read again keeps its machine text, is never read again, and its note stays to the end of the book',{skip,timeout:180000},async()=>{
+ const fake=fakeHoaTri(),base=await fake.listen(),pdf=await bookPdf();fake.state.ocrKept={'p3-b1':'refused'};
+ const {context,page,errors}=await openStudy(base);
+ try{
+  await pickBook(page,pdf);await page.fill('#content-title','Sách có trang scan khó đọc');await page.fill('#api-key',KEY);await page.click('#translate');
+  await page.waitForFunction(()=>/Đã dịch xong cả quyển|Tạm dừng|Tiến độ đã lưu/u.test(document.querySelector('#whole-book-status').textContent),null,{timeout:120000});
+  const [job]=fake.state.jobs;assert.equal(job.status,'done');assert.equal(job.pageStates,'c'+'d'.repeat(BLANK-2)+'b'+'d'.repeat(TOTAL-BLANK));
+  assert.equal(fake.state.ocrSlim.length,1,'the scanned page is read once');
+  const chunk=[...fake.state.history.values()].find(entry=>entry.row.page_start===2);assert.ok(chunk.state.parts.includes(`第${SCANNED}页（扫描）第1段`),'its machine text is translated');
+  // The note is kept past the chunk: it is still there once the book is finished.
+  assert.match(await page.$eval('#warnings',node=>node.textContent),/Trang 3 · đoạn 1: Gemini không trả bản đọc vì trùng khớp nguyên văn với nội dung có bản quyền\. Đoạn này giữ chữ OCR máy, có thể sai; hãy đối chiếu với trang gốc\./u);
+  assert.deepEqual(errors,[]);assert.deepEqual(fake.state.failures,undefined);
+ }finally{await context.close();await fake.close();}
+});
+
+test('Dịch cả quyển: a chunk whose export finds translations longer than their boxes gets a short note naming them; the book goes on and is finished',{skip,timeout:180000},async()=>{
+ const fake=fakeHoaTri(),base=await fake.listen(),pdf=await bookPdf();let refused=0;
+ // The first chunk's export: the PDF service finds page 5's block too long, as the Worker answers it (backend/pdf-layout.js).
+ fake.state.renderHook=(input,document)=>{
+  if(refused++)return null;const page=document.pages.find(entry=>entry.number===5),entries=[{page:5,id:'p5-b1',label:blockLabel(page,'p5-b1')}];
+  const failure=serviceFailure(422,{error:overflowMessage(entries),code:'overflow',blocks:entries.map(({page,id})=>({page,id}))});return [failure.status,{error:failure.message,code:failure.code,blocks:failure.blocks}];
+ };
+ const {context,page,errors}=await openStudy(base);
+ try{
+  await pickBook(page,pdf);await page.fill('#content-title','Sách có đoạn dài');await page.fill('#api-key',KEY);await page.click('#translate');
+  await page.waitForFunction(()=>/Đã dịch xong cả quyển|Tạm dừng|Tiến độ đã lưu/u.test(document.querySelector('#whole-book-status').textContent),null,{timeout:120000});
+  const [job]=fake.state.jobs;assert.equal(job.status,'done');assert.equal(job.pageStates,'c'+'d'.repeat(BLANK-2)+'b'+'d'.repeat(TOTAL-BLANK));assert.equal(fake.state.renders,1,'the second chunk is exported');
+  const warnings=await page.$eval('#warnings',node=>node.textContent);
+  assert.match(warnings,/^Trang 2–21: chưa xuất được PDF tiếng Việt vì bản dịch của Trang 5 · đoạn 1 dài hơn khung chữ, kể cả khi đã thu nhỏ chữ hết mức\. Mở phần này trong Lịch sử dịch, viết ngắn lại đoạn đó trong “Chỉnh bản dịch từng đoạn”, bấm “Lưu đoạn đã sửa” rồi bấm Xuất PDF tiếng Việt; không tốn token\.$/mu);
+  assert.doesNotMatch(warnings,/Ở phần “Đối chiếu kết quả”/u,'the service\'s long advice is for an open part, not for a note in the middle of a book');
+  assert.deepEqual(errors,[]);assert.deepEqual(fake.state.failures,undefined);
+ }finally{await context.close();await fake.close();}
 });
 });

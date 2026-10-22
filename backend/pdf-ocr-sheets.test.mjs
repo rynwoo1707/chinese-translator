@@ -40,10 +40,12 @@ function mockGeneration(t,answer){
  t.mock.method(globalThis,'fetch',async(url,options)=>{calls.push({url:String(url),body:JSON.parse(options.body)});return generationResponse(typeof answer==='function'?answer(calls):answer);});
  return calls;
 }
+// Manifests are stored as ASCII JSON bytes (asciiJsonBytes); values a test puts itself are strings.
+const storedText=value=>typeof value==='string'?value:new TextDecoder().decode(value);
 class MemoryFiles{
  constructor(){this.values=new Map();this.writes=[];}
  async put(key,value){this.values.set(key,value);this.writes.push(key);}
- async get(key){const value=this.values.get(key);return value===undefined?null:{body:value,json:async()=>JSON.parse(value)};}
+ async get(key){const value=this.values.get(key);return value===undefined?null:{body:value,json:async()=>JSON.parse(storedText(value)),text:async()=>storedText(value)};}
 }
 const ocrRoute=(env,blockIds)=>pdfLayoutRoute(new Request(`https://example.test${base}/ocr-blocks`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({assetId,apiKey:studentKey,model,blockIds})}),env,base+'/ocr-blocks',reader);
 async function stored(document=sheetDocument()){const FILES=new MemoryFiles();await FILES.put(manifestKey,JSON.stringify(document));return {env:{FILES,GEMINI_API_KEY:'server-key',GEMINI_MODEL:'gemini-2.5-flash'},FILES};}
@@ -85,26 +87,30 @@ test('Sheet OCR maps answers to blocks, drops a copied tab label, restores @N la
  assert.equal(calls[0].body.generationConfig.maxOutputTokens,1024+4*blocks.reduce((n,b)=>n+b.source.length,0));
  assert.deepEqual(result.blocks,[{id:'p7-b1',text:REAL[0][2]},{id:'p7-b5',text:REAL[2][2]},{id:'p7-b6',text:'因为 @@PDF_INLINE_1@@ 所以'}]);
  assert.deepEqual(result.usage,{prompt:2300,output:120,thinking:0,total:2420,requests:1,cacheHits:0});
- // the existing ID and formula-token validation still applies to sheet answers
- for(const answer of [[{id:'p7-b1',text:REAL[0][2]},{id:'p7-b5',text:REAL[2][2]}],[{id:'p7-b1',text:REAL[0][2]},{id:'p7-b5',text:REAL[2][2]},{id:'p7-b6',text:'因为 a=b 所以'}],[{id:'p7-b1',text:REAL[0][2]},{id:'p7-b1',text:REAL[2][2]},{id:'p7-b6',text:'@@PDF_INLINE_1@@'}]]){
-  t.mock.restoreAll();mockGeneration(t,{blocks:answer,warnings:[]});await assert.rejects(()=>recognizePdfBlocks(aiEnv,blocks,sheets));
+ // the existing ID and formula-token checks still apply to sheet answers: a block whose answer is missing, doubled or
+ // lost its formula keeps its machine OCR text (ocrKept), and the other blocks keep their readings
+ for(const [answer,codes] of [[[{id:'p7-b1',text:REAL[0][2]},{id:'p7-b5',text:REAL[2][2]}],[undefined,undefined,'unread']],[[{id:'p7-b1',text:REAL[0][2]},{id:'p7-b5',text:REAL[2][2]},{id:'p7-b6',text:'因为 a=b 所以'}],[undefined,undefined,'formula']],[[{id:'p7-b1',text:REAL[0][2]},{id:'p7-b1',text:REAL[2][2]},{id:'p7-b6',text:'@@PDF_INLINE_1@@'}],['unread','unread',undefined]]]){
+  t.mock.restoreAll();mockGeneration(t,{blocks:answer,warnings:[]});const read=await recognizePdfBlocks(aiEnv,blocks,sheets);
+  assert.deepEqual(read.blocks.map(b=>b.ocrKept),codes);for(const [i,b] of read.blocks.entries())if(b.ocrKept)assert.equal(b.text,blocks[i].source,'the machine OCR text');
  }
 });
 
-test('Sheet answers that name strips by their tab labels map to those blocks; mostly empty answers are rejected',async t=>{
+test('Sheet answers that name strips by their tab labels map to those blocks; empty strips keep their machine text',async t=>{
  const document=sheetDocument(),blocks=document.pages[0].blocks,sheets=document.pages[0].ocrSheets;
  mockGeneration(t,{blocks:[{id:'#3',text:'因为 @1 所以'},{id:'#1',text:REAL[0][2]},{id:'#2',text:REAL[2][2]}],warnings:[]});
  assert.deepEqual((await recognizePdfBlocks(aiEnv,blocks,sheets)).blocks,[{id:'p7-b1',text:REAL[0][2]},{id:'p7-b5',text:REAL[2][2]},{id:'p7-b6',text:'因为 @@PDF_INLINE_1@@ 所以'}]);
  t.mock.restoreAll();mockGeneration(t,{blocks:[{id:'p7-b1',text:''},{id:'p7-b5',text:' '},{id:'p7-b6',text:'因为 @1 所以'}],warnings:[]});
- await assert.rejects(()=>recognizePdfBlocks(aiEnv,blocks,sheets),/không đọc được chữ ở 2\/3 đoạn/u);
+ const most=await recognizePdfBlocks(aiEnv,blocks,sheets);assert.deepEqual(most.blocks.map(b=>b.ocrKept),['empty','empty',undefined]);
+ assert.deepEqual(most.blocks.map(b=>b.text),[REAL[0][1],REAL[2][1],'因为 @@PDF_INLINE_1@@ 所以']);assert.match(most.warnings[0],/^Trang 7 · đoạn 1, Trang 7 · đoạn 5: Gemini không thấy chữ trong ảnh/u);
  t.mock.restoreAll();mockGeneration(t,{blocks:[{id:'p7-b1',text:''},{id:'p7-b5',text:REAL[2][2]},{id:'p7-b6',text:'因为 @1 所以'}],warnings:[]});
- const one=await recognizePdfBlocks(aiEnv,blocks,sheets);assert.equal(one.blocks[0].text,REAL[0][1]);assert.match(one.warnings[0],/p7-b1/u);
+ const one=await recognizePdfBlocks(aiEnv,blocks,sheets);assert.equal(one.blocks[0].text,REAL[0][1]);assert.equal(one.blocks[0].ocrKept,'empty');assert.match(one.warnings[0],/^Trang 7 · đoạn 1: /u);
 });
 
-test('An answer whose texts were swapped between strips is rejected and not returned',async t=>{
+test('An answer whose texts were swapped between strips is not returned: both blocks keep their machine text',async t=>{
  const document=sheetDocument(),blocks=document.pages[0].blocks,sheets=document.pages[0].ocrSheets;
  mockGeneration(t,{blocks:[{id:'p7-b1',text:REAL[2][2]},{id:'p7-b5',text:REAL[0][2]},{id:'p7-b6',text:'因为 @@PDF_INLINE_1@@ 所以'}],warnings:[]});
- await assert.rejects(()=>recognizePdfBlocks(aiEnv,blocks,sheets),/gán lẫn chữ giữa các đoạn p7-b1, p7-b5/u);
+ const result=await recognizePdfBlocks(aiEnv,blocks,sheets);assert.deepEqual(result.blocks.map(b=>b.ocrKept),['mixed','mixed',undefined]);
+ assert.deepEqual(result.blocks.slice(0,2).map(b=>b.text),[REAL[0][1],REAL[2][1]]);assert.match(result.warnings[0],/^Trang 7 · đoạn 1, Trang 7 · đoạn 5: bản đọc của Gemini lẫn chữ giữa các đoạn/u);
 });
 
 test('Misassignment detection compares each text with its own hint and the other blocks hints (real case19 readings)',()=>{
@@ -170,7 +176,7 @@ test('OCR route reads whole stored sheets only, sends the stored sheet images an
  assert.deepEqual(blocks.filter(b=>b.ocrCorrected).map(b=>b.id),['p7-b1','p7-b5','p8-b2']);assert.equal(blocks.find(b=>b.id==='p7-b5').source,REAL[2][2]);
  assert.equal(result.document.ocrCorrectedVersion,0,'p7-b6 on sheet p7-s2 is still to read');
  assert.deepEqual(result.document.pages[0].ocrSheets,sheetDocument().pages[0].ocrSheets,'sheets are kept for a later run');
- assert.doesNotMatch(JSON.stringify(FILES.values.get(manifestKey)),/student-ocr-key|server-key/u);
+ assert.doesNotMatch(storedText(FILES.values.get(manifestKey)),/student-ocr-key|server-key/u);
 });
 
 test('OCR route rejects part of a sheet, sheets mixed with paragraph images and unknown sheets before any Gemini call',async t=>{

@@ -67,7 +67,7 @@ test('Real SQLite PDF history moves between saved text and rendered PDF without 
  const chapter=()=>sqlite.prepare('SELECT * FROM chapters WHERE story_id=?').get(saved.libraryStoryId);
  assert.equal(chapter().mime,'text/plain');assert.equal(chapter().file_key,null);assert.equal(await (await env.FILES.get(chapter().text_key)).text(),'Công thức a = b.');
  const renderPath='/api/my/study/pdf-layout/render',historyPath=historyBase+'/'+saved.id;let renderCalls=0;
- t.mock.method(globalThis,'fetch',async(url,options)=>{renderCalls++;assert.equal(new URL(url).pathname,'/render');assert.equal(JSON.parse(options.body).translations[0].translation,body.state.translationParts[0]);return Response.json({pdfBase64:btoa('%PDF-1.7\nVietnamese'),report:[]});});
+ t.mock.method(globalThis,'fetch',async(url,options)=>{renderCalls++;assert.equal(new URL(url).pathname,'/render');assert.equal(JSON.parse(await new Response(options.body).text()).translations[0].translation,body.state.translationParts[0]);return Response.json({pdfBase64:btoa('%PDF-1.7\nVietnamese'),report:[]});});
  assert.equal((await pdfLayoutRoute(request(renderPath,{assetId,historyId:saved.id}),env,renderPath,reader)).status,200);
  const translatedKey=`study/${reader.id}/pdf-layout/${assetId}/translated.pdf`;assert.equal(chapter().file_key,translatedKey);assert.equal(chapter().mime,'application/pdf');
  const stateKey=`study/${reader.id}/${saved.id}/state.json`,stateBeforeRename=await (await env.FILES.get(stateKey)).text();body.title='Vectơ trong không gian – bài 1';

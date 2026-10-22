@@ -1,5 +1,6 @@
 import {unzipSync} from 'fflate';
 import {parseDocument} from 'htmlparser2';
+import {countTags,documentTooLarge,HTML_ELEMENTS} from './document-limits.js';
 const localName=node=>(node.name||'').split(':').pop().toLowerCase();
 function elements(node,name){const found=[];for(const child of node.children||[]){if(localName(child)===name)found.push(child);found.push(...elements(child,name));}return found;}
 function text(node){if(node.type==='text')return node.data;return (node.children||[]).map(text).join('');}
@@ -42,7 +43,9 @@ export function extractEpub(data){
   const item=items.get(ref.attribs.idref);if(!item)throw new Error('EPUB thiếu chương được liệt kê trong thứ tự đọc.');
   const path=resolvePath(opfPath,item.href);if(encrypted.includes(path))throw new Error('Nội dung EPUB được mã hóa/khóa DRM. Hãy dùng bản EPUB không khóa.');
   if(!['application/xhtml+xml','text/html'].includes(item['media-type']))throw new Error('EPUB có chương dạng ảnh/SVG chưa hỗ trợ dịch. Hãy chuyển phần này sang PDF để OCR.');
-  const dom=parseDocument(read(path),{decodeEntities:true});const body=elements(dom,'body')[0]||dom;
+  // A chapter is parsed into a tree: one of a few megabytes that is nothing but tags would not fit in a Worker.
+  const html=read(path);if(countTags(html,HTML_ELEMENTS)>HTML_ELEMENTS)throw documentTooLarge(`Phần ${chapters.length+1} của EPUB có quá nhiều thẻ định dạng để máy chủ đọc an toàn. Hãy chia sách hoặc chuyển sang TXT/PDF rồi thử lại.`);
+  const dom=parseDocument(html,{decodeEntities:true});const body=elements(dom,'body')[0]||dom;
   let content=chapterText(body).replace(/ *\n */g,'\n').replace(/\n{3,}/g,'\n\n').trim();
   if(content)readable++;
   else{content='[Phần không có văn bản; cần đối chiếu ảnh trong EPUB gốc.]';warnings.push(`Phần ${chapters.length+1} (${path}) không có văn bản để dịch.`);}

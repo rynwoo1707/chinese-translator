@@ -31,6 +31,9 @@
   // Non-secret settings only, the same for production and wrangler dev; a line in .dev.vars overrides one locally.
   // Tokens, API keys and the PDF service URL stay secrets (wrangler secret put, or npm run deploy -- --secrets-file).
   // Never add a "secrets" block: once it exists, wrangler dev loads only the names it lists from .dev.vars.
+  // PDF_LAYOUT_SLOTS: PDF jobs at once for the whole site, the same number as the service's PDF_LAYOUT_JOBS.
+  // DAILY_REGISTRATIONS_PER_IP: accounts one network may create a day (0 = no cap). PDF_LAYOUT_VERSION is never set
+  // here: npm run deploy passes the hash of this checkout's layout checks.
   "vars": {
     "GEMINI_MODEL": "gemini-3.6-flash",
     "GEMINI_PDF_BLOCK_MODEL": "",
@@ -39,7 +42,9 @@
     "GEMINI_BALANCED_MODEL": "",
     "GEMINI_THINKING": "",
     "REGISTRATION_MODE": "open",
-    "ALLOWED_EMAIL_DOMAINS": ""
+    "ALLOWED_EMAIL_DOMAINS": "",
+    "PDF_LAYOUT_SLOTS": "2",
+    "DAILY_REGISTRATIONS_PER_IP": "150"
   },
   // Per-minute limits, counted per Cloudflare location (a loose flood filter; daily caps are counted in D1).
   // namespace_id must be unique within the Cloudflare account, or two bindings share their counters.

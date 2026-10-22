@@ -36,6 +36,27 @@ test('paddleInstalled(): a 404 or a page in place of worker.js means not install
  }
 });
 
+test('The install check gives up after 15 s where AbortSignal.timeout is missing (Safari/iOS 15.4), as where it exists',async t=>{
+ // A server that never answers, unless the request is aborted.
+ const signals=[];answer=(url,options)=>{signals.push(options.signal);return options.signal?new Promise((resolve,reject)=>options.signal.addEventListener('abort',()=>reject(options.signal.reason),{once:true})):Promise.reject(new Error('no deadline: this check would wait for ever'));};
+ const native=Object.getOwnPropertyDescriptor(AbortSignal,'timeout');delete AbortSignal.timeout;
+ t.mock.timers.enable({apis:['setTimeout']});
+ try{
+  const ocr=await freshTab(),installed=ocr.paddleInstalled();
+  for(let i=0;i<5&&!signals.length;i++)await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(signals.length,1);assert.ok(signals[0] instanceof AbortSignal,'the request carries a deadline');
+  t.mock.timers.tick(14_999);assert.equal(signals[0].aborted,false);
+  t.mock.timers.tick(1);assert.equal(signals[0].aborted,true);assert.equal(signals[0].reason?.name,'TimeoutError');
+  assert.equal(await installed,false,'no answer counts as not installed for this page');
+  // Asked again next time, as after a lost connection.
+  const again=ocr.paddleInstalled();for(let i=0;i<5&&signals.length<2;i++)await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(signals.length,2);t.mock.timers.tick(15_000);assert.equal(await again,false);
+ }finally{t.mock.timers.reset();Object.defineProperty(AbortSignal,'timeout',native);}
+ // A browser with AbortSignal.timeout uses it.
+ const ocr=await freshTab();signals.length=0;answer=(url,options)=>{signals.push(options.signal);return page(200,'text/javascript')();};
+ assert.equal(await ocr.paddleInstalled(),true);assert.ok(signals[0] instanceof AbortSignal);
+});
+
 test('ocrDownload() names the engine this install uses, the size of its first download and whether the browser keeps it',async()=>{
  // Without PaddleOCR: Tesseract, about 9 MB (8.8 MB measured), not kept (no IndexedDB in Node counts as not kept).
  answer=page(404,'text/html');

@@ -149,11 +149,13 @@ test('Reader at 390 px in the real app: footnote notes stay on screen, the term 
    assert.equal(box.display,'block',`[${index+1}] open`);assert.ok(box.left>=0&&box.right<=box.view,`[${index+1}] ${box.left}..${box.right} inside 0..${box.view}`);assert.equal(box.sideways,0,`[${index+1}] no sideways scroll`);
    await ref.click();
   }
-  // The term popover sits under the sticky header and closes once its term scrolls under it.
+  // The term popover sits under the header. While reading on a phone the header scrolls away with the page (it would
+  // cover a fifth of the screen), so the popover closes once its term leaves the top of the screen.
   await page.evaluate(()=>scrollTo(0,0));const term=page.locator('.prose .term').first();await term.scrollIntoViewIfNeeded();await term.click();
   assert.equal(await page.$eval('#term-popover',popover=>popover.hidden),false);
   assert.ok(await page.evaluate(()=>Number(getComputedStyle(document.querySelector('#term-popover')).zIndex)<Number(getComputedStyle(document.querySelector('.site-masthead')).zIndex)));
-  await page.evaluate(()=>{const term=document.querySelector('.term[aria-expanded="true"]');scrollBy(0,term.getBoundingClientRect().bottom-document.querySelector('.site-masthead').getBoundingClientRect().bottom+40);});
+  assert.equal(await page.evaluate(()=>getComputedStyle(document.querySelector('.site-masthead')).position),'relative');
+  await page.evaluate(()=>{const term=document.querySelector('.term[aria-expanded="true"]');scrollBy(0,term.getBoundingClientRect().bottom+40);});
   await page.waitForFunction(()=>document.querySelector('#term-popover').hidden);
   // The next part: every Chinese run is marked, the book is not loaded again.
   await page.click('#next-chapter');await page.waitForFunction(()=>document.querySelector('.reader h1')?.textContent==='Thế gia');

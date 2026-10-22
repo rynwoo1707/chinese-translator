@@ -6,6 +6,10 @@ import {fileURLToPath} from 'node:url';
 import {pdfLayoutRoute} from './pdf-layout.js';
 import {studyRoute} from './study-translation.js';
 import {studyHistoryRoute} from './study-history.js';
+import {errorResponse} from './http.js';
+import {holdLease,keepRenewed} from './pdf-slots.js';
+import {classifyError} from '../frontend/whole-book.js';
+import {overflowMessage} from '../services/pdf-layout/engine.mjs';
 
 const base='/api/my/study/pdf-layout',origin='https://example.test';
 const reader={id:'student-1',name:'Lan'},other={id:'student-2'};
@@ -20,15 +24,19 @@ const document=()=>({version:1,pages:[{number:4,width:600,height:800,background:
 ]}]});
 const jsonRequest=(path,body)=>new Request(origin+path,{method:'POST',headers:{'Content-Type':'application/json',Origin:origin},body:JSON.stringify(body)});
 
+// Manifests are stored as ASCII JSON bytes (asciiJsonBytes); values a test puts itself are strings.
+const storedText=value=>typeof value==='string'?value:new TextDecoder().decode(value);
 class MemoryFiles{
  constructor(){this.values=new Map();this.reads=[];this.writes=[];this.deletes=[];}
- async put(key,value,options){this.values.set(key,{value,options});this.writes.push({key,value,options});}
+ // Like R2, a streamed value is read to its end when stored.
+ async put(key,value,options){if(typeof value!=='string'&&!ArrayBuffer.isView(value)&&!(value instanceof ArrayBuffer))value=new Uint8Array(await new Response(value).arrayBuffer());this.values.set(key,{value,options});this.writes.push({key,value,options});}
  // R2 deletes one key or a list of keys.
  async delete(keys){for(const key of [keys].flat()){this.deletes.push(key);this.values.delete(key);}}
  async get(key){
   this.reads.push(key);const item=this.values.get(key);if(!item)return null;
   const text=()=>typeof item.value==='string'?item.value:new TextDecoder().decode(item.value);
-  return {body:typeof item.value==='string'?new TextEncoder().encode(item.value):item.value,customMetadata:item.options?.customMetadata,json:async()=>JSON.parse(text()),text:async()=>text()};
+  const bytes=()=>typeof item.value==='string'?new TextEncoder().encode(item.value):item.value;
+  return {body:bytes(),customMetadata:item.options?.customMetadata,json:async()=>JSON.parse(text()),text:async()=>text(),arrayBuffer:async()=>bytes().slice().buffer};
  }
 }
 function environment(){
@@ -107,8 +115,8 @@ test('PDF extraction sends the selected range and stores the selected original a
  // Besides the selected pages, the whole uploaded file is kept once under the reader's own sources folder.
  const sourceKey=`study/${reader.id}/sources/${result.document.sourceSha256}.pdf`;
  assert.ok(FILES.writes.every(item=>item.key.startsWith(`study/${reader.id}/pdf-layout/${result.assetId}/`)||item.key===sourceKey));
- assert.equal(await FILES.values.get(sourceKey).value.text(),pdf);
- assert.doesNotMatch(JSON.stringify(FILES.writes),/student-key|service-secret/);assert.doesNotMatch(JSON.stringify(result),/student-key|service-secret/);
+ assert.equal(storedText(FILES.values.get(sourceKey).value),pdf);
+ assert.doesNotMatch(FILES.writes.map(write=>storedText(write.value)).join('\n'),/student-key|service-secret/);assert.doesNotMatch(JSON.stringify(result),/student-key|service-secret/);
 });
 
 test('PDF extraction rejects non-PDF bytes and invalid block geometry before persistence',async t=>{
@@ -123,7 +131,7 @@ test('PDF extraction rejects non-PDF bytes and invalid block geometry before per
 
 test('PDF rendering uses saved owner history and ignores translations supplied in the request',async t=>{
  const {env,FILES,sessions,queries}=environment(),row=await seed(env);sessions.set(historyId,row);const calls=[];
- t.mock.method(globalThis,'fetch',async(url,options)=>{calls.push({url:String(url),options,body:JSON.parse(options.body)});return Response.json({pdfBase64:btoa('%PDF-1.7\nVietnamese'),report:[{id:'p4-b0',overflow:false}]});});
+ t.mock.method(globalThis,'fetch',async(url,options)=>{calls.push({url:String(url),options,body:JSON.parse(await new Response(options.body).text())});return Response.json({pdfBase64:btoa('%PDF-1.7\nVietnamese'),report:[{id:'p4-b0',overflow:false}]});});
  const response=await pdfLayoutRoute(jsonRequest(base+'/render',{assetId,historyId,translations:[{id:'p4-b0',translation:'injected attacker translation'}],apiKey:'never-use-me'}),env,base+'/render',reader),result=await response.json();
  assert.equal(response.status,200);assert.equal(calls.length,1);assert.equal(calls[0].url,'https://pdf.example.test/v1/render');
  assert.deepEqual(calls[0].body.translations,[{id:'p4-b0',translation:'Định nghĩa vectơ.'},{id:'p4-b1',translation:'Công thức @@PDF_INLINE_0@@.'}]);
@@ -232,7 +240,7 @@ test('PDF refresh re-extracts saved selected pages into a new asset and restores
  assert.equal(writes.find(w=>w.key.endsWith('/original.pdf')).options.httpMetadata.contentType,'application/pdf');
  assert.equal(new TextDecoder().decode(writes.find(w=>w.key.endsWith('/original.pdf')).value),pdf);
  assert.equal(FILES.values.get(assetKey(reader,'manifest.json')).value,oldManifest);assert.deepEqual(FILES.values.get(assetKey(reader,'original.pdf')).value,oldOriginal);
- assert.equal(result.originalUrl,`${base}/assets/${result.assetId}/original`);assert.doesNotMatch(JSON.stringify(result),/student-key|service-secret/);assert.doesNotMatch(JSON.stringify(writes),/student-key|service-secret/);
+ assert.equal(result.originalUrl,`${base}/assets/${result.assetId}/original`);assert.doesNotMatch(JSON.stringify(result),/student-key|service-secret/);assert.doesNotMatch(writes.map(write=>storedText(write.value)).join('\n'),/student-key|service-secret/);
 });
 
 test('A current PDF extraction returns its existing asset without service calls or storage writes',async t=>{
@@ -280,7 +288,7 @@ test('PDF extraction records the uploaded file hash so ranges of one textbook ca
  const {env,FILES}=environment(),hex=async text=>[...new Uint8Array(await crypto.subtle.digest('SHA-256',new TextEncoder().encode(text)))].map(x=>x.toString(16).padStart(2,'0')).join('');
  t.mock.method(globalThis,'fetch',async()=>Response.json({document:document(),originalPdfBase64:btoa(pdf)}));
  const extract=async sha256=>{const form=new FormData();form.set('file',new File([pdf],'lesson.pdf',{type:'application/pdf'}));form.set('pages','4');if(sha256!==undefined)form.set('sha256',sha256);const response=await pdfLayoutRoute(new Request(origin+base+'/extract',{method:'POST',body:form}),env,base+'/extract',reader);return (await response.json()).assetId;};
- const stored=async id=>JSON.parse(FILES.values.get(`study/${reader.id}/pdf-layout/${id}/manifest.json`).value).sourceSha256;
+ const stored=async id=>JSON.parse(await (await FILES.get(`study/${reader.id}/pdf-layout/${id}/manifest.json`)).text()).sourceSha256;
  // The stored original is filed under this hash, so the Worker always hashes the upload itself: a browser value (or none,
  // on plain-HTTP phones without crypto.subtle) never decides it.
  const fromBrowser='c'.repeat(64);assert.equal(await stored(await extract(fromBrowser)),await hex(pdf));
@@ -352,4 +360,162 @@ test('OCR results for an account deleted during the Gemini call are not kept, an
  const response=await pdfLayoutRoute(jsonRequest(base+'/ocr-blocks',{assetId,apiKey:'student-ocr-key-12345678901234567890',model:'gemini-3.6-flash',blockIds:['p4-b0']}),env,base+'/ocr-blocks',reader),body=await response.json();
  assert.equal(response.status,410);assert.equal(body.code,'account_deleted');assert.equal(body.usage.total,40);
  assert.equal(env.FILES.values.has(key),false,'the manifest written after the deletion is removed again');
+});
+
+// What a PDF call's failure is in the browser: the Worker's answer (errorResponse for a thrown error) read the way
+// study.js api() reads it, then classified as a whole-book run classifies it.
+async function browserError(call){
+ let response;try{response=await call();}catch(error){response=errorResponse(error);}
+ const data=await response.json();
+ return Object.assign(new Error(data.error),{status:response.status,data,retryAfter:Number(response.headers.get('Retry-After'))||null});
+}
+const until=async(check,ms=5000)=>{const end=Date.now()+ms;while(!check()){if(Date.now()>end)throw new Error('timed out waiting');await new Promise(done=>setTimeout(done,5));}};
+const ocrBody=(blockIds,extra={})=>({assetId,apiKey:'student-ocr-key-12345678901234567890',model:'gemini-3.6-flash',blockIds,...extra});
+const geminiReading=(blocks,warnings=[])=>Response.json({candidates:[{finishReason:'STOP',content:{parts:[{text:JSON.stringify({blocks,warnings})}]}}],usageMetadata:{promptTokenCount:23,candidatesTokenCount:17,totalTokenCount:40}});
+
+test('PDF service failures reach the browser typed: busy is waited out, too heavy halves the chunk, out of reach backs off',async t=>{
+ const {env}=environment();let answer;t.mock.method(globalThis,'fetch',async()=>answer());
+ const call=()=>pdfLayoutRoute(new Request(origin+base+'/extract',{method:'POST',body:extractForm()}),env,base+'/extract',reader);
+ const heavy='Tách PDF vượt thời gian cho phép. Hãy chọn ít trang hơn cho mỗi lượt.',memory='Dịch vụ PDF dừng đột ngột khi xử lý các trang đã chọn (tín hiệu SIGKILL, có thể do hết bộ nhớ). Hãy thử lại với ít trang hơn; nếu vẫn lỗi, hãy kiểm tra tệp PDF.';
+ // [service answer, browser status, code, whole-book reason]; the answers without code are an older service's.
+ const cases=[
+  [()=>Response.json({error:'Dịch vụ PDF đang bận. Hãy thử lại sau.',code:'busy',retryAfter:20},{status:503,headers:{'Retry-After':'20'}}),503,'pdf_service_busy','pdf_busy'],
+  [()=>Response.json({error:'Dịch vụ PDF đang bận. Hãy thử lại sau.'},{status:503}),503,'pdf_service_busy','pdf_busy'],
+  [()=>Response.json({error:heavy,code:'timeout'},{status:422}),413,'pdf_timeout','too_large'],
+  [()=>Response.json({error:heavy},{status:422}),413,'pdf_timeout','too_large'],
+  [()=>Response.json({error:memory,code:'memory'},{status:422}),413,'pdf_memory','too_large'],
+  [()=>Response.json({error:memory},{status:422}),413,'pdf_memory','too_large'],
+  [()=>Response.json({error:'Không đủ bộ nhớ để xử lý các trang đã chọn. Hãy chọn ít trang hơn cho mỗi lượt.'},{status:422}),413,'pdf_memory','too_large'],
+  [()=>Response.json({error:'Kết quả tách PDF vượt giới hạn dung lượng của dịch vụ. Hãy chọn ít trang hơn cho mỗi lượt.',code:'too_large'},{status:422}),413,'pdf_too_large','too_large'],
+  [()=>Response.json({error:'Dịch vụ PDF dừng đột ngột khi xử lý các trang đã chọn (tín hiệu SIGSEGV). Hãy thử lại với ít trang hơn; nếu vẫn lỗi, hãy kiểm tra tệp PDF.',code:'crash'},{status:422}),413,'pdf_crash','too_large'],
+  [()=>{throw new TypeError('fetch failed');},503,'pdf_unavailable','network'],
+  [()=>{throw new DOMException('The operation timed out.','TimeoutError');},413,'pdf_timeout','too_large'],
+  [()=>new Response('<html>502 Bad Gateway</html>',{status:502,headers:{'Content-Type':'text/html'}}),503,'pdf_unavailable','network']
+ ];
+ for(const [make,status,code,reason] of cases){
+  answer=make;const error=await browserError(call),kind=classifyError(error,'extract');
+  assert.equal(error.status,status,code);assert.equal(error.data.code,code);assert.equal(kind.reason,reason,code);
+  if(status===503){assert.ok(error.retryAfter>0,code);assert.equal(error.data.retryAfter,error.retryAfter);}
+  if(['pdf_timeout','pdf_memory','pdf_too_large'].includes(code))assert.equal(kind.heavy,true,code);
+ }
+ // Busy is waited out far longer than a lost connection, and a hidden tab keeps counting down.
+ answer=cases[0][0];const busy=classifyError(await browserError(call),'extract');
+ assert.deepEqual(busy,{reason:'pdf_busy',backoff:true,retries:30,wait:20,early:false,jitter:true});
+ // A problem of the file itself keeps its plain answer, so a run halves the chunk to find that page.
+ answer=()=>Response.json({error:'Trang 3: không đọc được hình vẽ.'},{status:422});
+ const page=await browserError(call);assert.equal(page.status,400);assert.equal(page.data.code,undefined);assert.equal(classifyError(page,'extract').reason,'page');
+ assert.match((await browserError(call)).data.error,/^Trang 3: /u);
+});
+
+test('An export refused for translations longer than their boxes reaches the browser as 422 pdf_overflow with the boxes to open',async t=>{
+ const {env,FILES,sessions}=environment(),row=await seed(env);sessions.set(historyId,row);let answer;t.mock.method(globalThis,'fetch',async()=>answer());
+ const call=()=>browserError(()=>pdfLayoutRoute(jsonRequest(base+'/render',{assetId,historyId}),env,base+'/render',reader));
+ // The service's text names "Đoạn k" on each page and the controls of Xưởng dịch; it is passed on whole (up to 600
+ // characters), and only well-formed boxes go with it.
+ const message=overflowMessage(Array.from({length:3000},(_,i)=>({page:10000+i,id:`p${10000+i}-b${i}`,label:`Đoạn ${1001+i}`})));
+ assert.ok(message.length>400&&message.length<=600,String(message.length));
+ answer=()=>Response.json({error:message,code:'overflow',blocks:[{page:4,id:'p4-b0'},{page:4,id:'p4-b1'},{page:'4',id:'p4-b2'},{page:5,id:'<b>'},null]},{status:422});
+ const refused=await call();
+ assert.equal(refused.status,422);assert.deepEqual(refused.data,{error:message,code:'pdf_overflow',blocks:[{page:4,id:'p4-b0'},{page:4,id:'p4-b1'}]});
+ const kind=classifyError(refused);assert.ok(!kind.backoff&&!kind.wait&&!kind.heavy&&kind.reason!=='too_large',`not waited out, retried or halved: the student shortens the translation (${JSON.stringify(kind)})`);
+ assert.equal(FILES.values.has(assetKey(reader,'translated.pdf')),false);assert.notEqual((await (await FILES.get(row.state_key)).json()).pdfLayout.exported,true);
+ // A browser the service could not start is the service's problem: waited out like a service that is restarting.
+ const down='Dịch vụ PDF chưa mở được trình duyệt để dựng bản PDF tiếng Việt. Hãy thử xuất lại sau ít phút; nếu lỗi kéo dài, hãy báo quản trị viên.';
+ answer=()=>Response.json({error:down,code:'browser'},{status:500});
+ const unavailable=await call();
+ assert.equal(unavailable.status,503);assert.deepEqual(unavailable.data,{error:down,code:'pdf_unavailable',retryAfter:30});assert.equal(unavailable.retryAfter,30);
+ assert.equal(classifyError(unavailable).reason,'network');
+ // A body over the service's limit: too heavy for one job.
+ answer=()=>Response.json({error:'Dữ liệu gửi tới dịch vụ PDF lớn hơn 40 MB, vượt giới hạn dung lượng của dịch vụ. Hãy chọn ít trang hơn cho mỗi lượt.',code:'too_large'},{status:413});
+ const heavy=await call();assert.equal(heavy.status,413);assert.equal(heavy.data.code,'pdf_too_large');
+});
+
+test('The PDF service is shared out: a few slots for the whole site, one per account, 503 with Retry-After when all are taken',async t=>{
+ const {sqlite,env}=sqliteEnvironment(t),third={id:'student-3',name:'Mai'};
+ sqlite.prepare('INSERT INTO reader_users(id,google_sub,email,name) VALUES(?,?,?,?)').run(third.id,'sub-3','s3@example.test','Mai');
+ const held=[];let calls=0;
+ t.mock.method(globalThis,'fetch',async()=>{calls++;await new Promise(done=>held.push(done));return Response.json({document:document(),originalPdfBase64:btoa(pdf)});});
+ const slots=()=>sqlite.prepare("SELECT COUNT(*) AS n FROM service_leases WHERE key LIKE 'pdf-slot:%'").get().n;
+ const first=extract(env,reader),second=extract(env,other);await until(()=>calls===2);
+ // The same account never takes a second slot: its own lease answers first.
+ const again=await extract(env,reader);assert.equal(again.status,429);assert.equal((await again.json()).code,'pdf_busy');assert.equal(slots(),2);
+ const full=await extract(env,third);
+ assert.equal(full.status,503);assert.equal(full.headers.get('Retry-After'),'20');
+ assert.deepEqual(await full.json(),{error:'Dịch vụ PDF đang bận vì nhiều người dùng cùng lúc. Hãy thử lại sau khoảng 20 giây.',code:'pdf_service_busy',retryAfter:20});
+ assert.equal(calls,2,'a full service is never called');assert.equal(count(sqlite,`pdf-extract:${third.id}`),0,'a refused call does not use up the day');
+ held[0]();assert.equal((await first).status,201);
+ const later=extract(env,third);await until(()=>calls===3);held[1]();held[2]();
+ assert.equal((await second).status,201);assert.equal((await later).status,201);
+ assert.equal(sqlite.prepare('SELECT COUNT(*) AS n FROM service_leases').get().n,0,'every lease is given back');
+ // PDF_LAYOUT_SLOTS sets how many calls the site runs at once (a larger or a smaller service).
+ env.PDF_LAYOUT_SLOTS='1';const only=extract(env,reader);await until(()=>calls===4);
+ assert.equal((await extract(env,other)).status,503);held[3]();assert.equal((await only).status,201);
+ // A slot left by a Worker that stopped mid-call is free again once its lease runs out.
+ sqlite.prepare('INSERT INTO service_leases(key,token,expires_at) VALUES(?,?,?)').run('pdf-slot:0','stopped-worker',Date.now()+60000);
+ assert.equal((await extract(env,other)).status,503);
+ sqlite.prepare("UPDATE service_leases SET expires_at=? WHERE key='pdf-slot:0'").run(Date.now()-1);
+ const resumed=extract(env,other);await until(()=>calls===5);held[4]();assert.equal((await resumed).status,201);
+});
+
+test('A lease lasts a minute unless renewed, is renewed while its call runs, and never frees a newer holder',async t=>{
+ const {sqlite,env}=sqliteEnvironment(t);let now=1_000_000;const clock=()=>now;
+ const lease=await holdLease(env,'pdf-slot:0',{now:clock});assert.ok(lease);assert.equal(await holdLease(env,'pdf-slot:0',{now:clock}),null);
+ now+=59_000;assert.equal(await lease.renew(),true);now+=59_000;assert.equal(await holdLease(env,'pdf-slot:0',{now:clock}),null,'renewed, still held');
+ now+=2_000;const newer=await holdLease(env,'pdf-slot:0',{now:clock});assert.ok(newer,'a lease nobody renews runs out');
+ assert.equal(await lease.renew(),false,'the old holder learns that it lost its slot');await lease.release();
+ assert.equal(sqlite.prepare("SELECT COUNT(*) AS n FROM service_leases WHERE key='pdf-slot:0'").get().n,1,'releasing an old lease never frees the newer one');
+ await newer.release();assert.equal(sqlite.prepare('SELECT COUNT(*) AS n FROM service_leases').get().n,0);
+ let renewals=0;const counting={renew:async()=>{renewals++;return true;},release:async()=>{}};
+ assert.equal(await keepRenewed([counting],()=>new Promise(done=>setTimeout(()=>done('done'),150)),{every:20}),'done');
+ const after=renewals;assert.ok(after>=3,`${after} renewals`);await new Promise(done=>setTimeout(done,80));assert.equal(renewals,after,'renewing stops with the call');
+ // Without D1 nothing is refused.
+ const open=await holdLease({},'pdf-slot:0');assert.equal(await open.renew(),true);
+});
+
+test('OCR answers only the blocks it read when asked (slim), and keeps a reading another tab stored during the Gemini call',async t=>{
+ const {env,FILES}=environment(),key=assetKey(reader,'manifest.json');
+ await FILES.put(key,JSON.stringify({version:1,pages:[{number:4,width:600,height:800,ocr:true,background:png,original:png,blocks:[{id:'p4-b0',source:'Tesseract 猜错',image:png,box:[20,20,220,80],fontSize:12},{id:'p4-b1',source:'另一 段',image:png,box:[20,100,220,160],fontSize:12}]}]}));
+ t.mock.method(globalThis,'fetch',async()=>{
+  const stored=JSON.parse(await (await FILES.get(key)).text());Object.assign(stored.pages[0].blocks[1],{source:'另一段。',text:'另一段。',ocrCorrected:true});await FILES.put(key,JSON.stringify(stored));
+  return geminiReading([{id:'p4-b0',text:'1.2 空间向量'}],['Ảnh hơi mờ.']);
+ });
+ const response=await pdfLayoutRoute(jsonRequest(base+'/ocr-blocks',ocrBody(['p4-b0'],{slim:true})),env,base+'/ocr-blocks',reader),body=await response.json();
+ const stored=JSON.parse(await (await FILES.get(key)).text()),[read,other]=stored.pages[0].blocks;
+ assert.equal(response.status,200);assert.equal(body.document,undefined,'no page images go back');
+ assert.deepEqual(body.blocks,[{id:'p4-b0',source:read.source,text:read.text,ocrCorrected:true,kind:'heading',bold:true}]);assert.equal(read.source,'1.2 空间向量');
+ assert.equal(other.source,'另一段。',"the other tab's reading is kept");assert.equal(other.ocrCorrected,true);
+ assert.equal(body.ocrCorrectedVersion,1);assert.equal(stored.ocrCorrectedVersion,1);assert.deepEqual(body.ocrWarnings,stored.ocrWarnings);assert.deepEqual(body.warnings,['Ảnh hơi mờ.']);
+ assert.equal(body.usage.total,40);assert.equal(body.model,'gemini-3.6-flash');
+ // Without slim the answer is the whole manifest, as before.
+ t.mock.method(globalThis,'fetch',async()=>geminiReading([{id:'p4-b0',text:'1.2 空间向量'}]));
+ const full=await (await pdfLayoutRoute(jsonRequest(base+'/ocr-blocks',ocrBody(['p4-b0'])),env,base+'/ocr-blocks',reader)).json();
+ assert.deepEqual(full.document,JSON.parse(await (await FILES.get(key)).text()));assert.equal(full.usage.total,40);assert.equal(full.blocks,undefined);
+ // A manifest removed during the Gemini call is not written back; the tokens are still reported.
+ t.mock.method(globalThis,'fetch',async()=>{await FILES.delete(key);return geminiReading([{id:'p4-b0',text:'1.2 空间向量'}]);});
+ await FILES.put(key,JSON.stringify(full.document));
+ const gone=await pdfLayoutRoute(jsonRequest(base+'/ocr-blocks',ocrBody(['p4-b0'],{slim:true})),env,base+'/ocr-blocks',reader);
+ assert.equal(gone.status,404);assert.equal((await gone.json()).usage.total,40);assert.equal(FILES.values.has(key),false);
+});
+
+test('Manifests are stored as ASCII JSON and handed on as stored bytes: the extract answer, GET and the export request',async t=>{
+ const {env,FILES,sessions}=environment(),renders=[];
+ t.mock.method(globalThis,'fetch',async(url,options)=>{
+  if(String(url).endsWith('/render')){renders.push(await new Response(options.body).text());return Response.json({pdfBase64:btoa('%PDF-1.7\nVietnamese'),report:[]});}
+  return Response.json({document:document(),originalPdfBase64:btoa(pdf)});
+ });
+ const response=await pdfLayoutRoute(new Request(origin+base+'/extract',{method:'POST',body:extractForm()}),env,base+'/extract',reader),text=await response.text(),result=JSON.parse(text);
+ assert.equal(response.status,201);assert.match(response.headers.get('Content-Type'),/^application\/json/u);assert.equal(response.headers.get('Cache-Control'),'no-store');
+ const stored=new TextDecoder().decode(FILES.values.get(`study/${reader.id}/pdf-layout/${result.assetId}/manifest.json`).value);
+ assert.doesNotMatch(stored,/[^\x00-\x7f]/u,'one byte per character in V8');assert.deepEqual(JSON.parse(stored),result.document);assert.equal(result.document.pages[0].blocks[0].source,'定义向量。');
+ assert.ok(text.includes(stored),'the answer carries the stored bytes as they are');
+ // GET streams the stored object: it is neither parsed nor serialised again.
+ const path=`${base}/assets/${result.assetId}/manifest`,unparsed={get:async()=>({body:new Response(stored).body,json:()=>{throw new Error('parsed');},text:()=>{throw new Error('parsed');}}),put:async()=>{}};
+ const streamed=await pdfLayoutRoute(new Request(origin+path),{...env,FILES:unparsed},path,reader);
+ assert.equal(streamed.status,200);assert.equal(await streamed.text(),stored);assert.match(streamed.headers.get('Content-Type'),/^application\/json/u);assert.equal(streamed.headers.get('Cache-Control'),'no-store');
+ // An export sends the stored manifest (here one written before this change, Chinese unescaped) as it is.
+ const row=await seed(env);sessions.set(historyId,row);const before=await (await FILES.get(assetKey(reader,'manifest.json'))).text();
+ // Storage hands the body over as a stream, which goes on to the service as it is read.
+ const streaming={...env,FILES:{get:async key=>{const object=await FILES.get(key);return object&&{...object,body:new Response(object.body).body};},put:(...args)=>FILES.put(...args)}};
+ assert.equal((await render(streaming)).status,200);assert.ok(renders[0].includes(before));
+ const sent=JSON.parse(renders[0]);assert.deepEqual(sent.document,document());assert.equal(sent.title,row.title);assert.deepEqual(sent.translations.map(item=>item.id),['p4-b0','p4-b1']);
 });

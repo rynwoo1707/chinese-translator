@@ -40,12 +40,13 @@
 .book-next[hidden],.book-replace[hidden],.study-books[hidden]{display:none}
 .study-books{margin:0 0 14px}
 .study-books h3{margin:0 0 8px;color:#3c4a35;font:600 14px/1.4 'Noto Serif',serif}
-.study-books-list{display:grid;gap:8px}
+/* One column whatever its rows hold: an auto track would grow to a row's unwrapped part list and widen a phone page. */
+.study-books-list{display:grid;grid-template-columns:minmax(0,1fr);gap:8px}
 .study-book{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:12px 14px;border:1px solid #dfe3d8;border-left:3px solid var(--green);border-radius:10px;background:#fbfcf8}
 .study-book>div:first-child{min-width:0}
 .study-book strong{display:block;font:600 14px/1.45 'Noto Serif',serif;overflow-wrap:anywhere}
 .study-book small{display:block;margin-top:3px;overflow:hidden;color:#5f6758;font-size:12px;text-overflow:ellipsis;white-space:nowrap}
-.study-book-actions{display:flex;flex:none;gap:8px}
+.study-book-actions{display:flex;flex:none;flex-wrap:wrap;gap:8px}
 .study-book-actions button,.study-book-actions a{padding:8px 12px;font-size:12px}
 .study-book-actions a{border:1px solid #d9e0d2;border-radius:10px;background:#f3f6ee;color:#526a47;font-weight:600;text-decoration:none}
 .history-actions{display:flex;flex-direction:column;align-items:flex-end;gap:6px}
@@ -209,3 +210,31 @@ body:is([data-session=out],[data-session=error]) .account-status{display:none}
  /* A fitted page needs no tall empty box under it; a zoomed one still scrolls inside. */
  .pdf-viewer-scroll{height:auto;max-height:min(520px,75vh)}
 }
+/* "Cách dịch" is left out where it changes nothing (a kept-layout PDF): Lĩnh vực then takes the whole row. */
+.control-grid>[hidden]{display:none}
+.control-grid:has(>[hidden]){grid-template-columns:1fr}
+/* A save refused because another tab saved since offers to open the newest copy. */
+.save-warning .save-warning-action{margin:6px 0 0;padding:6px 12px;border-color:#c98a7d;color:#7d2f23;font-size:12px}
+@media(max-width:680px){.save-warning .save-warning-action{min-height:44px}}
+/* Older sessions come a page at a time under the cards ("Xem thêm bản cũ hơn"); the Gemini terms note sits with the key help. */
+.history-more{grid-column:1/-1;display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:8px 12px;padding:12px 15px;border:1px dashed #ccd4c3;border-radius:9px}
+.history-more p{flex:1 1 260px;margin:0;color:#656c5e;font-size:12px}
+.history-more .history-more-error{flex-basis:100%;color:#7d2f23;font-weight:600}
+.history-more button,.history-more a{min-height:44px;padding:8px 14px;font-size:12px}
+.history-more button[aria-disabled=true]{cursor:progress;opacity:.7}
+.key-help .key-terms{margin-top:6px}
+.key-help .key-terms a{color:#3f5a34;font-weight:600;text-decoration:underline;text-underline-offset:3px}
+/* "Sách của tôi": a long title or part list wraps (two lines of parts at most) instead of widening a phone's page. */
+.study-book .study-book-parts{display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:2;white-space:normal;overflow-wrap:anywhere}
+.study-book .book-job-progress{overflow-wrap:anywhere}
+/* The address to open in Chrome or Safari when a browser inside another app would drop the download. */
+.book-dialog .in-app-copy{display:flex;flex-wrap:wrap;align-items:center;gap:8px;font-size:12px}
+.book-dialog .in-app-copy button{min-height:44px}
+/* A block the export found longer than its box, until it is saved again. */
+.pdf-dual-viewer [data-block-id].is-overflow{outline:2px solid #b64a3b;background:#fff8f5}
+/* browser-check.js: the notice a browser older than iOS/Safari 15.4 gets at the top of the page. */
+.browser-notice{max-width:640px;margin:24px auto;padding:24px 28px;border:1px solid #e7c8c0;border-left:4px solid #a03c32;border-radius:12px;background:#fff8f5;color:#3b2f2a;line-height:1.7}
+.browser-notice h1{margin:0 0 8px;font-size:22px}
+.browser-notice p{margin:0}
+.browser-notice button{min-height:44px;margin-top:14px}
+@media(max-width:680px){.browser-notice{margin:16px;padding:18px}}

@@ -4,7 +4,7 @@ import {mkdirSync,mkdtempSync,readFileSync,rmSync,writeFileSync} from 'node:fs';
 import {createHash} from 'node:crypto';
 import {tmpdir} from 'node:os';
 import {basename,dirname,join} from 'node:path';
-import {appliedMigrationNames,collisionMessage,collisions,configProblems,confirmed,main,parseDeployOutput,parseJsonOutput,parseJsonc,parseSecretsText,pendingMigrations,placeholderFiles,PLACEHOLDER,postDeployChecks,secretProblems,validateSecretsFile,VENDOR_FILES} from './deploy.mjs';
+import {appliedMigrationNames,collisionMessage,collisions,configProblems,confirmed,dictionaryProblem,main,parseDeployOutput,parseJsonOutput,parseJsonc,parseSecretsText,pendingMigrations,placeholderFiles,PLACEHOLDER,postDeployChecks,secretProblems,securityTxtProblems,sourceUrl,validateSecretsFile,VENDOR_FILES} from './deploy.mjs';
 
 // Every Cloudflare, git and npm call goes through a fake runner and a fake fetch: these tests never reach the network.
 const UUID='0f6c1d6e-6a52-4c3b-9b1e-2f3a4b5c6d7e',SHA='abc123def456',PREVIOUS='11111111-2222-4333-8444-555555555555',NEW='99999999-8888-4777-8666-555555555555';
@@ -18,12 +18,18 @@ const tempDir=prefix=>{const dir=mkdtempSync(join(tmpdir(),prefix));temp.push(di
 const write=(file,text)=>{mkdirSync(dirname(file),{recursive:true});writeFileSync(file,text);return file;};
 const config=(changes={})=>({name:'muc-viet-cms',main:'backend/worker.js',vars:{GEMINI_MODEL:'gemini-3.6-flash',REGISTRATION_MODE:'open'},observability:{enabled:true,redact_query_string:true},d1_databases:[{binding:'DB',database_name:'muc-viet',database_id:UUID,preview_database_id:'local-db',migrations_dir:'database/migrations'}],r2_buckets:[{binding:'FILES',bucket_name:'muc-viet-files'}],...changes});
 
-function project({cfg=config(),migrations=['0001_initial.sql','0002_more.sql'],pages={'index.html':'<!doctype html><title>Hoa Trí</title>'}}={}){
+// A project published at its "Mã nguồn" link (branch main of rynwoo1707/chinese-translator), with the lookup dictionary
+// built and a filled-in security.txt that expires in 200 days.
+const REPO='https://github.com/rynwoo1707/chinese-translator',DICT_ID='0123456789ab';
+const footer=(url=`${REPO}/tree/main`)=>`export const SOURCE_URL='${url}';\nexport const SERVICE_SOURCE_URL=\`\${SOURCE_URL}/services/pdf-layout\`;\n`;
+const securityTxt=({contact='mailto:lienhe@hoatri.example.org',expires=new Date(Date.now()+200*86400000).toISOString()}={})=>`# Hoa Trí\nContact: ${contact}\nExpires: ${expires}\nPreferred-Languages: vi, en\n`;
+function project({cfg=config(),migrations=['0001_initial.sql','0002_more.sql'],pages={},dictionary=true}={}){
  const root=tempDir('hoa-tri-deploy-root-');
  write(join(root,'wrangler.jsonc'),`// test project\n${JSON.stringify(cfg,null,2)}`);
  for(const name of migrations)write(join(root,'database/migrations',name),'SELECT 1;');
- for(const [name,text] of Object.entries(pages))write(join(root,'frontend',name),text);
+ for(const [name,text] of Object.entries({'index.html':'<!doctype html><title>Hoa Trí</title>','site-footer.js':footer(),'.well-known/security.txt':securityTxt(),...pages}))if(text!==null)write(join(root,'frontend',name),text);
  for(const file of ['node_modules/wrangler/bin/wrangler.js',...VENDOR_FILES])write(join(root,file),'');
+ if(dictionary){write(join(root,'frontend/vendor/dict/manifest.json'),JSON.stringify({format:1,id:DICT_ID,base:`/vendor/dict/v/${DICT_ID}/`}));write(join(root,`frontend/vendor/dict/v/${DICT_ID}/i/00.json`),'{}');}
  paddleModels(root);
  return root;
 }
@@ -38,6 +44,7 @@ function secretsFile(text=`# production\nADMIN_TOKEN=${ADMIN}\nPDF_LAYOUT_SERVIC
 function fakeCloudflare(overrides={}){
  const calls=[],responses={
   'git status':{stdout:''},'git rev-parse --short=12':{stdout:`${SHA}\n`},'git rev-parse --abbrev-ref':{stdout:'main\n'},
+  'git remote -v':{stdout:`origin\t${REPO}.git (fetch)\norigin\t${REPO}.git (push)\n`},'git branch -r --contains HEAD':{stdout:'refs/remotes/origin/main\n'},
   'wrangler whoami':{stdout:JSON.stringify({loggedIn:true,authType:'OAuth Token',email:'owner@example.org',accounts:[{id:'acc-1',name:'Hoa Tri'}]})},
   'wrangler r2 bucket info':{stdout:'{"name":"muc-viet-files"}'},
   'wrangler secret list':{stdout:JSON.stringify(['ADMIN_TOKEN','PDF_LAYOUT_SERVICE_URL','PDF_LAYOUT_SERVICE_TOKEN'].map(name=>({name,type:'secret_text'})))},
@@ -58,11 +65,15 @@ function fakeCloudflare(overrides={}){
  };
  return {run,calls,names:()=>calls.map(call=>call.name)};
 }
+// The Worker as deployed: plain http:// answers 301 to https:// (backend/http.js), routes['http:'] replaces that.
 function fakeSite({version=SHA,routes={}}={}){
  const requests=[];
  const fetch=async(url,init={})=>{
-  const {pathname}=new URL(url),headers=new Headers(init.headers),method=init.method||'GET';requests.push({pathname,method,headers});
+  const {pathname,protocol,host}=new URL(url),headers=new Headers(init.headers),method=init.method||'GET';requests.push({pathname,protocol,method,headers,redirect:init.redirect});
+  if(protocol==='http:')return routes['http:']?routes['http:']({method,headers,redirect:init.redirect}):new Response(null,{status:301,headers:{location:`https://${host}${pathname}`}});
   if(routes[pathname])return routes[pathname]({method,headers});
+  if(pathname==='/vendor/dict/manifest.json')return Response.json({format:1,id:DICT_ID,base:`/vendor/dict/v/${DICT_ID}/`});
+  if(pathname.startsWith(`/vendor/dict/v/${DICT_ID}/`))return new Response(null,{headers:{'content-type':'application/json'}});
   if(pathname==='/api/health')return Response.json({ok:true,service:'hoa-tri',version,database:'ok',pdfLayout:'configured'});
   if(pathname==='/')return new Response('<!doctype html>',{headers:{'content-type':'text/html; charset=utf-8','content-security-policy-report-only':"default-src 'self'"}});
   if(pathname==='/sitemap.xml')return new Response(`<urlset><url><loc>${new URL(url).origin}/</loc></url></urlset>`,{headers:{'content-type':'application/xml; charset=utf-8'}});
@@ -100,6 +111,9 @@ test('Config: refuses a local database id, secret-like vars and a secrets block;
  for(const word of ['"secrets"','ADMIN_TOKEN là bí mật','SMTP_PASSWORD là bí mật','GOOGLE_CLIENT_ID là bí mật','var SOME_KEY','"FILES"'])assert.ok(risky.errors.some(error=>error.includes(word)),word);
  assert.equal(risky.errors.length,6);
  assert.match(configProblems(config({observability:{enabled:true}})).warnings.join(),/redact_query_string/u);
+ // The layout hash is the deploy's own (--var): never a var of the file.
+ assert.deepEqual(configProblems(config({vars:{GEMINI_MODEL:'gemini-3.6-flash',PDF_LAYOUT_VERSION:'1234abcd1234abcd'}})).errors,['PDF_LAYOUT_VERSION không đặt trong "vars" của wrangler.jsonc: npm run deploy tự truyền mã bố cục của bản code đang deploy. Hãy xóa dòng này.']);
+ assert.deepEqual(configProblems(config({vars:{GEMINI_MODEL:'gemini-3.6-flash',PDF_LAYOUT_SLOTS:'2',DAILY_REGISTRATIONS_PER_IP:'150'}})),{errors:[],warnings:[]});
  // The worker treats these as closed: say so before a launch that nobody can sign up for.
  assert.match(configProblems(config({vars:{REGISTRATION_MODE:'opne'}})).warnings.join(),/REGISTRATION_MODE "opne" không hợp lệ.*closed/u);
  assert.match(configProblems(config({vars:{REGISTRATION_MODE:'domain',ALLOWED_EMAIL_DOMAINS:' '}})).warnings.join(),/ALLOWED_EMAIL_DOMAINS trống/u);
@@ -154,9 +168,31 @@ test('Secrets file: outside the repo, never .dev.vars, strong tokens, public htt
  assert.match(validateSecretsFile(join(tempDir('hoa-tri-none-'),'missing.env'),{root}).errors.join(),/Không đọc được tệp secret/u);
 });
 
-test('Public pages with unfilled placeholders are found (HTML and JS only)',()=>{
+test('Public pages with unfilled placeholders are found (HTML and JS only), and so is security.txt',()=>{
  const root=project({pages:{'index.html':'ok','dieu-khoan.html':`Bên vận hành: ${PLACEHOLDER}: tên]]`,'site-footer.js':`'${PLACEHOLDER}: email]]'`,'note.css':PLACEHOLDER}});
  assert.deepEqual(placeholderFiles(root),['frontend/dieu-khoan.html','frontend/site-footer.js']);
+ const security=project({pages:{'.well-known/security.txt':securityTxt({contact:`mailto:${PLACEHOLDER}: email liên hệ]]`})}});
+ assert.deepEqual(placeholderFiles(security),['frontend/.well-known/security.txt']);
+});
+
+test('security.txt: a Contact address, and an Expires date in the future, under a year ahead (RFC 9116)',()=>{
+ const now=new Date('2026-10-22T00:00:00Z'),check=text=>securityTxtProblems(text,now);
+ assert.deepEqual(check(securityTxt({expires:'2027-10-21T00:00:00.000Z'})),{errors:[],warnings:[]});
+ assert.deepEqual(check(securityTxt({contact:`mailto:${PLACEHOLDER}: email liên hệ]]`,expires:'2027-10-21T00:00:00.000Z'})).errors,[],'the blank is the placeholder check\'s');
+ for(const contact of ['https://hoatri.example.org/lien-he','tel:+84 912 345 678'])assert.deepEqual(check(securityTxt({contact,expires:'2027-01-01T00:00:00Z'})).errors,[],contact);
+ assert.match(check(securityTxt({contact:'lienhe@hoatri.example.org',expires:'2027-01-01T00:00:00Z'})).errors.join(),/phải là một địa chỉ mailto:, https:\/\/ hoặc tel:/u);
+ assert.match(check('Expires: 2027-01-01T00:00:00Z\n').errors.join(),/thiếu dòng "Contact:"/u);
+ for(const expires of ['','2027-01-01','next year'])assert.match(check(securityTxt({expires})).errors.join(),/cần đúng một dòng "Expires:" theo RFC 3339.*ví dụ Expires: 2027-09-17T00:00:00\.000Z\./u,expires);
+ assert.match(check(`${securityTxt({expires:'2027-01-01T00:00:00Z'})}Expires: 2027-02-01T00:00:00Z\n`).errors.join(),/đúng một dòng "Expires:"/u);
+ assert.match(check(securityTxt({expires:'2026-10-01T00:00:00Z'})).warnings.join(),/đã hết hạn từ 2026-10-01T00:00:00Z/u);
+ assert.match(check(securityTxt({expires:'2026-11-05T00:00:00+07:00'})).warnings.join(),/hết hạn sau 14 ngày/u);
+ assert.match(check(securityTxt({expires:'2028-01-01T00:00:00Z'})).warnings.join(),/xa hơn một năm/u);
+ // The file in this repository: the contact blank keeps it from production until it is filled.
+ const repo=readFileSync(new URL('../frontend/.well-known/security.txt',import.meta.url),'utf8'),today=new Date();
+ assert.match(repo,/^Contact: mailto:/mu);assert.match(repo,/^Preferred-Languages: vi, en$/mu);
+ assert.deepEqual(securityTxtProblems(repo,today).errors,[]);
+ const expires=Date.parse(/^Expires: (.+)$/mu.exec(repo)[1]);assert.ok(expires>today.getTime()&&expires-today.getTime()<=366*86400000,'Expires within a year');
+ assert.equal(repo.includes(PLACEHOLDER),placeholderFiles().includes('frontend/.well-known/security.txt'));
 });
 
 test('Wrangler output: JSON among warnings, deploy URL and version, the CÓ confirmation',()=>{
@@ -173,7 +209,7 @@ test('Wrangler output: JSON among warnings, deploy URL and version, the CÓ conf
 test('Post-deploy checks: health version, CSP, vendor types, library, admin token only on /api/status',async()=>{
  const base='https://hoatri.example.vn',site=fakeSite();
  const good=await postDeployChecks(base,{fetch:site.fetch,sha:SHA,adminToken:ADMIN,sleep:async()=>{}});
- assert.deepEqual(good.filter(r=>r.level!=='ok'),[]);assert.equal(good.length,10);
+ assert.deepEqual(good.filter(r=>r.level!=='ok'),[]);assert.equal(good.length,12);
  assert.match(good.find(r=>r.text.startsWith('/sitemap.xml')).text,/https:\/\/hoatri\.example\.vn/u);assert.match(good.find(r=>r.text.includes('404')).text,/frontend\/404\.html/u);
  assert.ok(site.requests.some(r=>r.method==='HEAD'&&!['/','/sitemap.xml'].includes(r.pathname)&&!r.pathname.startsWith('/vendor/')&&!r.pathname.startsWith('/api/')),'a made-up path is asked for');
  // On a workers.dev name the site works, but every shared link shows that name: attach a domain before sharing.
@@ -184,7 +220,7 @@ test('Post-deploy checks: health version, CSP, vendor types, library, admin toke
  const spa=await postDeployChecks(base,{fetch:fakeSite({routes:{'/khong-co-trang-nay-hoa-tri':()=>new Response(null,{headers:{'content-type':'text/html'}}),'/sitemap.xml':()=>new Response('<!doctype html>',{status:404,headers:{'content-type':'text/html'}})}}).fetch,sha:SHA,sleep:async()=>{}});
  assert.deepEqual(spa.filter(r=>r.level==='warn').map(r=>r.text.split(' trả ')[0]),['/sitemap.xml','Đường dẫn không tồn tại']);
  assert.deepEqual(site.requests.filter(r=>r.headers.has('authorization')).map(r=>r.pathname),['/api/status']);
- assert.ok(site.requests.filter(r=>r.pathname.startsWith('/vendor/')).every(r=>r.method==='HEAD'));
+ assert.ok(site.requests.filter(r=>r.pathname.startsWith('/vendor/')&&r.pathname!=='/vendor/dict/manifest.json').every(r=>r.method==='HEAD'));
  let waits=0;
  const stale=await postDeployChecks(base,{fetch:fakeSite({version:'old'}).fetch,sha:SHA,sleep:async()=>{waits++;},attempts:3});
  assert.equal(waits,2);assert.match(stale.find(r=>r.level==='warn').text,/chưa phải abc123def456/u);
@@ -213,13 +249,69 @@ test('Post-deploy checks: a too-short ADMIN_TOKEN is named even without a token,
  assert.match(tar.find(r=>r.text.startsWith('/api/me')).text,/đăng ký: ai cũng tạo được tài khoản/u);
  const domain=await postDeployChecks(base,{fetch:fakeSite({routes:{'/api/me':()=>Response.json({authenticated:false,registration:{mode:'domain',domains:['truong.edu.vn','hs.truong.edu.vn']}})}}).fetch,sleep});
  assert.match(domain.find(r=>r.text.startsWith('/api/me')).text,/chỉ email thuộc truong\.edu\.vn, hs\.truong\.edu\.vn/u);
- // The lookup data is checked only when it was built on this machine.
- const manifest=()=>Response.json({format:1,id:'0123456789ab',base:'/vendor/dict/v/0123456789ab/'});
- assert.match((await postDeployChecks(base,{fetch:fakeSite({routes:{'/vendor/dict/manifest.json':manifest}}).fetch,dictionary:true,sleep})).find(r=>r.text.startsWith('/vendor/dict')).text,/0123456789ab/u);
- const missing=await postDeployChecks(base,{fetch:fakeSite({routes:{'/vendor/dict/manifest.json':html}}).fetch,dictionary:true,sleep});
+ // The lookup data is always checked: its manifest and the first index file of the folder it names.
+ const looked=fakeSite();assert.match((await postDeployChecks(base,{fetch:looked.fetch,sleep})).find(r=>r.text.startsWith('/vendor/dict')).text,/0123456789ab, có tệp \/vendor\/dict\/v\/0123456789ab\/i\/00\.json/u);
+ assert.deepEqual(looked.requests.filter(r=>r.pathname.startsWith('/vendor/dict/')).map(r=>`${r.method} ${r.pathname}`),['GET /vendor/dict/manifest.json','HEAD /vendor/dict/v/0123456789ab/i/00.json']);
+ const missing=await postDeployChecks(base,{fetch:fakeSite({routes:{'/vendor/dict/manifest.json':html}}).fetch,sleep});
  assert.match(missing.find(r=>r.level==='error').text,/manifest\.json trả 200 \(text\/html; charset=utf-8\).*npm run prepare:dict/u);
- const skipped=fakeSite();await postDeployChecks(base,{fetch:skipped.fetch,sleep});
- assert.ok(!skipped.requests.some(r=>r.pathname.startsWith('/vendor/dict/')));
+ const partial=await postDeployChecks(base,{fetch:fakeSite({routes:{'/vendor/dict/v/0123456789ab/i/00.json':html}}).fetch,sleep});
+ assert.match(partial.find(r=>r.level==='error').text,/^\/vendor\/dict\/v\/0123456789ab\/i\/00\.json trả 200 \(text\/html; charset=utf-8\): dữ liệu từ điển lên Worker chưa đủ/u);
+ // Deployed without it on purpose (--allow-no-dictionary): still looked at, reported as a warning.
+ const without=await postDeployChecks(base,{fetch:fakeSite({routes:{'/vendor/dict/manifest.json':html}}).fetch,dictionary:false,sleep});
+ assert.deepEqual(without.filter(r=>r.level==='error'),[]);assert.match(without.find(r=>r.level==='warn').text,/chưa lên Worker \(đã deploy với --allow-no-dictionary\)/u);
+});
+
+test('Post-deploy checks: plain http:// must be sent on to https:// with a permanent redirect',async()=>{
+ const base='https://hoatri.example.vn',sleep=async()=>{};
+ const checks=async route=>{const site=fakeSite({routes:{'http:':route}}),results=await postDeployChecks(base,{fetch:site.fetch,sha:SHA,sleep});return {results,site,http:results.find(r=>r.text.includes('http://hoatri.example.vn/'))};};
+ const moved=(status,location='https://hoatri.example.vn/')=>()=>new Response(null,{status,headers:{location}});
+ const good=await checks(moved(301));
+ assert.deepEqual(good.http,{level:'ok',text:'http://hoatri.example.vn/ chuyển sang https:// (301).'});
+ const probe=good.site.requests.find(r=>r.protocol==='http:');assert.deepEqual([probe.pathname,probe.method,probe.redirect],['/','GET','manual'],'the redirect itself is read, not followed');
+ assert.equal((await checks(moved(308))).http.level,'ok');
+ assert.equal((await checks(moved(302))).http.level,'warn');
+ for(const [route,pattern] of [
+  [()=>new Response('<!doctype html>',{headers:{'content-type':'text/html'}}),/^http:\/\/hoatri\.example\.vn\/ trả 200 thay vì chuyển hướng 301 sang https:\/\/hoatri\.example\.vn\/: ai gõ http:\/\/ có thể đăng nhập qua kết nối không mã hóa\. .*insecureRequest.*Always Use HTTPS/u],
+  [moved(301,'http://hoatri.example.vn/'),/trả 301 \(chuyển tới http:\/\/hoatri\.example\.vn\/\) thay vì/u],
+  [moved(301,'https://other.example.org/'),/trả 301 \(chuyển tới https:\/\/other\.example\.org\/\)/u],
+  [()=>Response.json({error:'Hoa Trí chỉ nhận thao tác này qua kết nối an toàn.',code:'https_required'},{status:403}),/trả 403/u]
+ ]){const {http}=await checks(route);assert.equal(http.level,'error',pattern.source);assert.match(http.text,pattern);}
+ const unreachable=await checks(()=>{throw Object.assign(new TypeError('fetch failed'),{cause:{code:'ECONNREFUSED'}});});
+ assert.equal(unreachable.http.level,'warn');assert.match(unreachable.http.text,/Không kiểm tra được http:\/\/hoatri\.example\.vn\/ \(ECONNREFUSED\)/u);
+});
+
+test('Post-deploy checks ask the PDF service through the new Worker: reachable, same layout checks, current image and font',async()=>{
+ const base='https://hoatri.example.vn',sleep=async()=>{},site=fakeSite(),LAYOUT='1111111111111111',SERVICE='2222222222222222';
+ const live={status:'ok',ms:42,busy:false,active:0,jobs:2,version:{layout:LAYOUT,service:SERVICE},expectedLayout:LAYOUT,layoutMatch:true,font:'LiberationSerif-Regular.ttf'};
+ const asked=[],through=pdfService=>async(url,init)=>{if(!String(url).includes('deep=1'))return site.fetch(url,init);asked.push(String(url));return Response.json({ok:['ok','off'].includes(pdfService.status),service:'hoa-tri',version:SHA,database:'ok',pdfLayout:'configured',pdfService},{status:['ok','off'].includes(pdfService.status)?200:503});};
+ const checks=(pdfService,options={})=>postDeployChecks(base,{fetch:through(pdfService),sha:SHA,layout:LAYOUT,service:SERVICE,sleep,...options});
+ const good=await checks(live);
+ assert.deepEqual(good.filter(r=>r.level!=='ok'),[]);assert.equal(asked.length,1);assert.equal(new URL(asked[0]).pathname,'/api/health');
+ assert.equal(good.find(r=>r.text.startsWith('Dịch vụ PDF')).text,'Dịch vụ PDF trả lời qua Worker (42 ms, 2 việc cùng lúc, phông LiberationSerif-Regular.ttf); bộ kiểm tra bố cục khớp với Worker.');
+ // An image built from older code, or with the old font: deployed, but the service should be rebuilt.
+ const old=await checks({...live,version:{layout:LAYOUT,service:'3333333333333333'},font:'DejaVuSerif.ttf'});
+ assert.deepEqual(old.filter(r=>r.level==='error'),[]);
+ assert.deepEqual(old.filter(r=>r.level==='warn').map(r=>r.text),['Dịch vụ PDF đang chạy bản 3333333333333333, mã nguồn này là bản 2222222222222222: cập nhật dịch vụ PDF trên máy chủ (deploy/pdf-layout/README.md mục A.5).','Dịch vụ PDF xuất bằng phông DejaVuSerif.ttf, không phải Liberation Serif như image chuẩn: chữ Việt có thể nhỏ hơn bản đã thử. Build lại image (deploy/pdf-layout/README.md mục A.5).']);
+ // Different layout checks on the two sides can refuse every scanned page: that is a failed deploy check.
+ const mismatch=await checks({...live,status:'mismatch',version:{layout:'4444444444444444',service:SERVICE},layoutMatch:false});
+ assert.match(mismatch.find(r=>r.level==='error').text,/mã bố cục 4444444444444444, còn Worker vừa deploy dùng 1111111111111111.*README\.md mục A\.5/u);
+ for(const [status,pattern] of [['unauthorized',/từ chối token của Worker/u],['unreachable',/không kết nối được dịch vụ PDF/u],['timeout',/không trả lời Worker trong 5 giây/u],['error',/trả lời lỗi/u]]){
+  const failed=await checks({status});assert.match(failed.filter(r=>r.level==='error').map(r=>r.text).join('\n'),pattern,status);
+ }
+ // A Worker without a PDF service configured is not asked; one older than the deep check is skipped silently.
+ const off=fakeSite({routes:{'/api/health':()=>Response.json({ok:true,service:'hoa-tri',version:SHA,database:'ok',pdfLayout:'off'})}});
+ await postDeployChecks(base,{fetch:off.fetch,sha:SHA,sleep});assert.equal(off.requests.filter(r=>r.pathname==='/api/health').length,1);
+ assert.deepEqual((await postDeployChecks(base,{fetch:site.fetch,sha:SHA,sleep})).filter(r=>r.level!=='ok'),[]);
+});
+
+test('Deploy gives the Worker the hash of the shared PDF layout checks, so its health check can compare it with the service',async()=>{
+ const pages={'index.html':'<!doctype html><title>Hoa Trí</title>','pdf-box-layout.js':'export const layout=1;\n','math-text.js':'export const math=2;\n'},root=project({pages});
+ const hash=createHash('sha256');for(const file of ['frontend/pdf-box-layout.js','frontend/math-text.js'])hash.update(`${file}\n${readFileSync(join(root,file),'utf8')}\n`);
+ const expected=hash.digest('hex').slice(0,16),run=await deploy(root,['--yes','--skip-tests']);
+ assert.equal(run.code,0,run.text);const deployed=run.cloud.calls.at(-1).args.slice(1);
+ assert.deepEqual(deployed.slice(0,6),['deploy','--strict','--tag',SHA,'--message',`main@${SHA}`]);assert.deepEqual(deployed.slice(-2),['--var',`PDF_LAYOUT_VERSION:${expected}`]);
+ // Without those files (a partial copy) the Worker deploys without the var; its deep check then cannot compare.
+ const bare=await deploy(project(),['--yes','--skip-tests']);assert.equal(bare.code,0,bare.text);assert.ok(!bare.cloud.calls.at(-1).args.includes('--var'));
 });
 
 test('Deploy refuses a local database id before any Cloudflare call',async()=>{
@@ -235,8 +327,54 @@ test('Deploy refuses uncommitted changes and unfilled public pages unless told o
  const allowed=await deploy(project(),['--check','--skip-tests','--allow-dirty'],{cloud:fakeCloudflare({'git status':{stdout:' M a\n'},'wrangler d1 execute':{stdout:JSON.stringify([{results:[{name:'0001_initial.sql'},{name:'0002_more.sql'}]}])}})});
  assert.equal(allowed.code,0,allowed.text);assert.match(allowed.text,/commit abc123def456-dirty/u);
  const pages=project({pages:{'quyen-rieng-tu.html':`${PLACEHOLDER}: email liên hệ]]`}});
- assert.match((await deploy(pages,['--check','--skip-tests'])).text,/frontend\/quyen-rieng-tu\.html/u);
- assert.doesNotMatch((await deploy(pages,['--check','--skip-tests','--allow-placeholders'])).text,/quyen-rieng-tu/u);
+ const blank=await deploy(pages,['--check','--skip-tests']);
+ assert.equal(blank.code,1);assert.match(blank.text,/LỖI: Trang công khai còn chỗ "\[\[CHƯA ĐIỀN…" chưa điền: frontend\/quyen-rieng-tu\.html\. Điền thông tin thật/u);
+ // --allow-placeholders is for a closed trial only: registration must not be open to everyone.
+ const open=await deploy(pages,['--check','--skip-tests','--allow-placeholders']);
+ assert.equal(open.code,1);assert.match(open.text,/LỖI: .*--allow-placeholders chỉ dành cho bản thử kín, nhưng wrangler\.jsonc đang mở đăng ký cho mọi người \(REGISTRATION_MODE "open"\)/u);
+ assert.ok(!open.cloud.names().some(name=>name.startsWith('wrangler')));
+ for(const vars of [{REGISTRATION_MODE:'closed'},{REGISTRATION_MODE:'domain',ALLOWED_EMAIL_DOMAINS:'truong.edu.vn'}]){
+  const trial=await deploy(project({cfg:config({vars:{GEMINI_MODEL:'gemini-3.6-flash',...vars}}),pages:{'quyen-rieng-tu.html':`${PLACEHOLDER}: email liên hệ]]`,'.well-known/security.txt':securityTxt({contact:`mailto:${PLACEHOLDER}: email liên hệ]]`})}}),['--check','--skip-tests','--allow-placeholders']);
+  assert.equal(trial.code,0,trial.text);assert.match(trial.text,new RegExp(`CẢNH BÁO: Trang công khai còn chỗ .*frontend/\\.well-known/security\\.txt, frontend/quyen-rieng-tu\\.html\\. Đây chỉ là bản thử kín \\(REGISTRATION_MODE "${vars.REGISTRATION_MODE}"\\)`,'u'));
+ }
+ // security.txt is checked like a page, and its own lines are checked too.
+ const unfilled=await deploy(project({pages:{'.well-known/security.txt':securityTxt({contact:`mailto:${PLACEHOLDER}: email liên hệ]]`})}}),['--check','--skip-tests']);
+ assert.equal(unfilled.code,1);assert.match(unfilled.text,/chưa điền: frontend\/\.well-known\/security\.txt\./u);
+ const broken=await deploy(project({pages:{'.well-known/security.txt':'Contact: lienhe@hoatri.example.org\n'}}),['--check','--skip-tests']);
+ assert.equal(broken.code,1);assert.match(broken.text,/LỖI: frontend\/\.well-known\/security\.txt: "Contact: lienhe@hoatri\.example\.org" phải là/u);assert.match(broken.text,/LỖI: frontend\/\.well-known\/security\.txt cần đúng một dòng "Expires:"/u);
+ const none=await deploy(project({pages:{'.well-known/security.txt':null}}),['--check','--skip-tests']);
+ assert.equal(none.code,0,none.text);assert.match(none.text,/CẢNH BÁO: Chưa có frontend\/\.well-known\/security\.txt \(RFC 9116\)/u);
+});
+
+test('Deploy refuses a commit that is not on the GitHub branch the “Mã nguồn” link opens, unless told it is a closed trial',async()=>{
+ // This repository's link names its branch.
+ assert.deepEqual(sourceUrl(),{url:'https://github.com/rynwoo1707/chinese-translator/tree/handoff/2026-10-16',owner:'rynwoo1707',repo:'chinese-translator',ref:'handoff/2026-10-16'});
+ const published=await deploy(project(),['--check','--skip-tests']);
+ assert.equal(published.code,0,published.text);assert.match(published.text,/Mã nguồn công khai của bản này: https:\/\/github\.com\/rynwoo1707\/chinese-translator\/tree\/abc123def456 \(nhánh main\)\./u);
+ const branch=published.cloud.calls.find(call=>call.name.startsWith('git branch'));assert.deepEqual(branch.args,['branch','-r','--contains','HEAD','--format=%(refname)']);
+ const notPushed=fakeCloudflare({'git branch -r --contains HEAD':{stdout:''}});
+ const refused=await deploy(project(),['--yes','--skip-tests'],{cloud:notPushed});
+ assert.equal(refused.code,1);assert.ok(!refused.cloud.names().some(name=>name.startsWith('wrangler')),'stopped before Cloudflare');
+ assert.match(refused.text,/LỖI: Commit abc123def456 chưa có trên nhánh main của github\.com\/rynwoo1707\/chinese-translator, nơi liên kết “Mã nguồn” ở chân trang trỏ tới \(SOURCE_URL trong frontend\/site-footer\.js\)\. Dịch vụ PDF chạy PyMuPDF theo giấy phép GNU AGPL.*git push lên nhánh main.*\(--allow-unpushed nếu chỉ thử kín\.\)/u);
+ const trial=await deploy(project(),['--check','--skip-tests','--allow-unpushed'],{cloud:fakeCloudflare({'git branch -r --contains HEAD':{stdout:''}})});
+ assert.equal(trial.code,0,trial.text);assert.match(trial.text,/CẢNH BÁO: Commit abc123def456 chưa có trên nhánh main .* Bỏ qua vì có --allow-unpushed/u);
+ const cases=[
+  // On another branch only, or on the right branch of a fork.
+  [{},{'git branch -r --contains HEAD':{stdout:'refs/remotes/origin/feature\n'}},/chưa có trên nhánh main/u],
+  [{},{'git remote -v':{stdout:'origin\thttps://github.com/someone/fork.git (fetch)\n'}},/Không có git remote nào trỏ tới github\.com\/rynwoo1707\/chinese-translator/u],
+  // A link that is no GitHub tree.
+  [{'site-footer.js':footer('https://example.org/code')},{},/Không đọc được SOURCE_URL dạng https:\/\/github\.com\/<chủ>\/<repo>\/tree\/<nhánh> trong frontend\/site-footer\.js \(đang là https:\/\/example\.org\/code\)/u],
+  [{'site-footer.js':null},{},/Không đọc được SOURCE_URL/u]
+ ];
+ for(const [pages,overrides,pattern] of cases){const run=await deploy(project({pages}),['--check','--skip-tests'],{cloud:fakeCloudflare(overrides)});assert.equal(run.code,1,pattern.source);assert.match(run.text,pattern);}
+ // A link to a tag or a commit: HEAD's own tag or commit, published on a branch of that repository (ssh remotes too).
+ const ssh={'git remote -v':{stdout:'upstream\tgit@github.com:RynWoo1707/Chinese-Translator.git (fetch)\n'},'git branch -r --contains HEAD':{stdout:'refs/remotes/upstream/release\n'}};
+ const tagged=await deploy(project({pages:{'site-footer.js':footer(`${REPO}/tree/v1.2`)}}),['--check','--skip-tests'],{cloud:fakeCloudflare({...ssh,'git tag --points-at HEAD':{stdout:'v1.2\n'}})});
+ assert.equal(tagged.code,0,tagged.text);
+ const commit=await deploy(project({pages:{'site-footer.js':footer(`${REPO}/tree/${SHA}0000000000000000000000000000`)}}),['--check','--skip-tests'],{cloud:fakeCloudflare(ssh)});
+ assert.equal(commit.code,0,commit.text);
+ const otherTag=await deploy(project({pages:{'site-footer.js':footer(`${REPO}/tree/v1.1`)}}),['--check','--skip-tests'],{cloud:fakeCloudflare({...ssh,'git tag --points-at HEAD':{stdout:'v1.2\n'}})});
+ assert.equal(otherTag.code,1);assert.match(otherTag.text,/chưa có trên nhánh v1\.1/u);
 });
 
 test('Deploy needs a Cloudflare login, one chosen account, the R2 bucket and the required secrets',async()=>{
@@ -311,13 +449,23 @@ test('Deploy ships PaddleOCR: damaged models in the repo stop it before vendor, 
  }
 });
 
-test('The optional lookup dictionary: a warning before deploy when it was never built, a live check when it was',async()=>{
- const unbuilt=project();write(join(unbuilt,'backend/prepare-dictionary.mjs'),'');
- const warned=await deploy(unbuilt,['--check','--skip-tests']);
- assert.equal(warned.code,0,warned.text);assert.match(warned.text,/CẢNH BÁO: Chưa có dữ liệu từ điển.*npm run prepare:dict/u);
- assert.doesNotMatch((await deploy(project(),['--check','--skip-tests'])).text,/từ điển/u,'no warning in a checkout without the dictionary feature');
- const built=project();write(join(built,'backend/prepare-dictionary.mjs'),'');write(join(built,'frontend/vendor/dict/manifest.json'),'{"format":1}');
+test('The lookup dictionary: deploy stops without it unless --allow-no-dictionary, and the live site is always checked for it',async()=>{
+ const unbuilt=project({dictionary:false});
+ assert.match(dictionaryProblem(unbuilt),/^Chưa có dữ liệu từ điển \(frontend\/vendor\/dict\/manifest\.json\)/u);assert.equal(dictionaryProblem(project()),null);
+ const refused=await deploy(unbuilt,['--yes','--skip-tests']);
+ assert.equal(refused.code,1);assert.match(refused.text,/LỖI: Chưa có dữ liệu từ điển \(frontend\/vendor\/dict\/manifest\.json\): trên production, nút “Tra chữ Hán” sẽ báo chưa có dữ liệu\. Chạy npm run prepare:dict rồi chạy lại \(--allow-no-dictionary để deploy không có từ điển\)\./u);
+ assert.ok(!refused.cloud.names().some(name=>name.startsWith('wrangler')),'stopped before Cloudflare');
+ // A manifest whose folder was not built (a copy cut short) is no dictionary either.
+ const partial=project();rmSync(join(partial,'frontend/vendor/dict/v'),{recursive:true});
+ assert.match((await deploy(partial,['--check','--skip-tests'])).text,/LỖI: Dữ liệu từ điển trong frontend\/vendor\/dict\/v\/0123456789ab chưa đủ/u);
+ // Allowed: deployed with a warning, and the live check still runs, as a warning.
  const html=()=>new Response('<!doctype html>',{headers:{'content-type':'text/html'}});
- const run=await deploy(built,['--yes','--skip-tests'],{site:fakeSite({routes:{'/vendor/dict/manifest.json':html}})});
- assert.equal(run.code,1);assert.doesNotMatch(run.text,/CẢNH BÁO: Chưa có dữ liệu từ điển/u);assert.match(run.text,/LỖI: \/vendor\/dict\/manifest\.json trả 200/u);
+ const allowed=await deploy(unbuilt,['--yes','--skip-tests','--allow-no-dictionary'],{site:fakeSite({routes:{'/vendor/dict/manifest.json':html}})});
+ assert.equal(allowed.code,0,allowed.text);assert.match(allowed.text,/CẢNH BÁO: Chưa có dữ liệu từ điển .*Deploy tiếp vì có --allow-no-dictionary\./u);
+ assert.match(allowed.text,/CẢNH BÁO: \/vendor\/dict\/manifest\.json trả 200 \(text\/html\): dữ liệu từ điển chưa lên Worker \(đã deploy với --allow-no-dictionary\)/u);
+ // Built here but missing on the live site: a failed deploy check.
+ const run=await deploy(project(),['--yes','--skip-tests'],{site:fakeSite({routes:{'/vendor/dict/manifest.json':html}})});
+ assert.equal(run.code,1);assert.match(run.text,/LỖI: \/vendor\/dict\/manifest\.json trả 200 \(text\/html\): dữ liệu từ điển chưa lên Worker; chạy npm run prepare:dict rồi deploy lại\./u);
+ const good=await deploy(project(),['--yes','--skip-tests']);
+ assert.equal(good.code,0,good.text);assert.match(good.text,/OK {2}\/vendor\/dict\/manifest\.json: dữ liệu từ điển 0123456789ab/u);assert.match(good.text,/OK {2}http:\/\/muc-viet-cms\.owner\.workers\.dev\/ chuyển sang https:\/\/ \(301\)\./u);
 });

@@ -1,4 +1,4 @@
-import {generate,protectMathExpressions,restoreMathExpressions,missingTranslationMarkers,missingGlossaryTerms,relevantGlossary,spentOn,USAGE_KEYS} from './ai.js';
+import {generate,protectMathExpressions,restoreMathExpressions,missingTranslationMarkers,missingGlossaryTerms,relevantGlossary,spentOn,contentFailure,USAGE_KEYS} from './ai.js';
 import {normalizeVietnameseText} from './vietnamese-text.js';
 import {mapBareLatex} from './pdf-block-ocr.js';
 import {isSubject,builtInGlossary,ownTerms} from './subject-glossaries.js';
@@ -18,7 +18,7 @@ export async function translatePdfBlocks(env,body){
  const valid=Object.fromEntries(Object.entries({...builtIn,...manual}).filter(([k,v])=>!['__proto__','constructor','prototype'].includes(k)&&typeof v==='string'&&k.length<=100&&v.length<=100));
  const glossary=relevantGlossary(valid,source,{priority:own,builtIn},100),context=String(body.context||'').slice(-900);
  const request=list=>generate(env,[{text:JSON.stringify({blocks:list.map(({id,source})=>({id,source})),context,glossary,domain})}],INSTRUCTION,true,{schema});
- const plus=(a,b)=>Object.fromEntries(USAGE_KEYS.map(key=>[key,(a?.[key]||0)+(b?.[key]||0)]));
+ if(body.partial===true)return partialTranslation(env,body,{blocks,protectedBlocks,request,own,manual});
  const first=await request(protectedBlocks);let usage=first.__usage,model=first.__model;
  // Every answer from here on was billed: a refusal carries what this call spent, so the student's counter never reads low.
  try{
@@ -34,9 +34,70 @@ export async function translatePdfBlocks(env,body){
    for(const [id,translation] of second.translated)checked.translated.set(id,translation);
   }
   const translated=protectedBlocks.map(b=>({id:b.id,translation:checked.translated.get(b.id)})),warnings=blockTranslationWarnings(blocks,translated,own);
-  const updates=first.glossaryUpdates&&typeof first.glossaryUpdates==='object'&&!Array.isArray(first.glossaryUpdates)?Object.fromEntries(Object.entries(first.glossaryUpdates).filter(([k,v])=>typeof v==='string'&&k.length<=100&&v.length<=100).slice(0,30)):{};
-  return {blocks:translated,context:(String(body.context||'')+'\n'+normalizeVietnameseText(String(first.contextUpdate||'').slice(0,400))).trim().slice(-1200),glossary:{...manual,...updates},usage,warnings,model:model||env.GEMINI_MODEL};
+  return {blocks:translated,context:nextContext(body,[first]),glossary:{...manual,...glossaryUpdates([first])},usage,warnings,model:model||env.GEMINI_MODEL};
  }catch(error){throw spentOn(error,usage);}
+}
+const plus=(a,b)=>Object.fromEntries(USAGE_KEYS.map(key=>[key,(a?.[key]||0)+(b?.[key]||0)]));
+const nextContext=(body,answers)=>(String(body.context||'')+'\n'+normalizeVietnameseText(answers.map(answer=>String(answer.contextUpdate||'').trim()).filter(Boolean).join('\n').slice(0,400))).trim().slice(-1200);
+const glossaryUpdates=answers=>Object.fromEntries(answers.flatMap(answer=>answer.glossaryUpdates&&typeof answer.glossaryUpdates==='object'&&!Array.isArray(answer.glossaryUpdates)?Object.entries(answer.glossaryUpdates):[]).filter(([k,v])=>!['__proto__','constructor','prototype'].includes(k)&&typeof v==='string'&&k.length<=100&&v.length<=100).slice(0,30));
+
+// body.partial === true: one block that cannot be translated never costs the others. The answer has the blocks that
+// passed (input order) and failedBlocks:[{id,code,message,retryAfter?,draft?}] for the rest (input order):
+//   block_check     its translation failed the checks in the first answer and once more; draft: that translation when
+//                   only numbers or citations are missing from it (the student may accept it after a look)
+//   gemini_refused, gemini_truncated, gemini_malformed
+//                   Gemini would not or could not answer for this block alone, or for its group once MAX_CALLS ran out
+//   any other code of gemini-errors.js (quota_minute, gemini_unavailable…, with retryAfter when known)
+//                   the run stopped there; nothing after it was asked for
+// A group Gemini refuses or answers unreadably is split in halves, so a refusal is narrowed down to its block; the blocks
+// that failed a check are asked for once more, together. Each request makes at most MAX_CALLS calls, and a failure
+// before any block was translated is thrown as before (the browser's waits and key handling apply).
+export const MAX_CALLS=12;
+async function partialTranslation(env,body,{blocks,protectedBlocks,request,own,manual}){
+ const done=new Map(),failed=new Map(),problems=new Map(),drafts=new Map(),answers=[],queue=[{group:protectedBlocks,retry:false,cause:null}];
+ let usage=plus({},{}),model,calls=0,stop=null,firstError=null;
+ const failure=error=>({code:error?.code||'gemini_error',message:String(error?.message||'Gemini không trả kết quả.'),...(Number.isFinite(error?.retryAfter)?{retryAfter:error.retryAfter}:{})});
+ const checkFailure=id=>{const draft=drafts.get(id)?.draft;return {code:'block_check',message:problems.get(id),...(draft?{draft}:{})};};
+ // Breadth first: when MAX_CALLS runs out, the groups left over are small ones around the refused blocks.
+ const split=(group,retry,cause)=>{const half=Math.ceil(group.length/2);queue.push({group:group.slice(0,half),retry,cause},{group:group.slice(half),retry,cause});};
+ while(queue.length){
+  const {group,retry,cause}=queue.shift();
+  // A block with an earlier translation that lacks only numbers keeps that draft rather than the later refusal.
+  if(stop||calls>=MAX_CALLS){for(const b of group)failed.set(b.id,stop||(cause&&!drafts.has(b.id)?failure(cause):checkFailure(b.id)));continue;}
+  calls++;let result,checked=null,error=null;
+  try{result=await request(group);usage=plus(usage,result.__usage);model=result.__model||model;checked=examineAnswer(result,group,blocks);if(!checked)error=Object.assign(new Error('Gemini trả dữ liệu khối sai định dạng.'),{code:'gemini_malformed'});}
+  catch(thrown){usage=plus(usage,thrown?.usage);error=thrown;}
+  if(error){
+   firstError??=error;
+   if(!contentFailure(error)){stop=failure(error);for(const b of group)failed.set(b.id,stop);}
+   else if(group.length>1)split(group,retry,error);
+   else failed.set(group[0].id,drafts.has(group[0].id)?checkFailure(group[0].id):failure(error));
+   continue;
+  }
+  answers.push(result);
+  for(const [id,translation] of checked.translated)done.set(id,translation);
+  for(const [id,problem] of checked.failures){problems.set(id,problem.message);if(problem.draft&&(!drafts.has(id)||problem.missing<=drafts.get(id).missing))drafts.set(id,problem);}
+  const again=group.filter(b=>checked.failures.has(b.id));
+  if(!again.length)continue;
+  if(!retry)queue.push({group:again,retry:true,cause:null});else for(const b of again)failed.set(b.id,checkFailure(b.id));
+ }
+ if(!done.size&&firstError&&!contentFailure(firstError))throw spentOn(firstError,usage);
+ const passed=protectedBlocks.filter(b=>done.has(b.id)),translated=passed.map(b=>({id:b.id,translation:done.get(b.id)}));
+ const warnings=blockTranslationWarnings(blocks.filter(b=>done.has(b.id)),translated,own);
+ return {blocks:translated,failedBlocks:protectedBlocks.filter(b=>failed.has(b.id)).map(b=>({id:b.id,...failed.get(b.id)})),context:nextContext(body,answers),glossary:{...manual,...glossaryUpdates(answers)},usage,warnings,model:model||env.GEMINI_MODEL};
+}
+// An answer read leniently: a block with exactly one entry is checked on its own; a missing or repeated one fails alone
+// and an unknown ID is ignored. null: the answer has no block list at all.
+function examineAnswer(result,group,originals){
+ if(!Array.isArray(result?.blocks))return null;
+ const counts=new Map();for(const entry of result.blocks)if(typeof entry?.id==='string')counts.set(entry.id,(counts.get(entry.id)||0)+1);
+ const byId=new Map(result.blocks.filter(entry=>counts.get(entry?.id)===1).map(entry=>[entry.id,entry.translation])),translated=new Map(),failures=new Map();
+ for(const b of group){
+  if((counts.get(b.id)||0)!==1){failures.set(b.id,{message:counts.get(b.id)?`Gemini trả trùng block ${b.id}; chưa ghép bản dịch.`:`Gemini trả thiếu block ${b.id}; chưa ghép bản dịch.`});continue;}
+  try{const {translation,missing}=examineBlock(b.id,originals.find(item=>item.id===b.id).source,byId.get(b.id),b.formulas);if(missing.length)failures.set(b.id,{message:missingMessage(b.id,missing),draft:translation,missing:missing.length});else translated.set(b.id,translation);}
+  catch(error){failures.set(b.id,{message:error.message});}
+ }
+ return {translated,failures};
 }
 // The sample tool (tools/samples) gives its translators these exact rules and checks their blocks with the two
 // functions below, so a hand-made translation passes the same gate as a Gemini one.
@@ -44,12 +105,17 @@ export {INSTRUCTION as BLOCK_TRANSLATION_RULES};
 // One block's translation of its original source (formula tokens and LaTeX as extracted): normalized Vietnamese,
 // shielded math restored, each formula token kept exactly once, no number or citation dropped.
 export function checkBlockTranslation(id,source,value,formulas=[]){
+ const {translation,missing}=examineBlock(id,source,value,formulas);if(missing.length)throw new Error(missingMessage(id,missing));
+ return translation;
+}
+const missingMessage=(id,missing)=>`Block ${id} thiếu số hoặc dẫn chứng: ${missing.join(', ')}.`;
+// Throws when the translation cannot be used at all; missing: numbers or citations of the source it lacks.
+function examineBlock(id,source,value,formulas=[]){
  if(typeof value!=='string'||!value.trim())throw new Error(`Block ${id} không có bản dịch.`);
  const translation=restoreMathExpressions(normalizeVietnameseText(value.trim()),formulas),tokens=source.match(/@@PDF_INLINE_\d+@@/gu)||[];
  for(const token of tokens)if(translation.split(token).length-1!==1)throw new Error(`Block ${id} không bảo toàn ký hiệu toán.`);
  if((translation.match(/@@PDF_INLINE_\d+@@/gu)||[]).length!==tokens.length)throw new Error(`Block ${id} chứa mã toán không hợp lệ.`);
- const missing=missingTranslationMarkers(source,translation);if(missing.length)throw new Error(`Block ${id} thiếu số hoặc dẫn chứng: ${missing.join(', ')}.`);
- return translation;
+ return {translation,missing:missingTranslationMarkers(source,translation)};
 }
 // Chinese left in a Vietnamese block reaches the exported page as it is: the student is told where. blocks hold the
 // sources, translated the checked translations, in the same order.
