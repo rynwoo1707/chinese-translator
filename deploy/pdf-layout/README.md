@@ -396,19 +396,19 @@ Các lần chạy dưới đây không gọi Gemini và không chạm vào Cloud
 - Test của Worker (`backend/pdf-layout.test.mjs`, route lịch sử thật trên SQLite với mọi migration, R2 giả có etag): một tab lưu lại đúng bản dịch trong lúc xuất thì lần xuất vẫn được giữ (200) và gắn vào phần ở lần lưu mới; lưu bản dịch khác thì 409 và lượt xuất trong ngày được trả lại.
 - Test xuất PDF bằng Edge thật (`backend/pdf-engine-browser.test.mjs`): câu báo tràn khung của tài liệu ba trang đúng nguyên văn mới ("Trang N · đoạn k").
 
+**CI trên GitHub (23/10/2026, commit 6c80e60, [lần chạy 39894021295](https://github.com/rynwoo1707/chinese-translator/actions/runs/39894021295)):** cả hai job đạt.
+
+- Job `test` (2,1 phút): `prepare:vendor -- --require-paddle`; cài phông rồi kiểm `fontPath()` ra Liberation Serif có tệp thật (`test -f`); `npm test` trên Linux với API trả phí bị chặn, không test Python nào bị bỏ qua; đóng gói Worker (`wrangler deploy --dry-run`).
+- Job `pdf-image` (3,3 phút): build image có `fonts-liberation2` và bước kiểm phông lúc build; container chạy với giới hạn của `docker-compose.yml`, báo healthy theo `HEALTHCHECK`, không chạy bằng root, đòi token, `/health` báo `"font":"LiberationSerif-Regular.ttf"`; `smoke.mjs` trong container đạt; compose + Caddy qua HTTPS cho `localhost` (chuyển HTTP sang HTTPS, chặn đường dẫn lạ, thân yêu cầu 39 MiB).
+
 Chưa kiểm chứng:
 
-- Image có `fonts-liberation2`, bước kiểm tra phông khi build và `healthcheck.mjs` chưa build lần nào (máy bàn giao không chạy Docker); job `pdf-image` của CI sẽ là lần đầu. Việc tự khởi động lại container sau 4 lần kiểm tra lỗi cũng chưa chạy trên Docker thật.
+- Việc tự khởi động lại container sau 4 lần kiểm tra sức khỏe lỗi liên tiếp chưa chạy thử (CI chỉ thấy container healthy).
 - Bộ nhớ trên workerd thật: chạy thử trên Cloudflare với `wrangler tail` (vài lượt tách trang 12–20 trang scan cùng lúc), xem có lỗi vượt bộ nhớ không.
 - Sức chứa của VPS thật: số trang tách được mỗi phút và RAM cao nhất khi 2 việc chạy cùng lúc (`docker stats`), trước khi tăng `PDF_LAYOUT_JOBS` và `PDF_LAYOUT_SLOTS`.
-- Build image: job `pdf-image` trên GitHub là lần build đầu tiên. Lần đó cũng là lần đầu chạy các phần sau:
-  - `HEALTHCHECK` và user `node` trong container;
-  - compose + Caddy qua HTTPS.
-- Test máy PDF và các test chỉ dành cho Edge chưa chạy trên Linux. Test máy PDF đã đạt trên Windows với phông DejaVu Serif.
-- Bước `prepare:vendor -- --require-paddle` của CI (thay cho bước tải mô hình PaddleOCR có cache) chưa chạy trên GitHub. Chế độ bắt buộc này có test trong `npm test` (`backend/paddle-assets.test.mjs`: thiếu mô hình thì báo lỗi thay vì chỉ cảnh báo).
+- Các test giao diện chỉ dành cho Edge chưa chạy trên Linux: CI bỏ qua chúng; chúng chỉ chạy trên máy Windows có Edge.
 - Cấp chứng chỉ thật và chạy trên máy chủ thật.
 - Deploy thật lên Cloudflare: D1, R2, secret, giới hạn của Workers Paid. Các kiểm tra mới của script (commit đã push, từ điển, `security.txt`, `http://` chuyển sang `https://`) mới chạy với Cloudflare và git giả lập trong `backend/deploy.test.mjs`.
-- Các bước phông của CI (`fonts-liberation2` trên Ubuntu 24.04 của GitHub, `test -f` của lượt sửa thứ ba, `/health` báo Liberation Serif trong job `pdf-image`) chưa chạy trên GitHub.
 - Của lượt sửa thứ ba: lần ghi `state.json` có điều kiện của bước xuất PDF (R2 `onlyIf.etagMatches`) mới chạy với R2 giả trong test, chưa với R2 thật hay miniflare; việc Worker trả 429/503 mà không đọc thân yêu cầu chưa thử trên Cloudflare thật (trình duyệt dùng HTTP/1.1 có thể thấy kết nối bị cắt thay vì câu trả lời; lượt kiểm chứng thứ hai thấy dưới `wrangler dev` thật, Edge nhận đủ 429/503 với tệp 8 KB–16 MB, chỉ Miniflare chạy trần mới cắt kết nối); `GET /capacity` chưa chạy trên D1 thật.
 - Của lượt sửa thứ tư: thời hạn tải lên (408 `upload_timeout`) chưa thử qua trình duyệt hay trên Cloudflare (ở máy local dùng HTTP/1.1, Chromium có thể tự gửi lại một lần yêu cầu nhận 408 trên một kết nối keep-alive dùng lại); việc Worker nhận ra lần từ chối của bộ kiểm tra chỗ lịch sử dựa vào chữ "CHECK constraint failed" trong lỗi của D1, mới kiểm bằng `node:sqlite`; image chưa được build với các bản sửa của `extract.py`, `engine.mjs`, `server.mjs`.
 - Các lệnh sao lưu và khôi phục ở mục B.5.
