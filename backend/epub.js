@@ -10,8 +10,14 @@ function resolvePath(base,href){
 }
 // The extracted text a book may reach, and the parts its reading order may list: its unzipped files are capped at 25 MB,
 // but the reading order can name one chapter many times, and each time adds the chapter's text (or a note that it has
-// none) again. Long web novels have a few thousand chapters.
+// none) again. Long web novels have a few thousand chapters. The text is counted in UTF-8 bytes, as the 25 MB a book's
+// text may take where it is stored (worker.js): a Han character is three bytes but one character of a string.
 const MAX_TEXT=25*1024*1024,MAX_PARTS=20000;
+const utf8Length=text=>{
+ let bytes=0;
+ for(let i=0;i<text.length;i++){const code=text.charCodeAt(i);if(code<0x80)bytes++;else if(code<0x800)bytes+=2;else if(code<0xd800||code>=0xdc00)bytes+=3;else{const next=text.charCodeAt(i+1);if(next>=0xdc00&&next<0xe000){bytes+=4;i++;}else bytes+=3;}}
+ return bytes;
+};
 const TOO_MUCH_TEXT='Nội dung chữ của EPUB vượt quá 25 MB, mức tối đa máy chủ đọc được. Hãy chia sách thành các tệp nhỏ hơn rồi thử lại.';
 const TOO_MANY_PARTS='EPUB có hơn 20.000 phần trong thứ tự đọc, nhiều hơn mức máy chủ đọc được. Hãy chia sách thành các tệp nhỏ hơn rồi thử lại.';
 const PACKAGE_TOO_LARGE='Tệp mô tả của EPUB (danh mục và thứ tự chương) có quá nhiều thẻ để máy chủ đọc an toàn. Hãy dùng Calibre chuyển lại sách sang EPUB, hoặc chuyển sang TXT/PDF, rồi thử lại.';
@@ -72,15 +78,17 @@ export function extractEpub(data){
    const tooMany=()=>documentTooLarge(`Phần ${chapters.length+1} của EPUB có quá nhiều thẻ định dạng để máy chủ đọc an toàn. Hãy chia sách hoặc chuyển sang TXT/PDF rồi thử lại.`);
    const html=read(path);if(countTags(html,HTML_ELEMENTS)>HTML_ELEMENTS)throw tooMany();
    const {text,images}=markupText(html,{body:true,tooComplex:tooMany});
-   chapter={content:text.replace(/ *\n */g,'\n').replace(/\n{3,}/g,'\n\n').trim(),images};texts.set(path,chapter);
+   const clean=text.replace(/ *\n */g,'\n').replace(/\n{3,}/g,'\n\n').trim();
+   chapter={content:clean,bytes:utf8Length(clean),images};texts.set(path,chapter);
   }
-  let content=chapter.content;
+  let content=chapter.content,bytes=chapter.bytes;
   if(content)readable++;
-  else{content='[Phần không có văn bản; cần đối chiếu ảnh trong EPUB gốc.]';warnings.push(`Phần ${chapters.length+1} (${path}) không có văn bản để dịch.`);}
+  else{content='[Phần không có văn bản; cần đối chiếu ảnh trong EPUB gốc.]';bytes=utf8Length(content);warnings.push(`Phần ${chapters.length+1} (${path}) không có văn bản để dịch.`);}
   if(chapter.images)warnings.push(`Phần ${chapters.length+1}: hình ảnh không được OCR; hãy đối chiếu EPUB gốc nếu có chữ trong ảnh.`);
-  const index=chapters.length+1,chapterTitle=content.split('\n').find(line=>line.trim())?.trim().slice(0,100)||`Phần ${index}`;
-  total+=content.length;if(total>MAX_TEXT)throw documentTooLarge(TOO_MUCH_TEXT);
-  parts.push({index,title:chapterTitle,content});chapters.push(`[Phần EPUB ${index}: ${chapterTitle}]\n${content}`);
+  const index=chapters.length+1,chapterTitle=content.split('\n').find(line=>line.trim())?.trim().slice(0,100)||`Phần ${index}`,heading=`[Phần EPUB ${index}: ${chapterTitle}]\n`;
+  // What source will hold, checked before any of it is joined: each part's heading and text, a blank line between parts.
+  total+=(index>1?2:0)+utf8Length(heading)+bytes;if(total>MAX_TEXT)throw documentTooLarge(TOO_MUCH_TEXT);
+  parts.push({index,title:chapterTitle,content});chapters.push(heading+content);
  }
  if(!readable)throw new Error('EPUB không có chương văn bản để dịch. EPUB chỉ gồm ảnh cần chuyển sang PDF để OCR.');
  return {source:chapters.join('\n\n'),parts,warnings,chapterCount:chapters.length,title:(title??'').trim()};

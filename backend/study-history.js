@@ -73,19 +73,23 @@ const STORED_SIZE='CASE WHEN stored_bytes>0 THEN stored_bytes ELSE 6*source_char
 const storedSize=row=>Number(row?.stored_bytes)>0?Number(row.stored_bytes):6*(Number(row?.source_characters)||0)+4*(Number(row?.translation_characters)||0);
 const sizeLabel=bytes=>bytes>=10*MB?`${number(Math.round(bytes/MB))} MB`:`${(bytes/MB).toFixed(1).replace('.',',')} MB`;
 const roomLimits=env=>({maxItems:dailyMax(env,'MAX_HISTORY_PER_USER',300),maxBytes:dailyMax(env,'MAX_HISTORY_MB_PER_USER',500)*MB});
-async function historyRoom(env,userId,existing,bytes){
+// refused: the room guard already refused this new item inside its save's transaction (see roomGuard). Room freed since
+// (an item deleted in another tab meanwhile) does not undo that refusal, so the save is answered as full all the same.
+async function historyRoom(env,userId,existing,bytes,refused=false){
  const {maxItems,maxBytes}=roomLimits(env),previous=existing?storedSize(existing):0;
  if(!maxItems&&!maxBytes||existing&&bytes<=previous)return null;
  const row=await env.DB.prepare(`SELECT COUNT(*) AS items,COALESCE(SUM(${STORED_SIZE}),0) AS bytes FROM study_sessions WHERE user_id=?`).bind(userId).first();
  const items=Number(row?.items)||0,used=Number(row?.bytes)||0,full=reason=>reply({error:`${reason} Hãy xóa trong Lịch sử dịch những bản dịch không cần nữa rồi thử lại.`,code:'history_full',items,maxItems,bytes:used,maxBytes},413);
  if(!existing&&maxItems&&items>=maxItems)return full(`Lịch sử dịch của tài khoản đã có ${number(items)} bản dịch, mức tối đa cho mỗi tài khoản.`);
  if(maxBytes&&used-previous+bytes>maxBytes)return full(`Lịch sử dịch của tài khoản đã chiếm ${sizeLabel(used)}; lưu bản dịch này (${sizeLabel(bytes)}) sẽ vượt mức ${sizeLabel(maxBytes)} cho mỗi tài khoản.`);
- return null;
+ return refused?full('Lịch sử dịch của tài khoản vừa đầy lúc lưu bản dịch này, vì một tab hoặc thiết bị khác cũng lưu bản dịch mới cùng lúc.'):null;
 }
 // The same check for a new item, made inside the save's transaction: saves sent at once all pass historyRoom before any
 // of them is written. Run first in the batch, it tries to insert a row the CHECK on status refuses whenever the item
 // would not fit, so the whole save fails and nothing of it is kept; an item saved meanwhile under the same id (a save
-// sent again) is an update and passes.
+// sent again) is an update and passes. GUARD_REFUSED tells that failure from others: no other statement of a save can
+// break a CHECK, and SQLite (D1 too) names the kind of constraint in its error.
+const GUARD_REFUSED=/CHECK constraint failed/iu;
 function roomGuard(env,userId,sessionId,bytes){
  const {maxItems,maxBytes}=roomLimits(env);if(!maxItems&&!maxBytes)return null;
  return env.DB.prepare(`INSERT INTO study_sessions(id,user_id,title,state_key,status) SELECT ?1,?2,'','','history_full' WHERE NOT EXISTS (SELECT 1 FROM study_sessions WHERE id=?1) AND (?3>0 AND (SELECT COUNT(*) FROM study_sessions WHERE user_id=?2)>=?3 OR ?4>0 AND (SELECT COALESCE(SUM(${STORED_SIZE}),0) FROM study_sessions WHERE user_id=?2)+?5>?4)`).bind(sessionId,userId,maxItems,maxBytes,bytes);
@@ -473,13 +477,15 @@ export async function studyHistoryRoute(request,env,path,reader){
  await env.FILES.put(key,stateJson,{httpMetadata:{contentType:'application/json; charset=utf-8'}});
  if(state.complete)await env.FILES.put(translatedKey,state.translation,{httpMetadata:{contentType:'text/plain; charset=utf-8'}});
  // An account deleted meanwhile keeps none of this: its rows cannot be written (or went with it), its files go here.
- // A new item the guard refused (saves sent at once took the room) keeps none either; its files are its own unless the
- // same save, sent again, landed meanwhile.
+ // A new item whose batch failed keeps none either (the guard refused it, or the database failed): its files are its own
+ // unless the same save, sent again, landed meanwhile. A refusal by the guard is answered 413 history_full, also when
+ // room was freed before the check here, never with the database's error.
  try{await env.DB.batch(statements);}
  catch(error){
   if(!await accountKept(env,reader.id,written))return accountGone();
-  const full=guard?await historyRoom(env,reader.id,null,storedBytes):null;
-  if(full){if(!await existingSession(env,sessionId,reader.id))await removeKeys(env,written);return full;}
+  if(!existing&&!await existingSession(env,sessionId,reader.id))await removeKeys(env,written);
+  const full=guard?await historyRoom(env,reader.id,null,storedBytes,GUARD_REFUSED.test(String(error?.message||''))):null;
+  if(full)return full;
   throw error;
  }
  // The revision this save made, which the next save from this tab names; read back, as a save from elsewhere may have

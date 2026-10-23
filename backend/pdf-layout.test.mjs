@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import {DatabaseSync} from 'node:sqlite';
 import {readdirSync,readFileSync} from 'node:fs';
 import {fileURLToPath} from 'node:url';
-import {pdfLayoutRoute} from './pdf-layout.js';
+import {pdfLayoutRoute,bodyDeadline} from './pdf-layout.js';
 import {studyRoute} from './study-translation.js';
 import {studyHistoryRoute} from './study-history.js';
 import {errorResponse} from './http.js';
@@ -413,7 +413,7 @@ test('PDF service failures reach the browser typed: busy is waited out, too heav
 test('An export refused for translations longer than their boxes reaches the browser as 422 pdf_overflow with the boxes to open',async t=>{
  const {env,FILES,sessions}=environment(),row=await seed(env);sessions.set(historyId,row);let answer;t.mock.method(globalThis,'fetch',async()=>answer());
  const call=()=>browserError(()=>pdfLayoutRoute(jsonRequest(base+'/render',{assetId,historyId}),env,base+'/render',reader));
- // The service's text names "Đoạn k" on each page and the controls of Xưởng dịch; it is passed on whole (up to 600
+ // The service's text names each block ("Trang N · đoạn k") and the controls of Xưởng dịch; it is passed on whole (up to 600
  // characters), and only well-formed boxes go with it.
  const message=overflowMessage(Array.from({length:3000},(_,i)=>({page:10000+i,id:`p${10000+i}-b${i}`,label:`Đoạn ${1001+i}`})));
  assert.ok(message.length>400&&message.length<=600,String(message.length));
@@ -590,6 +590,48 @@ test('A save landing after the export\'s last check is never overwritten: the ch
  }
 });
 
+test('An export overtaken by a save of the same translations is kept; one overtaken by other translations is refused and gives the day\'s export back',async t=>{
+ const files=new EtagFiles(),{sqlite,env,save,first,state,chapter,render}=await pdfSession(t,{files}),translated=assetKey(reader,'translated.pdf');
+ // The PDF service holds each export until the test lets it answer (also when an assertion fails first).
+ let gate=null;const opened=[],hold=()=>{let open,reached;const entered=new Promise(done=>{reached=done;}),held=new Promise(done=>{open=done;});gate={held,reached};opened.push(open);return {entered,open};};
+ t.after(()=>{for(const open of opened)open();});
+ t.mock.method(globalThis,'fetch',async(url,options)=>{await new Response(options.body).arrayBuffer();const waiting=gate;gate=null;if(waiting){waiting.reached();await waiting.held;}return Response.json({pdfBase64:btoa('%PDF-1.7\nVietnamese'),report:[]});});
+ const same=['Định nghĩa vectơ.','Công thức @@PDF_INLINE_0@@.'],revision=()=>sqlite.prepare('SELECT revision FROM study_sessions WHERE id=?').get(first.id).revision;
+ const exportedPdf=()=>({file_key:translated,mime:'application/pdf'}),text=()=>({file_key:null,mime:'text/plain'}),exports=()=>count(sqlite,`pdf-render:${reader.id}`);
+ // Another tab saves the session unchanged ("Lưu đoạn đã sửa" without an edit) while the PDF is made: a new revision, the
+ // same text. The PDF still shows that text: it is kept and linked at the new revision.
+ let call=hold(),exporting=render();await call.entered;
+ const resaved=await save(same,{id:first.id,revision:first.revision});assert.equal(resaved.http,200);assert.equal(resaved.revision,2);
+ call.open();const kept=await exporting;
+ assert.equal(kept.status,200,kept.message);assert.equal(kept.data.url,`${base}/assets/${assetId}/translated`);
+ assert.deepEqual(chapter(),exportedPdf());assert.ok(files.values.has(translated));assert.equal(revision(),2,'the export made no revision of its own');
+ assert.equal((await state()).pdfLayout.exported,true);assert.equal((await state()).pdfLayout.renderVersion,3);assert.deepEqual((await state()).translationParts,same);
+ assert.equal(exports(),1);
+ // Saved unchanged once more from that tab, the session keeps its PDF.
+ assert.equal((await save(same,{id:first.id,revision:2})).revision,3);assert.deepEqual(chapter(),exportedPdf());assert.ok(files.values.has(translated));
+ // An edited block makes the part text again; exported anew while the other tab saves that text unchanged, and that
+ // save's last step (removing the PDF of a copy it saw unexported) comes only after the export stored its PDF: the export
+ // stores it again, so the chapter is never linked to nothing.
+ const edited=['Định nghĩa vectơ.','Công thức đã sửa @@PDF_INLINE_0@@.'];
+ assert.equal((await save(edited,{id:first.id,revision:3})).revision,4);assert.deepEqual(chapter(),text());assert.equal(files.values.has(translated),false);
+ call=hold();exporting=render();await call.entered;
+ assert.equal((await save(edited,{id:first.id,revision:4})).revision,5);assert.deepEqual(chapter(),text());
+ const put=files.put.bind(files);let removedLate=false;
+ files.put=async(key,value,options)=>{const stored=await put(key,value,options);if(key===translated&&!removedLate){removedLate=true;await files.delete(key);}return stored;};
+ call.open();const again=await exporting;files.put=put;
+ assert.equal(again.status,200,again.message);assert.ok(removedLate);assert.ok(files.values.has(translated),'stored again');assert.deepEqual(chapter(),exportedPdf());
+ assert.equal((await state()).pdfLayout.exported,true);assert.deepEqual((await state()).translationParts,edited);assert.equal(exports(),2);
+ // Other translations saved meanwhile: the PDF is not kept, and the refused export does not use up the day's exports.
+ call=hold();exporting=render();await call.entered;assert.equal(exports(),3,'counted while the service works');
+ const other=['Định nghĩa vectơ.','Công thức sửa ở thẻ khác @@PDF_INLINE_0@@.'];assert.equal((await save(other,{id:first.id,revision:5})).revision,6);
+ call.open();const refused=await exporting;
+ assert.equal(refused.status,409);assert.equal(refused.data.code,'history_conflict');assert.equal(refused.data.revision,6);
+ assert.equal(refused.data.error,'Bản dịch này vừa được lưu từ một tab hoặc thiết bị khác trong lúc xuất PDF, nên PDF vừa dựng không khớp bản mới nhất và chưa được lưu. Hãy mở lại bản dịch từ Lịch sử dịch rồi bấm Xuất PDF tiếng Việt.');
+ assert.equal(exports(),2,'the refused export is given back');
+ assert.deepEqual((await state()).translationParts,other);assert.notEqual((await state()).pdfLayout.exported,true);assert.deepEqual(chapter(),text());
+ const latest=await render();assert.equal(latest.status,200,latest.message);assert.equal(exports(),3);assert.deepEqual(chapter(),exportedPdf());
+});
+
 // The bytes of a request body as the browser sends them, read only when someone pulls them: reads counts the pulls.
 async function recordedBody(body){
  const encoded=new Response(body),type=encoded.headers.get('Content-Type'),bytes=new Uint8Array(await encoded.arrayBuffer()),record={reads:0};let offset=0;
@@ -618,6 +660,62 @@ test('A busy answer comes before the upload is read: another call of the account
  sqlite.prepare('DELETE FROM service_leases').run();
  const {request,record}=await recordedBody(extractForm()),response=await pdfLayoutRoute(request('/extract'),env,base+'/extract',reader);
  assert.equal(response.status,201);assert.ok(record.reads>0);assert.equal(calls,1);assert.equal(count(sqlite,`pdf-extract:${reader.id}`),1);
+});
+
+// A request body the test sends a piece at a time (send, end; fail breaks it off); pulls counts the reads that found
+// nothing left to take, cancelled is the reason the Worker gave when it stopped reading.
+function trickledBody(path,first,{type,length}){
+ const record={pulls:0,cancelled:null},encoder=new TextEncoder();let controller;
+ const stream=new ReadableStream({start(c){controller=c;},pull(){record.pulls++;},cancel(reason){record.cancelled=reason;}});
+ controller.enqueue(encoder.encode(first));
+ return {record,send:text=>controller.enqueue(encoder.encode(text)),end:()=>controller.close(),fail:()=>{try{controller.error(new Error('the test ended'));}catch{}},
+  request:()=>new Request(origin+base+path,{method:'POST',headers:{'Content-Type':type,'Content-Length':String(length),Origin:origin},body:stream,duplex:'half'})};
+}
+// An extraction's multipart body: its head with the first bytes of the PDF, then the rest.
+const BOUNDARY='----hoa-tri-test';
+const multipartHead=`--${BOUNDARY}\r\nContent-Disposition: form-data; name="pages"\r\n\r\n4\r\n--${BOUNDARY}\r\nContent-Disposition: form-data; name="file"; filename="lesson.pdf"\r\nContent-Type: application/pdf\r\n\r\n%PDF-1.7\n`;
+const multipartRest=`selected page only\r\n--${BOUNDARY}--\r\n`,multipartType=`multipart/form-data; boundary=${BOUNDARY}`;
+// Lets the Worker go on (D1 here answers at once) without moving the mocked clock.
+const settle=async(check,rounds=100)=>{for(let i=0;i<rounds&&!check();i++)await new Promise(done=>setImmediate(done));assert.ok(check(),'the call did not get there');};
+test('An upload holds no slot of the site while it arrives: a stalled one is stopped with 408 after its time limit, one finished after the last slot went is answered busy',async t=>{
+ const {sqlite,env}=sqliteEnvironment(t),third={id:'student-3',name:'Mai'};
+ sqlite.prepare('INSERT INTO reader_users(id,google_sub,email,name) VALUES(?,?,?,?)').run(third.id,'sub-3','s3@example.test','Mai');
+ let calls=0;t.mock.method(globalThis,'fetch',async()=>{calls++;return Response.json({document:document(),originalPdfBase64:btoa(pdf)});});
+ t.mock.timers.enable({apis:['setTimeout']});
+ const leases=()=>sqlite.prepare('SELECT key FROM service_leases ORDER BY key').all().map(row=>row.key),bodies=[];
+ const trickled=(...args)=>{const sent=trickledBody(...args);bodies.push(sent);return sent;};t.after(()=>{for(const sent of bodies)sent.fail();});
+ // Two students' uploads stop after their first bytes, then go on at a byte every 10 s: an extraction and an export.
+ const upload=trickled('/extract',multipartHead,{type:multipartType,length:2000}),body=trickled('/render',`{"assetId":"${assetId}","historyId":`,{type:'application/json',length:100});
+ const answers=[];
+ const stalled=[[upload,'/extract',reader],[body,'/render',other]].map(([sent,path,owner],i)=>browserError(()=>pdfLayoutRoute(sent.request(),env,base+path,owner)).then(answer=>{answers[i]=answer;return answer;}));
+ await settle(()=>upload.record.pulls>0&&body.record.pulls>0);
+ assert.deepEqual(leases(),['pdf:student-1','pdf:student-2'],'while the bodies arrive, only their accounts are held');
+ // Every other student still finds the whole service free.
+ const capacity=await pdfLayoutRoute(new Request(origin+base+'/capacity'),env,base+'/capacity',third);
+ assert.deepEqual(await capacity.json(),{busy:false,free:2,slots:2,retryAfter:null});
+ assert.equal((await extract(env,third)).status,201);assert.equal(calls,1);
+ for(let second=10;second<120;second+=10){t.mock.timers.tick(10000);upload.send(' ');body.send(' ');await settle(()=>true,5);}
+ assert.deepEqual(answers,[],'still taken in after 110 s');
+ // Two minutes after they began, both are stopped: the upload is cancelled, nothing is held and no daily call is used.
+ t.mock.timers.tick(10000);await settle(()=>answers.filter(Boolean).length===2);
+ for(const answer of await Promise.all(stalled)){
+  assert.equal(answer.status,408);assert.equal(answer.retryAfter,null);
+  assert.deepEqual(answer.data,{error:'Kết nối mạng quá chậm nên máy chủ chưa nhận hết dữ liệu gửi lên và đã dừng lượt xử lý PDF này. Hãy kiểm tra mạng (ví dụ chuyển sang Wi-Fi) rồi thử lại.',code:'upload_timeout'});
+ }
+ assert.ok(upload.record.cancelled&&body.record.cancelled,'the Worker stopped reading both');
+ assert.deepEqual(leases(),[]);assert.equal(calls,1);
+ assert.deepEqual(sqlite.prepare('SELECT key,count FROM rate_limits').all().map(row=>({...row})),[{key:`pdf-extract:${third.id}`,count:1}]);
+ // The slots are counted before the body is read and taken once it is in: here both went meanwhile.
+ const late=trickled('/extract',multipartHead,{type:multipartType,length:2000}),answer=browserError(()=>pdfLayoutRoute(late.request(),env,base+'/extract',reader));
+ await settle(()=>late.record.pulls>0);assert.deepEqual(leases(),['pdf:student-1']);
+ for(const slot of ['pdf-slot:0','pdf-slot:1'])sqlite.prepare('INSERT INTO service_leases(key,token,expires_at) VALUES(?,?,?)').run(slot,'another-call',Date.now()+60000);
+ late.send(multipartRest);late.end();
+ const full=await answer;assert.equal(full.status,503);assert.equal(full.data.code,'pdf_service_busy');assert.equal(full.retryAfter,20);
+ assert.equal(calls,1,'the service is not called');assert.equal(count(sqlite,`pdf-extract:${reader.id}`),0);assert.deepEqual(leases(),['pdf-slot:0','pdf-slot:1'],'its account is free again');
+ // A large upload on a slow connection gets longer: 16 KB a second over the length it declares (or the route's limit).
+ const deadline=(path,headers)=>bodyDeadline(new Request(origin+base+path,{method:'POST',headers}),base+path);
+ assert.equal(deadline('/render',{'Content-Length':'100'}),120000);assert.equal(deadline('/extract',{'Content-Length':String(25*1024*1024)}),1600000);
+ assert.equal(deadline('/extract',{}),Math.ceil(26*1024*1024/16384)*1000);
 });
 
 test('GET capacity tells a waiting browser whether its call would find a place, in one read of D1 that takes nothing',async t=>{

@@ -187,6 +187,13 @@ export function quotaResetLabel(now=Date.now()){
 const clockIn=(seconds,now)=>new Intl.DateTimeFormat('vi-VN',{hour:'2-digit',minute:'2-digit',hourCycle:'h23'}).format(new Date(now+seconds*1000));
 export function pauseMessage(reason,error,now=Date.now()){
  const detail=String(error?.message||'').trim(),lease=Number(error?.data?.retryAfter);
+ // A save that failed after Gemini had translated part of the chunk (study.js saveBeforeSpending, keptInTab): that part
+ // is only in this tab, which saves it first when the run goes on there. The pause says so, after the server's own
+ // words for a refusal, instead of "Tiến độ đã lưu". A copy saved elsewhere since (conflict) is reopened instead.
+ if(error?.keptInTab&&reason!=='conflict'){
+  const next=reason==='history_full'?'dọn bớt xong, bấm Tiếp tục dịch cả quyển ở tab này':reason==='network'?'khi mạng ổn định, bấm Tiếp tục dịch cả quyển ở tab này':'bấm Tiếp tục dịch cả quyển ở tab này để lưu và dịch tiếp';
+  return `${reason==='network'?'Mất kết nối tới máy chủ.':detail||'Chưa lưu được phần vừa dịch vào tài khoản.'} Phần đã dịch vẫn hiện trong tab này: đừng đóng tab. Các trang đã xong trước đó đã lưu; ${next}.`;
+ }
  switch(reason){
   case 'stopped':return 'Đã dừng theo yêu cầu. Tiến độ đã lưu; bấm Tiếp tục dịch cả quyển khi muốn dịch tiếp.';
   case 'busy':return `Quyển này đang được dịch ở một thiết bị khác (hoặc một trình duyệt khác). Để không trả token hai lần cho cùng trang, Hoa Trí không dịch song song ở thiết bị này; tiến độ đã lưu. Bấm Chờ rồi dịch tiếp: Hoa Trí theo dõi tiến độ và tự dịch tiếp ở đây khi thiết bị kia dừng${lease>0?`, hoặc muộn nhất khoảng ${clockIn(lease,now)} nếu thiết bị kia không còn báo tiến độ`:''}.`;

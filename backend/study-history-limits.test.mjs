@@ -70,6 +70,35 @@ test('New items saved at once cannot all pass the room: only those that fit are 
  assert.deepEqual(last.sqlite.prepare('SELECT id,revision FROM study_sessions').all().map(row=>({...row})),[{id,revision:2}]);
 });
 
+test('A new item the guard refused answers 413 history_full and leaves no files, also when room is freed before the check after it; a failed new item leaves no files',async t=>{
+ for(const [vars,long] of [[{MAX_HISTORY_PER_USER:'2',MAX_HISTORY_MB_PER_USER:'0',DAILY_HISTORY_PER_USER:'0'},''],[{MAX_HISTORY_PER_USER:'0',MAX_HISTORY_MB_PER_USER:'1',DAILY_HISTORY_PER_USER:'0'},'中'.repeat(60000)]]){
+  const {call,sqlite,env}=setup(t,vars),item=title=>save(textState([`${title}第一段。${long}`,`${title}第二段。`]),{title});
+  const a=await (await call(item('A'))).json();
+  // D passes the check before writing and waits at its batch; C, saved from another tab meanwhile, takes the last room;
+  // a third tab deletes A right after the guard refused D, before D checks the room again. D answered a raw 500 and
+  // left its state.json and translation.txt behind.
+  const batch=env.DB.batch.bind(env.DB);let entered,release;const waiting=new Promise(resolve=>{entered=resolve;}),gate=new Promise(resolve=>{release=resolve;});let held=false;
+  env.DB.batch=async statements=>{
+   if(held)return batch(statements);
+   held=true;entered();await gate;
+   try{return await batch(statements);}
+   catch(error){assert.equal((await call(null,{id:a.id,method:'DELETE'})).status,200);throw error;}
+  };
+  const d=call(item('D'));await waiting;
+  assert.equal((await call(item('C'))).status,201);release();
+  const refused=await d;assert.equal(refused.status,413,refused.message);const body=await refused.json();
+  assert.equal(body.code,'history_full');assert.match(body.error,/vừa đầy lúc lưu bản dịch này.*Hãy xóa trong Lịch sử dịch/u);
+  const kept=sqlite.prepare('SELECT id,title FROM study_sessions').all();assert.deepEqual(kept.map(row=>row.title),['C']);
+  assert.deepEqual([...new Set(env.FILES.keys(`study/${reader.id}/`).map(key=>key.split('/')[2]))],[kept[0].id],'only the kept item has files');
+  env.DB.batch=batch;
+ }
+ // Any other failure of a new item's batch (the database lost meanwhile) leaves none of its files either.
+ const {call,sqlite,env}=setup(t,{MAX_HISTORY_PER_USER:'5',DAILY_HISTORY_PER_USER:'0'});
+ env.DB.batch=async()=>{throw new Error('D1_ERROR: Network connection lost.');};
+ const failed=await call(save(textState(['第一段。'])));assert.match(failed.message,/Network connection lost/u);
+ assert.equal(sqlite.prepare('SELECT COUNT(*) AS n FROM study_sessions').get().n,0);assert.deepEqual(env.FILES.keys(`study/${reader.id}/`),[]);
+});
+
 test('The size limit counts what each item stores and lets an item shrink; the daily limit counts only new items',async t=>{
  const {call,sqlite}=setup(t,{MAX_HISTORY_MB_PER_USER:'1',MAX_HISTORY_PER_USER:'0',DAILY_HISTORY_PER_USER:'2'});
  const big=textState([`${'长'.repeat(150000)}。`]);big.translationParts=['Dài '.repeat(1000)];

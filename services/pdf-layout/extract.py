@@ -2528,7 +2528,7 @@ def scan_layout(page, number):
     pieces = [piece for band in layout["bands"] for piece in band["pieces"]]
     # Blocks are numbered, packed into OCR sheets and translated in reading order: a page set in columns is read one
     # column after the other, as a text layer is (reading_order).
-    for paragraph in reading_order(paragraphs + pieces, Columns([l["rect"] for l in layout["lines"]], body_height)):
+    for paragraph in reading_order(paragraphs + pieces, Columns([l["rect"] for l in layout["lines"]], body_height), layout["figures"]):
         if "band" in paragraph:
             reading = read_band(paragraph)
             if reading:
@@ -2814,9 +2814,29 @@ SYMBOL = str.maketrans({0xF000 + start + k: c for start, row in (
     (0xF1, "\u27e9\u222b\u2320\u23ae\u2321\u239e\u239f\u23a0\u23a4\u23a5\u23a6\u23ab\u23ac\u23ad")) for k, c in enumerate(row)})
 # Markup of a Han line, the only small print over or under it that is never read: its pinyin (syllables of Latin letters,
 # at least one with a tone mark) above it and emphasis dots under it. A gloss, a credit, a limit or a reaction's
-# condition is text of its own.
-PINYIN = re.compile(r"(?:(?:[zcs]h|[bpmfdtnlgkhjqxrzcsyw])?(?:iang|iong|uang|ueng|ang|eng|ing|ong|iao|ian|uai|uan|van|ai|ei|ao|ou|an|en|in|un|vn|ia|ie|iu|ua|uo|ui|ue|ve|er|a|o|e|i|u|v)|ng|n|m)+")
-TONELESS = str.maketrans("āáǎàēéěèīíǐìōóǒòūúǔùǖǘǚǜü", "aaaaeeeeiiiioooouuuuvvvvv")
+# condition is text of its own. The syllables of Hanyu Pinyin without tones, ü written v (printed with or without its
+# dots after j, q, x and y, and in lüe and nüe); m, n, ng, hm and hng are interjections and r an erhua written apart,
+# each a word of its own.
+SYLLABLES = frozenset("""a ai an ang ao ba bai ban bang bao bei ben beng bi bian biao bie bin bing bo bu ca cai can cang cao ce cei cen
+ceng cha chai chan chang chao che chen cheng chi chong chou chu chua chuai chuan chuang chui chun chuo ci cong cou cu cuan cui cun
+cuo da dai dan dang dao de dei den deng di dia dian diao die ding diu dong dou du duan dui dun duo e ei en eng er fa fan fang fei
+fen feng fiao fo fou fu ga gai gan gang gao ge gei gen geng gong gou gu gua guai guan guang gui gun guo ha hai han hang hao he hei
+hen heng hong hou hu hua huai huan huang hui hun huo ji jia jian jiang jiao jie jin jing jiong jiu ju juan jue jun jv jvan jve
+jvn ka kai kan kang kao ke kei ken keng kong kou ku kua kuai kuan kuang kui kun kuo la lai lan lang lao le lei leng li lia lian
+liang liao lie lin ling liu lo long lou lu luan lue lun luo lv lve ma mai man mang mao me mei men meng mi mian miao mie min ming
+miu mo mou mu na nai nan nang nao ne nei nen neng ni nian niang niao nie nin ning niu nong nou nu nuan nue nun nuo nv nve o ou pa
+pai pan pang pao pei pen peng pi pian piao pie pin ping po pou pu qi qia qian qiang qiao qie qin qing qiong qiu qu quan que qun
+qv qvan qve qvn ran rang rao re ren reng ri rong rou ru rua ruan rui run ruo sa sai san sang sao se sen seng sha shai shan shang
+shao she shei shen sheng shi shou shu shua shuai shuan shuang shui shun shuo si song sou su suan sui sun suo ta tai tan tang tao
+te tei teng ti tian tiao tie ting tong tou tu tuan tui tun tuo wa wai wan wang wei wen weng wo wu xi xia xian xiang xiao xie xin
+xing xiong xiu xu xuan xue xun xv xvan xve xvn ya yan yang yao ye yi yin ying yo yong you yu yuan yue yun yv yvan yve yvn za zai
+zan zang zao ze zei zen zeng zha zhai zhan zhang zhao zhe zhei zhen zheng zhi zhong zhou zhu zhua zhuai zhuan zhuang zhui zhun
+zhuo zi zong zou zu zuan zui zun zuo""".split())
+INTERJECTIONS = frozenset(("m", "n", "ng", "hm", "hng", "r"))
+# The tone marks as combining characters: macron, acute, caron, grave, and the breve some fonts print for the caron.
+TONE_MARKS = frozenset("\u0304\u0301\u030c\u0300\u0306")
+# Pinyin fonts of primary school books print a and g in their school forms, which some text layers give as ɑ and ɡ.
+SCHOOL_LETTERS = str.maketrans("ɑɡ", "ag")
 EMPHASIS = re.compile(r"[\s·•．.﹅﹆○◦●∙・‧]+")
 # Full-width punctuation the translation writes itself: never part of a formula's picture.
 CJK_PUNCTUATION = frozenset("。，、；：？！…～（）《》〈〉「」『』【】〔〕“”‘’")
@@ -2947,10 +2967,44 @@ def horizontal(line):
     return line["wmode"] == 0 and line["dir"][0] > .98 and abs(line["dir"][1]) < .02
 
 
-def pinyin(text):
-    """Whether text reads as pinyin: words made of syllables only, with a tone mark somewhere."""
-    words = re.findall(r"[^\s'’\-·,.;:!?，。、；：！？]+", text.lower())
-    return bool(words) and any(c in "āáǎàēéěèīíǐìōóǒòūúǔùǖǘǚǜ" for c in text.lower()) and all(PINYIN.fullmatch(w.translate(TONELESS)) for w in words)
+def syllables(word):
+    """Whether a word of letters (tones taken off, ü written v) splits into pinyin syllables, each perhaps followed by
+    the r of erhua (nǎr, diǎnr, yíhuìr). Positions a split can reach are marked left to right, so the time grows with
+    the word's length whatever its letters."""
+    reach = [True] + [False] * len(word)
+    for i in range(len(word)):
+        if reach[i]:
+            for j in range(i + 1, min(len(word), i + 6) + 1):
+                if word[i:j] in SYLLABLES:
+                    reach[j] = True
+                    if word[j:j + 1] == "r":
+                        reach[j + 1] = True
+    return reach[-1]
+
+
+def pinyin(text, tone=True):
+    """Whether text reads as pinyin: most of its words, runs of letters between spaces, punctuation, quotes, brackets
+    and digits (a speaker's label B：, a time 3 diǎn), split into syllables (syllables) or are an interjection or an
+    erhua r of their own, and (tone) it carries a tone mark, also written as a combining mark after its vowel. The time
+    grows with the length of the text whatever it holds."""
+    letters, marked = [], False
+    for c in unicodedata.normalize("NFD", text.lower().translate(SCHOOL_LETTERS)):
+        if c in TONE_MARKS:
+            marked = True
+        elif c == "\u0308" and letters and letters[-1] == "u":
+            letters[-1] = "v"
+        elif not unicodedata.combining(c):
+            letters.append(c if c.isalpha() else " ")
+    words = "".join(letters).split()
+    return (marked or not tone) and 2 * sum(1 for w in words if w in INTERJECTIONS or (w.isascii() and syllables(w))) > len(words)
+
+
+def pinyin_marks(texts):
+    """Which of texts (pieces of small print right over one Han line) are its pinyin: those whose words are mostly
+    syllables and those without letters (a quote mark or a dot set apart), when together they carry a tone mark. A
+    gloss beside them is none."""
+    marks = [k for k, text in enumerate(texts) if pinyin(text, tone=False) or not any(c.isalpha() for c in text)]
+    return marks if marks and pinyin(" ".join(texts[k] for k in marks)) else []
 
 
 def emphasis(text):
@@ -3003,7 +3057,7 @@ def marked_up(line):
             moved.append(s)
     small = [s for s in small if not s["han"] and float(s["size"]) <= .7 * size and not any(s is m for m in moved) and over_han(s["rect"], line["spans"])]
     above = [s for s in small if s["rect"].y1 <= top + .15 * size]
-    decor = (above if above and pinyin(" ".join(s["text"] for s in above)) else []) + [s for s in small if s["rect"].y0 >= bottom - .15 * size and emphasis(s["text"])]
+    decor = [above[k] for k in pinyin_marks([s["text"] for s in above])] + [s for s in small if s["rect"].y0 >= bottom - .15 * size and emphasis(s["text"])]
     if not decor and not moved:
         return line
     spans = [s for s in line["spans"] if not any(s is d for d in decor + moved)]
@@ -3025,10 +3079,44 @@ def object_span(box, line, picture=False):
             "color": line["color"], "font": "", "outlined": True, "object": True, "picture": picture}
 
 
+class Bands:
+    """Rects by bands of the page's height (16 pt each): what lies near a line is found without looking at all that a
+    page draws (a hatched region, a chart or a grid drawn as one path can hold tens of thousands of strokes)."""
+
+    def __init__(self, rects):
+        self.rects, self.bands = list(rects), [[] for _ in range(1001)]
+        for k, r in enumerate(self.rects):
+            lo, hi = int(r.y0 // 16), int(r.y1 // 16)
+            if 0 <= lo == hi <= 1000:
+                self.bands[lo].append(k)
+            else:
+                for band in range(self.band(r.y0), self.band(r.y1) + 1):
+                    self.bands[band].append(k)
+
+    @staticmethod
+    def band(y):
+        return min(1000, max(0, int(y // 16)))
+
+    def indices(self, y0, y1):
+        """Indices of the rects whose bands meet y0..y1, in their order."""
+        lo, hi = self.band(y0), self.band(y1)
+        return list(self.bands[lo]) if lo == hi else sorted({k for band in range(lo, hi + 1) for k in self.bands[band]})
+
+    def near(self, y0, y1):
+        """The rects whose bands meet y0..y1."""
+        return [self.rects[k] for k in self.indices(y0, y1)]
+
+
+def banded(rects):
+    """rects as Bands (a list is indexed)."""
+    return rects if isinstance(rects, Bands) else Bands(rects)
+
+
 def framed(rule, strokes):
-    """Whether an upright stroke meets the rule at an end (a cell's or a frame's border) or a rule goes on past it."""
+    """Whether an upright stroke meets the rule at an end (a cell's or a frame's border) or a rule goes on past it.
+    strokes: Bands (or a list) of the page's rules and upright strokes."""
     y = middle(rule)
-    for o in strokes:
+    for o in banded(strokes).near(y - 1.5, y + 1.5):
         if o is rule or not o.y0 - 1.5 <= y <= o.y1 + 1.5:
             continue
         if o.width <= 3 and o.height >= 4:
@@ -3071,38 +3159,36 @@ def reunite_lines(lines, drawn):
     it (a formula pasted as a picture, a drawn arrow or sign). Pieces on one baseline are one line again when they
     nearly touch with nothing drawn between them, when a blank to fill in joins them (a short rule on their baseline from
     the end of one to the start of the next), when they are glyphs of one letter-spaced line (single glyphs of one style
-    at one spacing, no cell of a table or a grid), or when drawn things no taller than three em fill the gap on their
-    band: those become an object span of the line, an inline token whose crop is their box. A blank, an inline picture
-    or a drawing right after a line's text, or right before it, is part of the line too. A blank sits on or under the
-    baseline and stands alone: a rule another stroke meets at an end (the border of a table cell close under its text),
-    one with a parallel rule (an equals sign), an arrowhead or text set over or under it (a condition, a fraction's
-    terms) is none.
+    at one spacing, not the cells of a table or a grid nor a figure's labels), or when drawn things no taller than three
+    em fill the gap on their band: those become an object span of the line, an inline token whose crop is their box. A
+    blank, an inline picture or a drawing right after a line's text, or right before it, is part of the line too. A
+    blank sits on or under the baseline and stands alone: a rule another stroke meets at an end (the border of a table
+    cell close under its text), one with a parallel rule (an equals sign), an arrowhead or text set over or under it (a
+    condition, a fraction's terms) is none.
     Small print over or under a formula of a Han line (the limit under lim, the bounds of a sum, the conditions over a
     reaction's sign) goes into that formula's crop; a sub- or superscript beside a larger line's glyphs is a piece of
     it. Pinyin right over a Han line and emphasis dots right under it become that line's decor (never read); any other
     small print (a gloss, a credit, a subtitle) is a line of its own. drawn: drawn_objects of the page."""
     objects = [r for _, r in drawn]
     rules = [b for b in objects if b.height <= 1.6 and b.width >= 4]
-    strokes = rules + [o for o in objects if o.width <= 3 and o.height >= 4]
+    strokes = Bands(rules + [o for o in objects if o.width <= 3 and o.height >= 4])
     texts = sorted((l for l in lines if horizontal(l)), key=lambda l: l["base"])
     bases = [l["base"] for l in texts]
     used = set()
-    # drawn objects by bands of the page's height: a chart's thousands of paths are looked at only round a line
-    bands = {}
-    for k, (_, o) in enumerate(drawn):
-        for band in range(max(0, int(o.y0 // 16)), min(400, int(o.y1 // 16)) + 1):
-            bands.setdefault(band, []).append(k)
+    # what is drawn, by bands of the page's height: a chart's thousands of paths are looked at only round a line
+    placed, ruled = Bands(objects), Bands(rules)
 
     def near(base, reach):
         return texts[bisect_left(bases, base - reach):bisect_right(bases, base + reach)]
 
     def drawn_near(y0, y1):
         """The drawn objects (kind, rect) whose bands meet y0..y1."""
-        return [drawn[k] for k in sorted({k for band in range(max(0, int(y0 // 16)), min(400, int(y1 // 16)) + 1) for k in bands.get(band, ())})]
+        return [drawn[k] for k in placed.indices(y0, y1)]
 
     def paired(rule, h):
         """A rule along another within a third of an em: an equals sign, a double rule."""
-        return any(o is not rule and .3 <= abs(middle(o) - middle(rule)) <= .35 * h + .5 and min(o.x1, rule.x1) - max(o.x0, rule.x0) >= .5 * min(o.width, rule.width) for o in rules)
+        y = middle(rule)
+        return any(o is not rule and .3 <= abs(middle(o) - y) <= .35 * h + .5 and min(o.x1, rule.x1) - max(o.x0, rule.x0) >= .5 * min(o.width, rule.width) for o in ruled.near(y - .35 * h - .5, y + .35 * h + .5))
 
     def headed(rule, h):
         """A small drawing at an end of the rule: an arrowhead."""
@@ -3117,7 +3203,8 @@ def reunite_lines(lines, drawn):
     def blank(line, x0=None, x1=None):
         """An unused rule standing alone on or just under line's baseline from about x0 to about x1."""
         h, base = line["size"], line["base"]
-        for k, b in enumerate(rules):
+        for k in ruled.indices(base - .05 * h, base + .45 * h):
+            b = rules[k]
             if k in used or not base - .05 * h <= middle(b) <= base + .45 * h or (x0 is not None and abs(b.x0 - x0) > .5 * h) or (x1 is not None and abs(b.x1 - x1) > .5 * h):
                 continue
             if not (framed(b, strokes) or paired(b, h) or headed(b, h) or written(b, h)):
@@ -3127,25 +3214,41 @@ def reunite_lines(lines, drawn):
     def single(line):
         return line["han"] == 1 == sum(s["marks"] for s in line["spans"])
 
-    # Single glyphs with a glyph or a short cell (two characters at most) of their size right above or below at their x:
-    # a column of a table or a grid, or vertical text, never letter-spaced text. A longer line above (a centred title)
-    # may share a glyph's centre by chance.
-    cells = {id(l) for l in texts if single(l) and any(o is not l and sum(s["marks"] for s in o["spans"]) <= 2 and abs(o["size"] - l["size"]) <= .2 * l["size"]
-                                                      and .6 * l["size"] <= abs(o["base"] - l["base"]) <= 2.5 * l["size"]
-                                                      and min(abs(o["rect"].x0 - l["rect"].x0), abs(o["rect"].x1 - l["rect"].x1), abs(o["rect"].x0 + o["rect"].x1 - l["rect"].x0 - l["rect"].x1) / 2) <= .25 * l["size"]
-                                                      for o in near(l["base"], 2.5 * l["size"]))}
+    # the size of the page's text: a figure's labels are set no larger, a heading is
+    body = weighted_median([(l["size"], l["han"]) for l in texts if l["han"]] or [(10, 1)])
+
+    def anchored(line):
+        """Whether a single glyph is tied to what stands right over or under it at its place: a short cell of its size
+        (eight marks at most, of any script) aligned with it left, right or centred (a glyph of a grid or of vertical
+        text, a number of a table's column), or, for a glyph no larger than the page's text, a drawing or a picture
+        within two em that reaches over its middle (the figure it labels). A rule over or under a heading, or a banner
+        over it, is no figure."""
+        r, h = line["rect"], line["size"]
+        if any(o is not line and sum(s["marks"] for s in o["spans"]) <= 8 and abs(o["size"] - h) <= .2 * h and .6 * h <= abs(o["base"] - line["base"]) <= 2.5 * h
+               and min(abs(o["rect"].x0 - r.x0), abs(o["rect"].x1 - r.x1), abs(o["rect"].x0 + o["rect"].x1 - r.x0 - r.x1) / 2) <= .25 * h for o in near(line["base"], 2.5 * h)):
+            return True
+        return h <= 1.1 * body and any(not (o.height <= 2 and o.width >= 4) and max(o.width, o.height) >= .3 * h and o.x0 <= r.x1 - .25 * r.width and o.x1 >= r.x0 + .25 * r.width
+                                        and (-.15 * h <= r.y0 - o.y1 <= 2 * h or -.15 * h <= o.y0 - r.y1 <= 2 * h) for _, o in drawn_near(r.y0 - 2 * h, r.y1 + 2 * h))
+
+    # Single glyphs tied to what stands over or under them: a column of a table or a grid, vertical text or a figure's
+    # labels, never letter-spaced text, when two side by side both are. One alone may line up by chance (with a centred
+    # title or subtitle, with a picture over a heading).
+    anchors = {id(l) for l in texts if single(l) and anchored(l)}
 
     def tracked(other, line, gap):
         """Whether line is the next glyph of other's letter-spaced run: one Han glyph of other's font, size and colour on
-        its baseline, at the run's own spacing (a first pair: two single glyphs an em to three apart)."""
+        its baseline, at the run's own spacing (a first pair: two single glyphs an em to three apart), the two not both
+        anchored (other's last glyph for a run)."""
         h = line["size"]
-        if not single(line) or id(line) in cells or not other["han"] or not .5 * h < gap <= 3 * h or abs(other["base"] - line["base"]) > .1 * h:
+        if not single(line) or not other["han"] or not .5 * h < gap <= 3 * h or abs(other["base"] - line["base"]) > .1 * h:
             return False
         if other["font"] != line["font"] or abs(other["size"] - h) > .03 * h or other["color"] != line["color"] or other["bold"] != line["bold"]:
             return False
+        if id(line) in anchors and other.get("anchored", id(other) in anchors):
+            return False
         if "tracking" in other:
             return abs(gap - other["tracking"]) <= .15 * other["tracking"] + .5
-        return single(other) and id(other) not in cells
+        return single(other)
 
     def bridge(other, line):
         """Drawn things filling the gap between two pieces of one baseline on their band (a formula picture, a drawn
@@ -3198,7 +3301,7 @@ def reunite_lines(lines, drawn):
                 o = other["rect"]
                 if not (horizontal(other) and abs(other["base"] - line["base"]) <= .25 * min(size, other["size"]) and o.x0 <= r.x0 and min(o.y1, r.y1) - max(o.y0, r.y0) >= .5 * min(o.height, r.height)):
                     continue
-                if any(b.x0 >= o.x1 - .5 and b.x1 <= r.x0 + .5 and b.width <= 3 and b.y0 < r.y1 and b.y1 > r.y0 and b.height >= .8 * min(o.height, r.height) for b in objects):
+                if any(b.x0 >= o.x1 - .5 and b.x1 <= r.x0 + .5 and b.width <= 3 and b.y0 < r.y1 and b.y1 > r.y0 and b.height >= .8 * min(o.height, r.height) for b in placed.near(r.y0, r.y1)):
                     continue
                 gap = r.x0 - o.x1
                 if gap <= .5 * min(size, other["size"]):
@@ -3219,7 +3322,7 @@ def reunite_lines(lines, drawn):
             other = rows[k]
             rows[k] = line_record(other["spans"] + filled + line["spans"], other["dir"], other["wmode"], other["decor"] + line["decor"])
             if tracking is not None:
-                rows[k]["tracking"] = tracking
+                rows[k]["tracking"], rows[k]["anchored"] = tracking, id(line) in anchors
     for k, line in enumerate(rows):
         if not horizontal(line) or not line["han"]:
             continue
@@ -3306,7 +3409,8 @@ def reunite_lines(lines, drawn):
             continue
         beside_it = [(k, l) for k, l in enumerate(rows) if k not in taken and not l["han"] and horizontal(l) and l["size"] <= .7 * h and l["rect"].x0 >= o.x0 - h and l["rect"].x1 <= o.x1 + h and over_han(l["rect"], host["spans"])]
         above = [(k, l) for k, l in beside_it if -.3 * h <= o.y0 - l["rect"].y1 <= .6 * h]
-        if above and pinyin(" ".join(l["text"] for _, l in above)):
+        above = [above[j] for j in pinyin_marks([l["text"] for _, l in above])]
+        if above:
             host["decor"] += [s for _, l in above for s in l["spans"] if s["marks"]]
             taken.update(k for k, _ in above)
         for k, l in beside_it:
@@ -3459,27 +3563,45 @@ def text_cells(row, em, ink, strokes=None):
     return count
 
 
-def separated(upper, lower, objects, strokes, h):
+def gridded(rect, strokes, h):
+    """Whether text at rect (of size h) is written on a grid, graph or manuscript paper: upright strokes (strokes:
+    Bands) run through it from above to below inside its width, three at least and one per two em of it. The borders
+    of a table run between its cells, never through their text."""
+    crossing = sum(1 for o in strokes.near(rect.y0, rect.y1) if o.width <= 3 and o.y0 <= rect.y0 + .1 * h and o.y1 >= rect.y1 - .1 * h and rect.x0 + .25 * h < (o.x0 + o.x1) / 2 < rect.x1 - .25 * h)
+    return crossing >= max(3, rect.width / (2 * h))
+
+
+def separated(upper, lower, objects, strokes, h, row=()):
     """Whether a rule, an image or a drawing lies between two lines one above the other: something drawn in the gap of
     their common width that is not behind (or round) both of them (a whole grid drawn as one path is seen by its
     strokes, drawn_objects), mostly on one of them (a key term's tint, an underline), an underline of the upper line
     or a small mark. An underline hugs the upper line's text, within half an em of its ends, and nothing meets or
     continues it: a rule framed so (strokes: the rules and upright strokes of the page) is a table's border, which in a
-    tight table runs two points under a row's text."""
+    tight table runs two points under a row's text. A rule under the upper line that this line runs along for most of
+    its length, framed by nothing and carrying no other text of its row (row: rects of the other lines on the upper
+    line's baseline; a table's row rule carries its other cells), is the line's own: paper ruled for writing. The
+    rules of a grid whose upright strokes run through the upper line's text are the paper it is written on (gridded).
+    objects and strokes: Bands (or lists) of the page's drawn rects."""
     a, b = upper["rect"], lower["rect"]
     x0, x1 = max(a.x0, b.x0) + 1, min(a.x1, b.x1) - 1
     if b.y0 - a.y1 < .2 or x1 - x0 < 1:
         return False
-    gap = fitz.Rect(x0, a.y1, x1, b.y0)
-    for r in objects:
+    strokes, gap, paper = banded(strokes), fitz.Rect(x0, a.y1, x1, b.y0), None
+    for r in banded(objects).near(gap.y0, gap.y1):
         if not r.intersects(gap) or (r.y0 <= a.y0 + 1 and r.y1 >= b.y1 - 1):
             continue
         if max(min(r.y1, a.y1) - max(r.y0, a.y0), min(r.y1, b.y1) - max(r.y0, b.y0)) > .5 * r.height:
             continue
-        if r.height <= 2 and r.y1 <= a.y1 + .35 * h and r.x0 >= a.x0 - .5 * h and r.x1 <= a.x1 + .5 * h and not framed(r, strokes):
-            continue
         if r.width < .3 * (x1 - x0) and r.height < .5 * h:
             continue
+        if (r.height <= 2 and r.y1 <= a.y1 + .35 * h and ((r.x0 >= a.x0 - .5 * h and r.x1 <= a.x1 + .5 * h)
+                                                         or (min(r.x1, a.x1) - max(r.x0, a.x0) >= 2 / 3 * r.width and not any(min(q.x1, r.x1) - max(q.x0, r.x0) > 1 for q in row)))
+                and not framed(r, strokes)):
+            continue
+        if r.height <= 2:
+            paper = gridded(a, strokes, h) if paper is None else paper
+            if paper:
+                continue
         return True
     return False
 
@@ -3491,15 +3613,17 @@ def same_style(a, b):
     return not (a["han"] and b["han"]) or (a["font"] == b["font"] and a["bold"] == b["bold"] and a["color"] == b["color"])
 
 
-def vertical_columns(lines, objects=()):
+def vertical_columns(lines, objects=(), gutters=None):
     """Columns of vertical text: three or more one-glyph lines stacked at one x, each at most 1.35 em under the one
     above (glyph gaps of a third of an em at most: how most PDF writers set vertical text; two on a page that has such
     columns), and lines MuPDF reads in vertical writing mode. Glyphs up to 1.8 em apart are a column only where it
-    stands alone (a side label), with no glyph or line on the baselines of most of its glyphs. A column of a table
+    stands alone (a side label), with no glyph or cell on the baselines of most of its glyphs. A column of a table
     whose cells hold one character (甲/乙, 是/否, 1号) is none: its rows are further apart, a rule (objects: what the
-    page draws) runs between its glyphs, or most of its glyphs have a longer line of the table on their baseline; nor is
-    a grid of such cells without rules, read row by row. Returns (columns, the other lines); a column holds its lines
-    top to bottom."""
+    page draws) runs between its glyphs, or most of its glyphs have another cell of the table on their row (a short
+    line on their baseline anywhere across it, with no column gutter between: gutters, the Columns of the page's
+    lines); nor is a grid of such cells without rules, read row by row. The long lines of the body beside a side label
+    are no cells, whatever their baselines. Returns (columns, the other lines); a column holds its lines top to
+    bottom."""
     stacked, columns, rest = [], [], []
     for line in lines:
         if line["wmode"] == 1 and abs(line["dir"][0]) < .02 and line["dir"][1] > .98:
@@ -3520,10 +3644,17 @@ def vertical_columns(lines, objects=()):
         return [o for o in among[bisect_left(keys, line["base"] - .25 * size):bisect_right(keys, line["base"] + .25 * size)]
                 if o is not line and max(o["rect"].x0 - r.x1, r.x0 - o["rect"].x1) <= 6 * size]
 
+    def cells(line):
+        """Cells of a table on line's row: lines on its baseline anywhere across the row, eight marks at most or under
+        twelve em wide, with no column gutter between them and line."""
+        r, size = line["rect"], line["size"]
+        return [o for o in rows[bisect_left(bases, line["base"] - .25 * size):bisect_right(bases, line["base"] + .25 * size)]
+                if (sum(s["marks"] for s in o["spans"]) <= 8 or o["rect"].width < 12 * size) and not (gutters and gutters.separates(o["rect"], r))]
+
     def set_apart(run):
-        """Whether a run of glyphs is a column of its own: most of its glyphs have no longer line on their baseline (a
-        table's row), and a run set looser than 1.35 em has no glyph there either (a grid)."""
-        if 2 * sum(1 for line in run if mates(line, rows, bases)) > len(run):
+        """Whether a run of glyphs is a column of its own: most of its glyphs have no other cell on their row (a
+        table's), and a run set looser than 1.35 em has no glyph within six em there either (a grid)."""
+        if 2 * sum(1 for line in run if cells(line)) > len(run):
             return False
         loose = any(b["base"] - a["base"] > 1.35 * b["size"] for a, b in zip(run, run[1:]))
         return not loose or 3 * sum(1 for line in run if mates(line, glyphs, glyph_bases)) <= len(run)
@@ -3706,13 +3837,18 @@ def native_paragraphs(lines, others, objects, gutters):
         line["marker"] = bool(LIST_MARKER.match(line["text"]))
     ordered = sorted(lines, key=lambda l: (l["rect"].y0, l["rect"].x0))
     everything = ordered + list(others)
-    strokes = [o for o in objects if (o.height <= 1.6 and o.width >= 4) or (o.width <= 3 and o.height >= 4)]
+    strokes = Bands(o for o in objects if (o.height <= 1.6 and o.width >= 4) or (o.width <= 3 and o.height >= 4))
+    drawn = Bands(objects)
+    by_base = sorted(ordered, key=lambda l: l["base"])
+    bases = [l["base"] for l in by_base]
 
     def overlap(a, b):
         return min(a.x1, b.x1) - max(a.x0, b.x0)
 
     for line in ordered:
         r, h = line["rect"], line["size"]
+        # the other lines on its baseline: a rule under it that carries one of them is a table's, never its own
+        line["row mates"] = [o["rect"] for o in by_base[bisect_left(bases, line["base"] - .3 * h):bisect_right(bases, line["base"] + .3 * h)] if o is not line]
         line["grid"] = r.width < 12 * h and any(o is not line and abs(o["base"] - line["base"]) <= .3 * h and abs(o["size"] - h) <= .08 * max(o["size"], h) and o["rect"].width < 12 * h
                                               and (o["rect"].x0 >= r.x1 + .5 * h or o["rect"].x1 <= r.x0 - .5 * h) and not gutters.separates(o["rect"], r) for o in ordered)
 
@@ -3723,7 +3859,7 @@ def native_paragraphs(lines, others, objects, gutters):
         column = [o for o in ordered if abs(o["base"] - line["base"]) <= 8 * h and abs(o["size"] - h) <= .08 * max(o["size"], h) and overlap(o["rect"], r) >= .5 * min(o["rect"].width, r.width)]
         line["room"] = room = max(o["rect"].x1 for o in column)
         line["left"] = min(o["rect"].x0 for o in column)
-        beside = [o.x0 for o in objects + [l["rect"] for l in everything if l is not line] if o.y0 - 1.5 * h < r.y1 and o.y1 + 1.5 * h > r.y0 and r.x1 - 1 <= o.x0 < room]
+        beside = [o.x0 for o in drawn.near(r.y0 - 1.5 * h, r.y1 + 1.5 * h) + [l["rect"] for l in everything if l is not line] if o.y0 - 1.5 * h < r.y1 and o.y1 + 1.5 * h > r.y0 and r.x1 - 1 <= o.x0 < room]
         # a line of one to three characters is never the wrapped body of a paragraph, however narrow its column
         line["full"] = sum(s["marks"] for s in line["spans"]) >= 4 and r.x1 >= (min(beside) - 3 * h if beside else room - 1.2 * h)
         line["runs on"] = line["full"] and (bool(beside) or any(o is not line and o["rect"].x1 >= r.x1 - 1.2 * h for o in column) or not TERMINAL.search(line["text"]))
@@ -3768,7 +3904,7 @@ def native_paragraphs(lines, others, objects, gutters):
                 follows = last["full"] and abs(r.x0 - p["margin"]) <= .6 * h
             else:
                 follows = last["full"] and (a.x0 - 4.5 * h <= r.x0 < a.x0 - .6 * h or (abs(r.x0 - a.x0) <= .6 * h and last["runs on"]) or (last["marker"] and a.x0 < r.x0 <= a.x0 + 3 * h))
-            if not follows or separated(last, line, objects, strokes, h):
+            if not follows or separated(last, line, drawn, strokes, h, last["row mates"]):
                 continue
             box = p["rect"] | r
             if any(o is not line and not any(o is m for m in p["lines"]) and box.contains(fitz.Point((o["rect"].x0 + o["rect"].x1) / 2, middle(o["rect"]))) for o in everything if o["rect"].intersects(box)):
@@ -3805,21 +3941,28 @@ def by_rows(units):
     return [u for _, members in rows for u in sorted(members, key=lambda u: -u["rect"].x1 if all(m.get("vertical") for m in members) else u["rect"].x0)]
 
 
-def reading_order(units, columns):
+def reading_order(units, columns, objects=()):
     """Units in reading order: down the page, and where the page is set in columns (columns: the Columns of its lines,
     as on scans), one column after the other between the units that span them or lie outside them (a heading over both
     columns, a footer, what follows below where the columns stand side by side). Below that, a unit right under the
-    last one of a column, at its margin and about as wide, still goes on with that column (a longer left column)."""
+    last one of a column, at its margin and about as wide, still goes on with that column, and so does what follows a
+    column that runs on past the others (a longer left column) on its side of the gutter's blank strip: a heading, a
+    caption, the next paragraph, starting within three em under its last unit or under a drawing or a picture of that
+    column (objects: rects of what the page draws) that fills the space between them. A narrow unit there (a heading)
+    goes with what follows it: on with the column before a unit that goes on with it too, after the columns before one
+    that closes them (the next section's heading over questions set across the page). A unit that spans the gutter or
+    starts on the side of a column that has ended closes the columns."""
     units = by_rows(units)
     if not columns.gutters:
         return units
-    em = columns.step / 2
+    em, placed = columns.step / 2, None
 
-    def column(rect):
-        """The column a unit is in (gutters left of it), or None when it spans a gutter or lies where none runs."""
+    def column(rect, strip=columns.section):
+        """The column a rect is in (gutters left of it), or None when it spans a gutter or lies where none runs: where
+        the columns stand side by side (strip: Columns.section), or where a gutter's blank strip runs on (Columns.gap)."""
         index, inside = 0, False
         for gutter in columns.gutters:
-            gap = columns.section(gutter, middle(rect))
+            gap = strip(gutter, middle(rect))
             if gap is None:
                 continue
             centre = (gap[0] + gap[1]) / 2
@@ -3829,20 +3972,49 @@ def reading_order(units, columns):
             index += rect.x0 >= centre
         return index if inside else None
 
-    ordered, section = [], []
+    def runs_on(index, r):
+        """How column index, which runs on past the other columns (with a drawing or a picture of its own, too), goes
+        on with a unit at r on its side: 'bridged' under a drawing or a picture of the column that fills the space above
+        r, 'near' when r starts within three em under the column's end, None when it does not go on."""
+        nonlocal placed
+        own = [u["rect"] for i, u in section + pending if i == index]
+        if not own:
+            return None
+        end = reach = max(q.y1 for q in own)
+        if r.y0 < reach - .5 * em:
+            return None
+        placed = banded(objects) if placed is None else placed
+        for o in sorted((o for o in placed.near(reach - .5 * em, r.y0 + .5 * em) if reach - .5 * em <= o.y0 and o.y1 <= r.y0 + .5 * em and column(o, columns.gap) == index), key=lambda o: o.y0):
+            if o.y0 > reach + 3 * em:
+                break
+            reach = max(reach, o.y1)
+        others = [u["rect"].y1 for i, u in section if i != index]
+        if r.y0 - reach > 3 * em or (others and reach < max(others) + em):
+            return None
+        return "bridged" if r.y0 - end > 3 * em else "near"
+
+    ordered, section, pending = [], [], []
     for unit in units:
         r = unit["rect"]
         index = column(r)
         if index is None:
             index = next((i for i, u in reversed(section) if abs(r.x0 - u["rect"].x0) <= 2.5 * em and -.5 * em <= r.y0 - u["rect"].y1 <= 3 * em
                           and r.width >= .6 * u["rect"].width and r.x1 <= u["rect"].x1 + 2.5 * em), None)
+        if index is None and section:
+            side = column(r, columns.gap)
+            how = runs_on(side, r) if side is not None else None
+            if how == "near" and r.width < .6 * max(u["rect"].width for i, u in section + pending if i == side):
+                pending.append((side, unit))
+                continue
+            index = side if how else None
         if index is None:
-            ordered += [u for _, u in sorted(section, key=lambda s: s[0])]
-            section = []
+            ordered += [u for _, u in sorted(section, key=lambda s: s[0])] + [u for _, u in pending]
+            section, pending = [], []
             ordered.append(unit)
         else:
-            section.append((index, unit))
-    return ordered + [u for _, u in sorted(section, key=lambda s: s[0])]
+            section += pending + [(index, unit)]
+            pending = []
+    return ordered + [u for _, u in sorted(section + pending, key=lambda s: s[0])]
 
 
 def line_room(rect, size, obstacles, area, left=None):
@@ -3920,7 +4092,8 @@ def native_layout(page, number, lines, log, drawn=None):
     given)."""
     drawn = drawn_objects(page, log) if drawn is None else drawn
     objects = [r for _, r in drawn]
-    columns, rest = vertical_columns(lines, objects)
+    level = [l for l in lines if horizontal(l)]
+    columns, rest = vertical_columns(lines, objects, Columns([l["rect"] for l in level], weighted_median([(l["size"], l["han"] or 1) for l in level] or [(10, 1)])))
     flat = [l for l in rest if horizontal(l)]
     rotated = [l for l in rest if not horizontal(l)]
     columns = [column_line(c) for c in columns]
@@ -3949,7 +4122,7 @@ def native_layout(page, number, lines, log, drawn=None):
     units = [u for u in units if any(l["han"] for l in u["lines"])]
     blocks, redactions, notes, taken = [], [], [], []
     everything = flat + columns + rotated
-    for unit in reading_order(units, gutters):
+    for unit in reading_order(units, gutters, objects):
         identity = f"p{number}-b{len(blocks) + 1}"
         inlines, sources, texts, spans = [], [], [], []
         fonts = {SUBSET.sub("", s.get("font", "")) for l in unit["lines"] for s in l["spans"] if s["han"]}

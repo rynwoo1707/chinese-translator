@@ -9,8 +9,10 @@ import {fileURLToPath} from 'node:url';
 // limits and a reaction's conditions are not; drawn signs are no blanks; short last lines, tight ruled tables and
 // columns of one-character cells; lines cut by a picture, a drawing or letter-spacing; watermarks and pictures of
 // English text keep a page born-digital; reading order below two columns, a smaller scan, boxes of one-line blocks,
-// a wrapped citation and the time budget setting. The cases live in the Python file and run through the real PyMuPDF
-// pipeline with OCR stubbed.
+// a wrapped citation and the time budget setting; pinyin with erhua, quotes or digits, a figure's labels and a
+// table's header side by side, one-character columns of three-line tables, a longer column after a heading or a
+// figure, paragraphs on ruled or graph paper and compound paths of many strokes. The cases live in the Python file
+// and run through the real PyMuPDF pipeline with OCR stubbed.
 const root=fileURLToPath(new URL('../',import.meta.url)),runtime=`${root}.runtime/pdf-python`,python=process.env.PDF_PYTHON||'python';
 const ready=existsSync(runtime)&&spawnSync(python,['--version'],{windowsHide:true}).status===0;
 

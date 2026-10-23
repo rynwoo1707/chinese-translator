@@ -469,17 +469,26 @@ test('Dịch cả quyển: a chunk whose export finds translations longer than t
  }finally{await context.close();await fake.close();}
 });
 
-test('Dịch cả quyển: a book of one part whose export is refused is finished, but never called ready to read or download as a PDF',{skip,timeout:180000},async()=>{
+test('Dịch cả quyển: a book of one part whose export is refused is finished, but never called ready to read or download as a PDF, nor pointed to a download it does not have',{skip,timeout:180000},async()=>{
  const fake=fakeHoaTri(),base=await fake.listen(),pdf=await bookPdf();
  // Every export of the part is refused: page 5's block is longer than its box.
  fake.state.renderHook=(input,document)=>{const page=document.pages.find(entry=>entry.number===5),entries=[{page:5,id:'p5-b1',label:blockLabel(page,'p5-b1')}];const failure=serviceFailure(422,{error:overflowMessage(entries),code:'overflow',blocks:entries.map(({page,id})=>({page,id}))});return [failure.status,{error:failure.message,code:failure.code,blocks:failure.blocks}];};
- const {context,page,errors}=await openStudy(base);
+ // The reader offers “Tải cả quyển (PDF)” only beside a part that has its PDF (frontend/app.js wholeBookPdf): this book
+ // has none, so it is not named.
+ const MISSING='Trang 2–6 chưa có PDF tiếng Việt, nên chưa tải được cả quyển dạng PDF; bản dịch dạng chữ vẫn đọc được trong Thư viện riêng. Mở phần đó trong Sách của tôi (Lịch sử dịch) để xem cần sửa gì, rồi bấm Xuất PDF tiếng Việt; không tốn token.';
+ let {context,page,errors}=await openStudy(base);
  try{
   await pickBook(page,pdf);await page.fill('#book-pages','2-6');await page.fill('#content-title','Sách một phần');await page.fill('#api-key',KEY);await page.click('#translate');
   await page.waitForFunction(()=>/Đã dịch xong cả quyển|Tạm dừng|Tiến độ đã lưu/u.test(document.querySelector('#whole-book-status').textContent),null,{timeout:120000});
   const [job]=fake.state.jobs;assert.equal(job.status,'done');assert.equal(fake.state.renders||0,0);
-  assert.equal(await statusText(page),'Đã dịch xong cả quyển: 5/5 trang. Trang 2–6 chưa có PDF tiếng Việt, nên “Tải cả quyển (PDF)” còn giữ các trang đó như bản gốc. Mở phần đó trong Sách của tôi (Lịch sử dịch) để xem cần sửa gì, rồi bấm Xuất PDF tiếng Việt; không tốn token.');
+  assert.deepEqual(fake.state.books.map(book=>book.parts.map(part=>part.mime)),[['text/plain']]);
+  assert.equal(await statusText(page),`Đã dịch xong cả quyển: 5/5 trang. ${MISSING}`);
   assert.match(await page.$eval('#study-books-list .book-job',node=>node.textContent),/Đã dịch 5\/5 trang · Còn phần chưa có PDF tiếng Việt/u);
+  assert.deepEqual(errors,[]);
+  // The same file picked again, in another tab: the finished run it binds says the same.
+  await context.close();({context,page,errors}=await openStudy(base));
+  await pickBook(page,pdf);await page.waitForFunction(()=>/^Quyển này đã dịch xong\./u.test(document.querySelector('#whole-book-status').textContent),null,{timeout:30000});
+  assert.equal(await statusText(page),`Quyển này đã dịch xong. ${MISSING}`);
   assert.deepEqual(errors,[]);assert.deepEqual(fake.state.failures,undefined);
  }finally{await context.close();await fake.close();}
 });
@@ -495,6 +504,30 @@ test('Dịch cả quyển: a save the server refuses pauses the book with the se
   await page.waitForFunction(()=>/Tiến độ của quyển đã lưu/u.test(document.querySelector('#whole-book-status').textContent),null,{timeout:120000});
   assert.equal(await statusText(page),`${FULL} Tiến độ của quyển đã lưu; dọn bớt xong, bấm Tiếp tục dịch cả quyển.`);
   const [job]=fake.state.jobs;assert.equal(job.status,'paused');assert.equal(job.pauseReason,'history_full');assert.equal(fake.state.translateCalls,0,'nothing is sent to Gemini that could not be saved');
+  assert.deepEqual(errors,[]);assert.deepEqual(fake.state.failures,undefined);
+ }finally{await context.close();await fake.close();}
+});
+
+test('Dịch cả quyển: a save refused after Gemini translated part of a chunk says that part is only in this tab (do not close it), never that the progress is saved; going on in that tab pays for nothing twice',{skip,timeout:240000},async()=>{
+ const fake=fakeHoaTri(),base=await fake.listen(),pdf=await bookPdf();
+ const FULL='Lịch sử dịch của tài khoản đã dùng 500 MB, mức tối đa cho mỗi tài khoản. Hãy xóa trong Lịch sử dịch những bản dịch không cần nữa rồi thử lại.';
+ // The chunk's first saves go through; the one that keeps Gemini's first batch is refused for want of room.
+ fake.state.saveHook=(id,body)=>id&&body.state.translationParts.some(text=>text?.trim())?[413,{error:FULL,code:'history_full'}]:null;
+ const sent=id=>fake.state.translations.reduce((count,input)=>count+input.blocks.filter(block=>block.id===id).length,0);
+ const {context,page,errors}=await openStudy(base);
+ try{
+  await pickBook(page,pdf);await page.fill('#content-title','Sách hết chỗ');await page.fill('#api-key',KEY);await page.click('#translate');
+  await page.waitForFunction(full=>document.querySelector('#whole-book-status').textContent.startsWith(full),FULL,{timeout:120000});
+  const PAUSE=`${FULL} Phần đã dịch vẫn hiện trong tab này: đừng đóng tab. Các trang đã xong trước đó đã lưu; dọn bớt xong, bấm Tiếp tục dịch cả quyển ở tab này.`;
+  assert.equal(await statusText(page),PAUSE);assert.equal(await page.textContent('#progress'),PAUSE);
+  const [job]=fake.state.jobs;assert.equal(job.status,'paused');assert.equal(job.pauseReason,'history_full');assert.equal(fake.state.translateCalls,1);assert.equal(sent('p2-b1'),1);
+  // Room made, the same tab goes on: the chunk it holds is saved first, so no block is sent to Gemini again.
+  fake.state.saveHook=null;
+  await page.waitForFunction(()=>/Tiếp tục dịch cả quyển/u.test(document.querySelector('#translate').textContent)&&!document.querySelector('#translate').disabled,null,{timeout:30000});
+  await page.click('#translate');
+  await page.waitForFunction(()=>/Đã dịch xong cả quyển|Tạm dừng/u.test(document.querySelector('#whole-book-status').textContent),null,{timeout:180000});
+  assert.match(await statusText(page),/^Đã dịch xong cả quyển: 24\/24 trang\./u);
+  assert.deepEqual([sent('p2-b1'),sent('p21-b1'),sent('p22-b1')],[1,1,1],'each block is paid for once');
   assert.deepEqual(errors,[]);assert.deepEqual(fake.state.failures,undefined);
  }finally{await context.close();await fake.close();}
 });

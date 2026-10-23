@@ -6,7 +6,7 @@ import {fileURLToPath} from 'node:url';
 import {zipSync,strToU8} from 'fflate';
 import {parseDocument} from 'htmlparser2';
 import mammoth from 'mammoth/mammoth.browser.js';
-import {extractDocxText,countTags,markupText,DOCX_LIMITS,HTML_ELEMENTS} from './document-limits.js';
+import {extractDocxText,countTags,markupText,DOCX_LIMITS,HTML_ELEMENTS,MAX_NAMESPACES} from './document-limits.js';
 import {extractEpub} from './epub.js';
 import {extractAzw3,azw3HtmlToText} from './azw3.js';
 import {readPublication} from './admin-content.js';
@@ -75,6 +75,41 @@ test('Generated Word documents read exactly as mammoth reads them',async()=>{
  }
 });
 
+// A passage deleted with Track Changes: every paragraph mark in it is deleted, so each paragraph joins the next one.
+test('A long tracked deletion reads as mammoth reads it, in time proportional to its length',async()=>{
+ const paragraphs=(count,properties)=>docx({'word/document.xml':documentXml(`<w:p><w:pPr><w:rPr>${properties}</w:rPr></w:pPr><w:r><w:t>字</w:t></w:r></w:p>`.repeat(count)+paragraph('末'))});
+ // 12,400 paragraphs (74,405 elements, just under the limit). Each deleted one copied all that was carried so far again:
+ // 15 to 20 times slower than as many ordinary paragraphs.
+ const deleted=paragraphs(12400,'<w:del w:id="1" w:author="A"/>'),plain=paragraphs(12400,'<w:b/>');
+ assert.equal(await extractDocxText(deleted),await mammothText(deleted));
+ const time=async data=>{let best=Infinity;for(let i=0;i<3;i++){const start=performance.now();await extractDocxText(data);best=Math.min(best,performance.now()-start);}return best;};
+ const slow=await time(deleted),fast=await time(plain);
+ assert.ok(slow<5*fast+100,`deleted paragraphs ${Math.round(slow)} ms, ordinary ones ${Math.round(fast)} ms`);
+});
+
+// Namespaces as Word writes them: on the root element, and again on each picture (a:, pic:), for it and what it holds.
+test('Namespace declarations end with their element: pictures declaring their own read as mammoth reads them, and a prefix rebound inside an element is restored after it',async()=>{
+ const A='http://schemas.openxmlformats.org/drawingml/2006/main',PIC='http://schemas.openxmlformats.org/drawingml/2006/picture',WP='http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing';
+ const picture=n=>`<w:r><w:drawing><wp:inline distT="0" distB="0" distL="0" distR="0"><wp:extent cx="952500" cy="952500"/><wp:docPr id="${n}" name="Picture ${n}"/><wp:cNvGraphicFramePr><a:graphicFrameLocks xmlns:a="${A}" noChangeAspect="1"/></wp:cNvGraphicFramePr><a:graphic xmlns:a="${A}"><a:graphicData uri="${PIC}"><pic:pic xmlns:pic="${PIC}"><pic:nvPicPr><pic:cNvPr id="${n}" name="image1.png"/><pic:cNvPicPr/></pic:nvPicPr><pic:blipFill><a:blip r:embed="rId9"/><a:stretch><a:fillRect/></a:stretch></pic:blipFill><pic:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="952500" cy="952500"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></pic:spPr></pic:pic></a:graphicData></a:graphic></wp:inline></w:drawing></w:r>`;
+ // 2,000 captioned pictures: 6,000 declarations in the part, more than MAX_NAMESPACES, never more than five in force.
+ const body=Array.from({length:2000},(_,n)=>`<w:p>${picture(n+1)}<w:r><w:t>图${n+1}</w:t></w:r></w:p>`).join('');
+ assert.ok(body.split(' xmlns:').length-1>MAX_NAMESPACES);
+ const images=`<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId9" Type="${R}/image" Target="media/image1.png"/></Relationships>`;
+ const pictures=docx({'word/document.xml':`<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:document xmlns:w="${W}" xmlns:r="${R}" xmlns:wp="${WP}"><w:body>${body}</w:body></w:document>`,'word/_rels/document.xml.rels':images,'word/media/image1.png':new Uint8Array([0x89,0x50,0x4e,0x47,0x0d,0x0a,0x1a,0x0a])});
+ const text=await extractDocxText(pictures);assert.equal(text,await mammothText(pictures));assert.ok(text.startsWith('图1\n\n图2\n\n')&&text.endsWith('图2000\n\n'));
+ // A prefix bound inside an element and used after it, rebound to another namespace and back, the default namespace
+ // undeclared and declared again: mammoth reads each by the declarations in force where it stands.
+ const one=body=>`<w:document xmlns:w="${W}" xmlns:r="${R}"><w:body>${body}</w:body></w:document>`;
+ for(const xml of [
+  one(`<w:p><w:r xmlns:w="urn:other"><w:t>隐</w:t></w:r><w:r><w:t>显</w:t></w:r></w:p>`),
+  one(`<w:p><w:r xmlns:x="${W}"><x:t>一</x:t></w:r><w:r xmlns:x="urn:other"><x:t>二</x:t></w:r><w:r xmlns:x="${W}"><x:t>三</x:t></w:r><w:r><x:t>四</x:t></w:r></w:p>`),
+  one(`<w:p><x:r xmlns:x="${W}"><x:t>一</x:t><x:t xmlns:x="urn:other">二</x:t><x:t>三</x:t></x:r></w:p>`),
+  `<document xmlns="${W}"><body><p><r><t>甲</t></r></p><p xmlns=""><r><t>乙</t></r></p><p><r><t>丙</t></r></p></body></document>`,
+  `<w:document xmlns:w="${W}"><body xmlns="${W}"><p><r><t>体</t></r></p></body></w:document>`,
+  one(`<w:p><w:hyperlink xmlns:q="${R}" q:id="rId5"><w:r><w:t>链</w:t></w:r></w:hyperlink><w:hyperlink xmlns:r="urn:other" r:id="rId5"><w:r><w:t>接</w:t></w:r></w:hyperlink></w:p>`)
+ ]){const data=docx({'word/document.xml':xml});assert.equal(await extractDocxText(data),await mammothText(data),xml);}
+});
+
 test('A small DOCX that unzips to hundreds of thousands of elements is refused, and parts the text never needs are not read',async t=>{
  const file=bomb();assert.ok(file.byteLength<32*1024,`${file.byteLength} bytes`);
  const error=await refused(extractDocxText(file),'document_too_large');
@@ -88,8 +123,8 @@ test('A small DOCX that unzips to hundreds of thousands of elements is refused, 
  await refused(extractDocxText(docx({'word/document.xml':documentXml(`${'<w:sdt><w:sdtContent>'.repeat(600)}${paragraph('x')}${'</w:sdtContent></w:sdt>'.repeat(600)}`)})),'document_too_large');
 });
 
-test('Small files heavy in elements, attributes or repeated text are read or refused in 64 and 128 MB of heap, never run out of memory',()=>{
- const outcomes={docx:'document_too_large','docx-attributes':'ok','docx-one-tag':'document_too_large',epub:'document_too_large','epub-attributes':'ok','epub-one-tag':'document_too_large','opf-attributes':'ok','epub-repeat':'document_too_large','azw3-attributes':'ok'};
+test('Small files heavy in elements, attributes, namespace declarations or repeated text are read or refused in 64 and 128 MB of heap, never run out of memory',()=>{
+ const outcomes={docx:'document_too_large','docx-attributes':'ok','docx-one-tag':'document_too_large','docx-namespaces':'document_too_large','docx-namespaces-siblings':'ok',epub:'document_too_large','epub-attributes':'ok','epub-one-tag':'document_too_large','opf-attributes':'ok','epub-repeat':'document_too_large','epub-repeat-bytes':'document_too_large','azw3-attributes':'ok'};
  for(const heap of [64,128])for(const [kind,outcome] of Object.entries(outcomes)){
   const child=spawnSync(process.execPath,[`--max-old-space-size=${heap}`,fileURLToPath(new URL('./test-support/document-bomb-child.mjs',import.meta.url)),kind],{encoding:'utf8',timeout:120000});
   assert.equal(child.status,0,`${kind} in ${heap} MB: ${child.stderr.slice(-300)}`);
@@ -189,6 +224,11 @@ test('EPUB and AZW3 chapters read exactly as the tree walk of their HTML read th
 test('An EPUB is refused cleanly when its reading order repeats a chapter past 25 MB of text or lists too many parts, or its package file is all tags',()=>{
  // A chapter of a million characters named 30 times: 30 million characters out of a file of a few KB.
  assert.throws(()=>extractEpub(epubFile({chapter:`<html><body><p>${'字'.repeat(1000000)}</p></body></html>`,spine:'<itemref idref="one"/>'.repeat(30)})),tooLarge(/vượt quá 25 MB/u));
+ // The 25 MB are bytes of UTF-8, as the text is stored: a chapter of a million Han characters (3 MB) reads 8 times, not 9
+ // (27 MB, though only 9 million characters of a string; counted in characters, 26 times passed).
+ const han=`<html><body><p>${'字'.repeat(1000000)}</p></body></html>`,eight=extractEpub(epubFile({chapter:han,spine:'<itemref idref="one"/>'.repeat(8)}));
+ assert.equal(eight.chapterCount,8);assert.ok(new TextEncoder().encode(eight.source).length<=25*1024*1024);
+ assert.throws(()=>extractEpub(epubFile({chapter:han,spine:'<itemref idref="one"/>'.repeat(9)})),tooLarge(/vượt quá 25 MB/u));
  // Named a few times, it reads, each time as a part, as before.
  const repeated=extractEpub(epubFile({spine:'<itemref idref="one"/>'.repeat(3)}));assert.equal(repeated.chapterCount,3);assert.equal(repeated.source,'[Phần EPUB 1: 字]\n字\n\n[Phần EPUB 2: 字]\n字\n\n[Phần EPUB 3: 字]\n字');
  assert.throws(()=>extractEpub(epubFile({spine:'<itemref idref="one"/>'.repeat(20001)})),tooLarge(/20\.000 phần/u));

@@ -126,7 +126,7 @@ const BROWSER_DOWN='Dịch vụ PDF chưa mở được trình duyệt để d�
 
 // A box whose translation does not fit even at the smallest size (pdf-box-layout.js fitTextBoxes): the export is
 // refused, since clipped or overlapping text is never exported. blocks: [{page,id,label}] for every such box of the
-// document, label as the PDF view of Xưởng dịch numbers the blocks of a page (frontend/pdf-dual-viewer.js: the page's
+// document, label as the block editor of Xưởng dịch lists the blocks of a page (frontend/pdf-dual-viewer.js: the page's
 // first block is "Đoạn 1"). The message names the ids, which the samples tool (texts.json) and the service's log use;
 // the student reads overflowMessage(blocks) instead (server.mjs failureAnswer).
 export const blockLabel=(entry,id)=>{const index=(entry?.blocks||[]).findIndex(b=>b.id===id);return index>=0?`Đoạn ${index+1}`:String(id);};
@@ -135,20 +135,22 @@ export function overflowError(blocks){
  const where=[...byPage(blocks)].map(([page,items])=>`Trang ${page}: chữ Việt không vừa box (${items.map(b=>b.id).join(', ')})`).join('; ');
  return Object.assign(new Error(`${where}, kể cả ở cỡ chữ nhỏ nhất. Hãy rút gọn bản dịch của các block này rồi xuất lại.`),{code:'overflow',blocks});
 }
-// What the student is told: which "Đoạn k" of which page, and the controls of Xưởng dịch that fix it (study.html
-// "Đối chiếu kết quả", pdf-dual-viewer.js "Chỉnh bản dịch từng đoạn" / "Lưu đoạn đã sửa", the "Xuất PDF tiếng Việt"
-// button). At most OVERFLOW_NAMED labels are listed, so the text stays under the 600 characters the Worker passes on.
+// What the student is told: which blocks, named in a sentence as everywhere in Xưởng dịch ("Trang 3 · đoạn 2", as the
+// PDF view and the warnings write them), and the controls that fix them (study.html "Đối chiếu kết quả",
+// pdf-dual-viewer.js "Chỉnh bản dịch từng đoạn" / "Lưu đoạn đã sửa", the "Xuất PDF tiếng Việt" button); a block's label
+// ("Đoạn 2") only where it names the editor's option to pick. At most OVERFLOW_NAMED blocks are listed, so the text stays
+// under the 600 characters the Worker passes on.
 const OVERFLOW_NAMED=5;
 const listVi=items=>items.length>1?`${items.slice(0,-1).join(', ')} và ${items.at(-1)}`:items[0];
+const inSentence=({page,label})=>{const text=String(label);return `Trang ${page} · ${text.charAt(0).toLowerCase()}${text.slice(1)}`;};
 export function overflowMessage(blocks){
- const pages=[...byPage(blocks)],shown=blocks.slice(0,OVERFLOW_NAMED),more=blocks.length-shown.length,others=more?` và ${more} đoạn khác`:'';
+ const pages=[...byPage(blocks)],shown=blocks.slice(0,OVERFLOW_NAMED),names=shown.map(inSentence),more=blocks.length-shown.length,others=more?` và ${more} đoạn khác`:'';
  const steps=(where,which)=>`Ở phần “Đối chiếu kết quả”, chuyển tới ${where}, mở “Chỉnh bản dịch từng đoạn”, chọn ${which}, viết ngắn lại, bấm “Lưu đoạn đã sửa” rồi bấm lại “Xuất PDF tiếng Việt”.`;
  if(pages.length===1){
-  const [[page]]=pages,labels=shown.map(b=>b.label);
-  return `Trang ${page}: bản dịch của ${more?`${labels.join(', ')}${others}`:listVi(labels)} dài hơn khung chữ, kể cả khi đã thu nhỏ chữ hết mức, nên chưa xuất được PDF tiếng Việt. ${steps(`Trang ${page}`,blocks.length===1?labels[0]:'từng đoạn đó')}`;
+  const [[page]]=pages;
+  return `Bản dịch của ${more?`${names.join(', ')}${others}`:listVi(names)} dài hơn khung chữ, kể cả khi đã thu nhỏ chữ hết mức, nên chưa xuất được PDF tiếng Việt. ${steps(`Trang ${page}`,blocks.length===1?shown[0].label:'từng đoạn đó')}`;
  }
- const named=[...byPage(shown)].map(([page,items])=>`Trang ${page} (${items.map(b=>b.label).join(', ')})`);
- return `Bản dịch của ${blocks.length} đoạn dài hơn khung chữ, kể cả khi đã thu nhỏ chữ hết mức, nên chưa xuất được PDF tiếng Việt: ${named.join(', ')}${others}. ${steps('từng trang đó','đoạn cần sửa')}`;
+ return `Bản dịch của ${blocks.length} đoạn dài hơn khung chữ, kể cả khi đã thu nhỏ chữ hết mức, nên chưa xuất được PDF tiếng Việt: ${names.join(', ')}${others}. ${steps('từng trang đó','đoạn cần sửa')}`;
 }
 // Puppeteer's own failures in the middle of an export (the page's browser died, or one page took longer than its 30 s),
 // told apart from the engine's errors, which already speak to the student and carry a code in words (a ProtocolError's

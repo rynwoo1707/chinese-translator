@@ -81,24 +81,31 @@ test('Failed jobs answer 422 with their kind of failure; /health reports the loa
  assert.throws(()=>serviceHandler({token:'short'}),/tối thiểu 24 ký tự/u);
 });
 
-test('A translation longer than its box: the answer names each “Đoạn k” as Xưởng dịch shows it, and the controls that shorten it',async t=>{
+test('A translation longer than its box: the answer names each block “Trang N · đoạn k” as Xưởng dịch does, and the editor\'s “Đoạn k” to pick',async t=>{
  // The message quotes the PDF view of Xưởng dịch: its panel, editor, save and export controls, and its block numbers.
  const viewer=read('frontend/pdf-dual-viewer.js'),study=read('frontend/study.html');
  for(const control of ['Chỉnh bản dịch từng đoạn','Lưu đoạn đã sửa'])assert.ok(viewer.includes(control),control);
  assert.match(viewer,/textContent=`Đoạn \$\{i\+1\} · /u,'the editor lists a page\'s blocks as Đoạn 1, Đoạn 2, …');
+ // In a sentence the viewer names a block "Trang N · đoạn k" (its notice on the same screen), as the message does.
+ assert.match(viewer,/Trang \$\{entry\.number\} · đoạn \$\{i\+1\}/u);
  for(const control of ['Đối chiếu kết quả','>Xuất PDF tiếng Việt<'])assert.ok(study.includes(control),control);
  // The label is the block's place on its page, whatever its id says.
  const entry={number:24,blocks:['p24-b0','p24-b1','p24-b5','p24-b6'].map(id=>({id}))};
  assert.equal(blockLabel(entry,'p24-b0'),'Đoạn 1');assert.equal(blockLabel(entry,'p24-b5'),'Đoạn 3');
  const one=[{page:24,id:'p24-b5',label:'Đoạn 3'}],two=[...one,{page:24,id:'p24-b6',label:'Đoạn 4'}];
  const pages=[{page:3,id:'p3-b1',label:'Đoạn 2'},{page:15,id:'p15-b0',label:'Đoạn 1'},{page:15,id:'p15-b3',label:'Đoạn 4'}];
- assert.equal(overflowMessage(one),'Trang 24: bản dịch của Đoạn 3 dài hơn khung chữ, kể cả khi đã thu nhỏ chữ hết mức, nên chưa xuất được PDF tiếng Việt. Ở phần “Đối chiếu kết quả”, chuyển tới Trang 24, mở “Chỉnh bản dịch từng đoạn”, chọn Đoạn 3, viết ngắn lại, bấm “Lưu đoạn đã sửa” rồi bấm lại “Xuất PDF tiếng Việt”.');
- assert.match(overflowMessage(two),/^Trang 24: bản dịch của Đoạn 3 và Đoạn 4 dài hơn khung chữ, .* chọn từng đoạn đó, /u);
- assert.match(overflowMessage(pages),/^Bản dịch của 3 đoạn dài hơn khung chữ, kể cả khi đã thu nhỏ chữ hết mức, nên chưa xuất được PDF tiếng Việt: Trang 3 \(Đoạn 2\), Trang 15 \(Đoạn 1, Đoạn 4\)\. Ở phần “Đối chiếu kết quả”, chuyển tới từng trang đó, /u);
- // Never an internal id, nor advice no control matches; short enough for the Worker to pass on whole.
+ assert.equal(overflowMessage(one),'Bản dịch của Trang 24 · đoạn 3 dài hơn khung chữ, kể cả khi đã thu nhỏ chữ hết mức, nên chưa xuất được PDF tiếng Việt. Ở phần “Đối chiếu kết quả”, chuyển tới Trang 24, mở “Chỉnh bản dịch từng đoạn”, chọn Đoạn 3, viết ngắn lại, bấm “Lưu đoạn đã sửa” rồi bấm lại “Xuất PDF tiếng Việt”.');
+ assert.equal(overflowMessage(two),'Bản dịch của Trang 24 · đoạn 3 và Trang 24 · đoạn 4 dài hơn khung chữ, kể cả khi đã thu nhỏ chữ hết mức, nên chưa xuất được PDF tiếng Việt. Ở phần “Đối chiếu kết quả”, chuyển tới Trang 24, mở “Chỉnh bản dịch từng đoạn”, chọn từng đoạn đó, viết ngắn lại, bấm “Lưu đoạn đã sửa” rồi bấm lại “Xuất PDF tiếng Việt”.');
+ assert.equal(overflowMessage(pages),'Bản dịch của 3 đoạn dài hơn khung chữ, kể cả khi đã thu nhỏ chữ hết mức, nên chưa xuất được PDF tiếng Việt: Trang 3 · đoạn 2, Trang 15 · đoạn 1, Trang 15 · đoạn 4. Ở phần “Đối chiếu kết quả”, chuyển tới từng trang đó, mở “Chỉnh bản dịch từng đoạn”, chọn đoạn cần sửa, viết ngắn lại, bấm “Lưu đoạn đã sửa” rồi bấm lại “Xuất PDF tiếng Việt”.');
+ // Never an internal id, nor advice no control matches; short enough for the Worker to pass on whole. "Đoạn k",
+ // capitalised, only where it names the editor's option to pick ("chọn Đoạn 3").
  const worst=Array.from({length:3000},(_,i)=>({page:10000+i,id:`p${10000+i}-b${i}`,label:`Đoạn ${1001+i}`}));
- for(const blocks of [one,two,pages,worst,worst.map(b=>({...b,page:12345}))]){const text=overflowMessage(blocks);assert.doesNotMatch(text,/p\d+-b\d+|\bblock\b|\bbox\b|điều chỉnh/iu,text);assert.ok(text.length<=600,`${text.length} characters`);}
- assert.match(overflowMessage(worst),/\(Đoạn 1005\) và 2995 đoạn khác\. /u);
+ for(const blocks of [one,two,pages,worst,worst.map(b=>({...b,page:12345}))]){
+  const text=overflowMessage(blocks);assert.doesNotMatch(text,/p\d+-b\d+|\bblock\b|\bbox\b|điều chỉnh/iu,text);assert.ok(text.length<=600,`${text.length} characters`);
+  assert.deepEqual(text.match(/Đoạn \d+/gu)||[],blocks.length===1?[blocks[0].label]:[],text);
+ }
+ assert.match(overflowMessage(worst),/: Trang 10000 · đoạn 1001, Trang 10001 · đoạn 1002, Trang 10002 · đoạn 1003, Trang 10003 · đoạn 1004, Trang 10004 · đoạn 1005 và 2995 đoạn khác\. /u);
+ assert.match(overflowMessage(worst.map(b=>({...b,page:12345}))),/^Bản dịch của Trang 12345 · đoạn 1001, .*Trang 12345 · đoạn 1005 và 2995 đoạn khác dài hơn khung chữ, .* chuyển tới Trang 12345, .* chọn từng đoạn đó, /u);
  // The engine's own message keeps the ids (the samples tool edits texts.json by id, the log names them); the service
  // answers the student's text with the boxes for the browser to open.
  const error=overflowError(pages);assert.equal(error.code,'overflow');

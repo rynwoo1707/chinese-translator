@@ -3,7 +3,8 @@
 //  - its account's lease 'pdf:<user id>': one call per account at a time, so one account never holds two slots;
 //  - one of the site's slots 'pdf-slot:0' … 'pdf-slot:<N-1>': when all are taken the call is answered at once (503
 //    pdf_service_busy with Retry-After) instead of reaching a full service.
-// Both are taken before the call reads its request body (pdf-layout.js withLeases), and a browser that was told busy asks
+// The account's lease is taken and the slots are counted (leaseUse) before the call reads its request body; a slot is
+// taken once the body is in, so a slow upload holds none (pdf-layout.js withLeases). A browser that was told busy asks
 // GET …/pdf-layout/capacity (leaseUse) before it sends its upload again.
 // Leases are rows of service_leases (migration 0018) that run out after LEASE_TTL_MS and are renewed while the call
 // runs. A call whose Worker stops (Cloudflare cancels a request whose browser left; the service then stops the job too)

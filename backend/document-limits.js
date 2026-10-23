@@ -21,6 +21,10 @@ export const MAX_DEPTH=Object.freeze({docx:1024,html:4096});
 // root element declares a few dozen namespaces, a VML shape has a few dozen attributes; a million on one tag would fill
 // the memory the tree was taken out to save.
 export const MAX_ATTRIBUTES=1024;
+// Namespace declarations (xmlns, xmlns:p) in force at once in a DOCX part: those of the elements still open. Word puts a
+// few dozen on the root element and a few on each picture or chart, which end with it. Each one in force is kept, at a
+// few bytes of XML each: a thousand nested elements declaring a thousand each would fill the memory.
+export const MAX_NAMESPACES=4096;
 export const TOO_LARGE_CODE='document_too_large';
 const DOCX_TOO_LARGE='Tệp DOCX quá lớn hoặc có quá nhiều đoạn và định dạng để máy chủ đọc an toàn. Hãy lưu tài liệu thành TXT (UTF-8) hoặc PDF, hoặc chia thành các tệp nhỏ hơn, rồi tải lên lại.';
 const DOCX_INVALID='Không đọc được tệp DOCX. Hãy kiểm tra tệp không đặt mật khẩu, mở bằng Word rồi lưu lại dưới dạng .docx và thử lại.';
@@ -104,14 +108,22 @@ const NAMESPACES=new Map([
 ]);
 const RESERVED=new Map([['xml','http://www.w3.org/XML/1998/namespace'],['xmlns','http://www.w3.org/2000/xmlns/']]);
 class Names{
- constructor(){this.bound=new Map();this.declared=[];}
- // An element's declarations apply to its own name and attributes and to everything inside it.
+ constructor(){this.bound=new Map();this.declared=[];this.live=0;}
+ // An element's declarations apply to its own name and attributes and to everything inside it, and end with it: a
+ // prefix no open element declares is forgotten (siblings declaring new prefixes would otherwise pile them up).
  open(attribs){
   let declared=null;
-  for(const key in attribs)if(key==='xmlns'||key.startsWith('xmlns:')){const prefix=key.slice(6);if(!this.bound.has(prefix))this.bound.set(prefix,[]);this.bound.get(prefix).push(attribs[key]);(declared??=[]).push(prefix);}
+  for(const key in attribs)if(key==='xmlns'||key.startsWith('xmlns:')){
+   if(++this.live>MAX_NAMESPACES)throw tooLarge();
+   const prefix=key.slice(6);let uris=this.bound.get(prefix);if(!uris)this.bound.set(prefix,uris=[]);uris.push(attribs[key]);(declared??=[]).push(prefix);
+  }
   this.declared.push(declared);
  }
- close(){for(const prefix of this.declared.pop()??[])this.bound.get(prefix).pop();}
+ close(){
+  const declared=this.declared.pop();if(!declared)return;
+  this.live-=declared.length;
+  for(const prefix of declared){const uris=this.bound.get(prefix);uris.pop();if(!uris.length)this.bound.delete(prefix);}
+ }
  name(qualified,attribute=false){
   const colon=qualified.indexOf(':'),prefix=colon<0?'':qualified.slice(0,colon),local=qualified.slice(colon+1);
   const uri=colon<0&&attribute?'':RESERVED.get(prefix)??this.bound.get(prefix)?.at(-1);
@@ -259,8 +271,12 @@ function bodyReader(){
   switch(frame.kind){
    case 'root':done=true;return;
    case 'pPr':if(!frame.target.decided)decide(frame.target);return;
-   // What deleted paragraphs left goes on to the next paragraph, after what was there before.
-   case 'p':if(frame.deleted)deferred=frame.prefix.concat(frame.recorded,deferred);else give([container('p',frame.items,frame.keep)].concat(frame.extras));return;
+   // What deleted paragraphs left goes on to the next paragraph, after what was there before. It is added to the list
+   // carried so far (this paragraph's own), never copied with it: a long tracked deletion is read in linear time.
+   case 'p':
+    if(!frame.deleted){give([container('p',frame.items,frame.keep)].concat(frame.extras));return;}
+    for(const event of frame.recorded)frame.prefix.push(event);for(const event of deferred)frame.prefix.push(event);
+    deferred=frame.prefix;return;
    case 'run':give([container('el',frame.items,frame.keep)],frame.extras);return;
    case 'hyperlink':give(frame.wrap?[container('el',frame.items,frame.keep)]:frame.items,frame.extras);return;
    case 't':give([{k:'text',s:frame.text}]);return;

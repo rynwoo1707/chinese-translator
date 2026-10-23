@@ -48,8 +48,8 @@ async function readPayload(req){
 // What a failed job answers (the Worker reads code; an older Worker only shows the message):
 //  422 {error, code?}            the job failed: a code engine.mjs gave the error (timeout, memory, too_large, crash), or
 //                                none for a problem of the file itself ("Trang 3: …");
-//  422 {error, code:'overflow', blocks:[{page,id}]}   a translation longer than its box: the message says which "Đoạn k"
-//                                to shorten in Xưởng dịch, blocks lets the browser open them;
+//  422 {error, code:'overflow', blocks:[{page,id}]}   a translation longer than its box: the message says which block
+//                                ("Trang N · đoạn k") to shorten in Xưởng dịch, blocks lets the browser open them;
 //  500 {error, code:'browser'|'font'}   the export's browser did not start, or its font is missing: a problem of the
 //                                service, not of the document (the Worker answers 503 pdf_unavailable);
 //  400 {error} / 413 {error, code:'too_large'}   a request the service could not read.

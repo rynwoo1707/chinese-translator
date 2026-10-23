@@ -4,6 +4,7 @@ import {existsSync,readdirSync} from 'node:fs';
 import {createRequire} from 'node:module';
 import {tmpdir} from 'node:os';
 import {browserArgs,chromiumPath,renderDocument} from '../services/pdf-layout/engine.mjs';
+import {failureAnswer} from '../services/pdf-layout/server.mjs';
 
 test('the PDF renderer tells Edge not to relaunch itself, and adds --no-sandbox only when asked',t=>{
  const saved=process.env.PDF_CHROMIUM_NO_SANDBOX;t.after(()=>{if(saved===undefined)delete process.env.PDF_CHROMIUM_NO_SANDBOX;else process.env.PDF_CHROMIUM_NO_SANDBOX=saved;});
@@ -41,6 +42,8 @@ test('An export with translations longer than their boxes is refused, naming eve
  assert.equal(refused.code,'overflow',refused.stack);
  assert.deepEqual(refused.blocks,[{page:4,id:'p4-b1',label:'Đoạn 2'},{page:4,id:'p4-b2',label:'Đoạn 3'},{page:6,id:'p6-b0',label:'Đoạn 1'}],'page 6 is measured after page 4 was refused');
  assert.match(refused.message,/^Trang 4: chữ Việt không vừa box \(p4-b1, p4-b2\); Trang 6: chữ Việt không vừa box \(p6-b0\)/u);
+ // The student reads each block as Xưởng dịch names it in a sentence, "Trang N · đoạn k".
+ assert.deepEqual(failureAnswer(refused),{status:422,body:{error:'Bản dịch của 3 đoạn dài hơn khung chữ, kể cả khi đã thu nhỏ chữ hết mức, nên chưa xuất được PDF tiếng Việt: Trang 4 · đoạn 2, Trang 4 · đoạn 3, Trang 6 · đoạn 1. Ở phần “Đối chiếu kết quả”, chuyển tới từng trang đó, mở “Chỉnh bản dịch từng đoạn”, chọn đoạn cần sửa, viết ngắn lại, bấm “Lưu đoạn đã sửa” rồi bấm lại “Xuất PDF tiếng Việt”.',code:'overflow',blocks:[{page:4,id:'p4-b1'},{page:4,id:'p4-b2'},{page:6,id:'p6-b0'}]}});
  const end=Date.now()+15000;while(profiles().some(name=>!before.has(name))&&Date.now()<end)await new Promise(done=>setTimeout(done,100));
  assert.deepEqual(profiles().filter(name=>!before.has(name)),[],'the browser was closed');
 });

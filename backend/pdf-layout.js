@@ -5,7 +5,7 @@ import {isStudyModel} from './gemini-models.js';
 import {fileDisposition} from './download-filename.js';
 import {keepSource,sourceKey} from './study-books.js';
 import {storedSource} from './book-jobs.js';
-import {UserError,logEvent} from './http.js';
+import {UserError,logEvent,bodyLimit} from './http.js';
 import {Buffer} from 'node:buffer';
 import {rateLimit,dailyMax,vietnamDay} from './rate-limit.js';
 import {keepWritten} from './account.js';
@@ -32,7 +32,7 @@ export function serviceUrl(env){
 }
 // Older service builds returned MuPDF/Tesseract's whole stderr as the error, with the real cause at the very end.
 const SERVICE_NOISE=/Warning: Parameter not found: \S+|Error opening data file [^\n]*?\.traineddata|Please make sure the TESSDATA_PREFIX environment variable is set to your "tessdata" directory\.|Failed loading language '[^'\n]*'|Image too small to scale!! \([^)\n]*\)|Line cannot be recognized!!|Tesseract couldn't load any languages!|Could not initiali[sz]e tesseract\.?/giu;
-// limit: 400 characters, more for an overflow answer, whose list of "Đoạn k" the service already keeps short.
+// limit: 400 characters, more for an overflow answer, whose list of blocks the service already keeps short.
 export function serviceErrorMessage(value,status,limit=400){
  const text=String(value||'').replace(SERVICE_NOISE,' ').replace(/\s+/gu,' ').trim();
  if(!text)return `Không xử lý được PDF (dịch vụ trả mã ${status}).`;
@@ -44,8 +44,9 @@ export function serviceErrorMessage(value,status,limit=400){
 //                                       the Worker (401/403/404: another token or URL, logged for the operator), or
 //                                       could not start the browser of an export or read its font;
 //  413 pdf_timeout | pdf_memory | pdf_too_large | pdf_crash   this selection is too heavy for one job: fewer pages work;
-//  422 pdf_overflow + blocks            a translation is longer than its box (render): the message names each "Đoạn k"
-//                                       and how to shorten it in Xưởng dịch; blocks [{page,id}] lets the browser open them;
+//  422 pdf_overflow + blocks            a translation is longer than its box (render): the message names each block
+//                                       ("Trang N · đoạn k") and how to shorten it in Xưởng dịch; blocks [{page,id}] lets
+//                                       the browser open them;
 //  400 (no code)                        a problem of the file itself, e.g. "Trang 3: …".
 // An older service sends no code; its known messages are recognised instead.
 export const SERVICE_BUSY_SECONDS=20,SERVICE_DOWN_SECONDS=30;
@@ -90,15 +91,45 @@ async function service(env,operation,body,{file,pages,stream,allPages=false}={})
 const BUSY_SECONDS=30;
 const busy=()=>Response.json({error:'Tài khoản của bạn đang có một lượt xử lý PDF khác (tách trang hoặc xuất PDF) chưa xong. Hãy đợi lượt đó xong rồi thử lại.',code:'pdf_busy',retryAfter:BUSY_SECONDS},{status:429,headers:{'Cache-Control':'no-store','Retry-After':String(BUSY_SECONDS)}});
 const serviceBusy=()=>Response.json({error:SERVICE_BUSY,code:'pdf_service_busy',retryAfter:SERVICE_BUSY_SECONDS},{status:503,headers:{'Cache-Control':'no-store','Retry-After':String(SERVICE_BUSY_SECONDS)}});
-// Both leases are taken before the request body is read: a busy answer never makes the Worker take in an upload of up to
-// 25 MB. The browser then waits, asks /capacity, and sends the upload again once a slot looks free.
-async function withLeases(env,reader,work){
+// Before the request body is read, the account's lease is taken and the site's slots are counted: a busy answer (429
+// pdf_busy, 503 pdf_service_busy) never makes the Worker take in an upload of up to 25 MB. The browser then waits, asks
+// /capacity, and sends the upload again once a slot looks free. read() takes the body in within its time limit
+// (readWithin) while only the account's lease is renewed; a slot is taken once the body is in (503 pdf_service_busy when
+// the last one went meanwhile), so an upload, however slow, never keeps the service from other students.
+async function withLeases(env,reader,read,work){
  const account=await holdLease(env,`pdf:${reader.id}`);if(!account)return busy();
  const leases=[account];
  try{
+  const use=await leaseUse(env,reader.id);if(use&&use.taken>=slotCount(env))return serviceBusy();
+  const body=await keepRenewed(leases,read);
   const slot=await takeSlot(env);if(!slot)return serviceBusy();leases.push(slot);
-  return await keepRenewed(leases,work);
+  return await keepRenewed(leases,()=>work(body));
  }finally{await Promise.all(leases.map(lease=>lease.release()));}
+}
+// How long a request body may take to arrive: two minutes, or longer for a large upload on a slow connection (UPLOAD_RATE
+// bytes a second over the length the browser declared, or over the route's limit when it declared none). Past it the
+// upload is stopped and the call answers 408 upload_timeout with its lease released and no daily call used, so a body
+// trickled in a byte at a time holds nothing for long.
+const BODY_SECONDS=120,UPLOAD_RATE=16*1024;
+export function bodyDeadline(request,path){
+ const declared=Number(request.headers.get('Content-Length')),limit=bodyLimit(path,request.method);
+ return Math.max(BODY_SECONDS,Math.ceil((declared>0?Math.min(declared,limit):limit)/UPLOAD_RATE))*1000;
+}
+const UPLOAD_TOO_SLOW='Kết nối mạng quá chậm nên máy chủ chưa nhận hết dữ liệu gửi lên và đã dừng lượt xử lý PDF này. Hãy kiểm tra mạng (ví dụ chuyển sang Wi-Fi) rồi thử lại.';
+const LATE=Symbol('late');
+// The body read with parse (formData or json) through a stream this call can stop: the bytes are passed on as they
+// arrive, and past bodyDeadline the upload is cancelled instead of waited for (the parser's own reader of the request
+// body could not be cancelled).
+async function readWithin(request,path,parse){
+ const source=request.body?.getReader();if(!source)return parse(request);
+ const body=new ReadableStream({async pull(controller){const {done,value}=await source.read();if(done)controller.close();else controller.enqueue(value);},cancel:reason=>source.cancel(reason)});
+ const type=request.headers.get('Content-Type'),parsing=parse(new Response(body,{headers:type?{'Content-Type':type}:{}}));
+ let timer;const late=new Promise(resolve=>{timer=setTimeout(resolve,bodyDeadline(request,path),LATE);});
+ try{
+  const result=await Promise.race([parsing,late]);if(result!==LATE)return result;
+  parsing.catch(()=>{});await source.cancel(new Error('upload too slow')).catch(()=>{});
+  throw new UserError(UPLOAD_TOO_SLOW,408,'upload_timeout');
+ }finally{clearTimeout(timer);}
 }
 // GET /capacity: a hint for a browser waiting out pdf_busy or pdf_service_busy, from one read of D1. It takes no lease and
 // counts toward no cap; the call itself still takes both leases, so a slot that looked free may be gone by then.
@@ -110,14 +141,18 @@ async function capacity(env,reader){
 // The daily cap is counted once the request is valid, so neither waiting for a lease nor a refused request uses up the
 // day's calls. A call the service did not do (out of reach, refusing the Worker, busy) gives its count back, and so does
 // an error marked giveBack (a refresh too heavy for one job keeps nothing, and the student needs the count to extract
-// those pages again).
+// those pages again) or an answer marked notKept (an export a save from another tab overtook is not kept).
 const extractionCap=(env,reader)=>({daily:`pdf-extract:${reader.id}`,max:dailyMax(env,'DAILY_PDF_EXTRACTS_PER_USER',100),label:'tách PDF'});
 const renderCap=(env,reader)=>({daily:`pdf-render:${reader.id}`,max:dailyMax(env,'DAILY_PDF_RENDERS_PER_USER',100),label:'xuất PDF tiếng Việt'});
 const NOT_DONE=new Set(['pdf_unavailable','pdf_service_busy']);
+const notKept=new WeakSet(),refused=response=>{notKept.add(response);return response;};
 async function counted(env,cap,work){
  const day=vietnamDay(),capped=await rateLimit(env,[cap]);if(capped)return capped;
- try{return await work();}
+ let answer;
+ try{answer=await work();}
  catch(error){if(NOT_DONE.has(error?.code)||error?.giveBack)await giveBack(env,cap.daily,day);throw error;}
+ if(notKept.has(answer))await giveBack(env,cap.daily,day);
+ return answer;
 }
 async function giveBack(env,key,day){
  if(typeof env?.DB?.prepare!=='function')return;
@@ -232,10 +267,15 @@ const pageList=numbers=>numbers.reduce((parts,n,i)=>{if(i&&n===numbers[i-1]+1)pa
 // room, or answered with fewer pages) keeps the old copy, which stays usable, and says how to go on.
 const HEAVY_CODES=new Set(['pdf_timeout','pdf_memory','pdf_too_large','pdf_crash']);
 const refreshTooHeavy=(pages,code)=>Object.assign(new UserError(`Chưa cập nhật được bố cục của bản dịch này: ${pages.length} trang của nó (trang ${pageList(pages)}) quá nặng để dịch vụ PDF xử lý hết trong một lượt. Bản dịch cũ vẫn còn nguyên trong Lịch sử dịch. Hãy chọn lại PDF gốc rồi dịch lại các trang đó thành nhiều lượt nhỏ hơn, ví dụ 3–5 trang mỗi lượt.`,413,code),{giveBack:true});
-// An export made while another tab or device saved its session shows translations that are no longer the session's: it
-// is not kept, and the answer is the one a save from an older copy gets (409 history_conflict with the revision stored
-// now), so the browser reloads the session before it exports again.
+// An export made while another tab or device saved its session is kept when the session, as stored now, still holds what
+// the PDF was made from (madeFrom: the same asset, finished, with the same blocks and the same translation of each),
+// whatever else that save changed: the same text saved again leaves the PDF true. Otherwise it is not kept, the day's
+// export is given back, and the answer is the one a save from an older copy gets (409 history_conflict with the revision
+// stored now), so the browser reloads the session before it exports again.
+const madeFrom=state=>JSON.stringify([state?.pdfLayout?.assetId??null,state?.complete===true,state?.parts??null,state?.translationParts??null]);
+const parsedState=text=>{try{return JSON.parse(text);}catch{return null;}};
 const EXPORT_CONFLICT='Bản dịch này vừa được lưu từ một tab hoặc thiết bị khác trong lúc xuất PDF, nên PDF vừa dựng không khớp bản mới nhất và chưa được lưu. Hãy mở lại bản dịch từ Lịch sử dịch rồi bấm Xuất PDF tiếng Việt.';
+const stat=(env,key)=>env.FILES.head?env.FILES.head(key):env.FILES.get(key);
 // Writes key only over the stored object whose etag was read (R2 onlyIf; storage without etags writes as before): false
 // when another write landed in between.
 async function putIfUnchanged(env,key,value,etag,options){
@@ -262,8 +302,8 @@ export async function pdfLayoutRoute(request,env,path,reader){
   const name=object.customMetadata?.filename||`hoa-tri-${kind}.pdf`;
   return new Response(object.body,{headers:{'Content-Type':'application/pdf','Content-Disposition':fileDisposition(name,{fallback:`hoa-tri-${kind}.pdf`}),'Cache-Control':'no-store','X-Content-Type-Options':'nosniff'}});
  }
- if(path===base+'/extract'&&request.method==='POST')return withLeases(env,reader,async()=>{
-  const form=await request.formData(),file=form.get('file');if(!file||typeof file==='string'||!file.size||file.size>25*1024*1024)throw new Error('PDF giữ bố cục tối đa 25 MB.');
+ if(path===base+'/extract'&&request.method==='POST')return withLeases(env,reader,()=>readWithin(request,path,body=>body.formData()),async form=>{
+  const file=form.get('file');if(!file||typeof file==='string'||!file.size||file.size>25*1024*1024)throw new Error('PDF giữ bố cục tối đa 25 MB.');
   if(new TextDecoder().decode(await file.slice(0,5).arrayBuffer())!=='%PDF-')throw new Error('Tệp không phải PDF.');
   if(form.get('sourceSha256')||form.get('pageOffset'))return extractChunk(env,reader,form,file);
   return counted(env,extractionCap(env,reader),async()=>{
@@ -283,8 +323,8 @@ export async function pdfLayoutRoute(request,env,path,reader){
    return keepExtraction(env,reader,id,document,original,{filename:file.name,also:[sourceKey(reader.id,sha256)]});
   });
  });
- if(path===base+'/refresh'&&request.method==='POST')return withLeases(env,reader,async()=>{
-  const {assetId,forceClone}=await request.json(),prior=await storedDocument(env,reader,assetId);if(!prior)return reply({error:'Không tìm thấy PDF trong tài khoản.'},404);
+ if(path===base+'/refresh'&&request.method==='POST')return withLeases(env,reader,()=>readWithin(request,path,body=>body.json()),async({assetId,forceClone})=>{
+  const prior=await storedDocument(env,reader,assetId);if(!prior)return reply({error:'Không tìm thấy PDF trong tài khoản.'},404);
   if(prior.extractionVersion>=2&&!forceClone)return reply({assetId,document:prior,originalUrl:`${base}/assets/${assetId}/original`});
   const original=await env.FILES.get(assetKey(reader,assetId,'original.pdf'));if(!original)return reply({error:'Không còn PDF gốc để cập nhật bố cục.'},410);
   // Only what the new manifest takes from the old one is kept while the service works; the stored PDF goes to the
@@ -323,13 +363,13 @@ export async function pdfLayoutRoute(request,env,path,reader){
   const answer={usage:result.usage,warnings:result.warnings,model:result.model};
   return slim?reply({...slim,...answer}):replyWith(answer,'document',bytes);
  }
- if(path===base+'/render'&&request.method==='POST')return withLeases(env,reader,async()=>{
-  const {assetId,historyId}=await request.json(),manifest=assetKey(reader,validAsset(assetId),'manifest.json');let document=await storedDocument(env,reader,assetId);if(!document)return reply({error:'Không tìm thấy PDF trong tài khoản.'},404);
+ if(path===base+'/render'&&request.method==='POST')return withLeases(env,reader,()=>readWithin(request,path,body=>body.json()),async({assetId,historyId})=>{
+  const manifest=assetKey(reader,validAsset(assetId),'manifest.json');let document=await storedDocument(env,reader,assetId);if(!document)return reply({error:'Không tìm thấy PDF trong tài khoản.'},404);
   const session=()=>env.DB.prepare('SELECT * FROM study_sessions WHERE id=? AND user_id=?').bind(String(historyId||''),reader.id).first();
   const row=await session();if(!row)return reply({error:'Không tìm thấy lịch sử trong tài khoản.'},404);
   const savedState=await env.FILES.get(row.state_key);if(!savedState)return reply({error:'Nội dung lịch sử không còn tồn tại.'},410);
-  const savedText=await savedState.text(),state=JSON.parse(savedText);if(state.pdfLayout?.assetId!==assetId||!state.complete||!row.library_chapter_id)return reply({error:'Hãy dịch và lưu đủ các block trước khi xuất PDF.'},409);
-  const blocks=document.pages.flatMap(p=>p.blocks),translations=blocks.map((b,i)=>({id:b.id,translation:state.translationParts[i]}));validateBlockTranslations(blocks,translations);document=null;
+  const state=JSON.parse(await savedState.text());if(state.pdfLayout?.assetId!==assetId||!state.complete||!row.library_chapter_id)return reply({error:'Hãy dịch và lưu đủ các block trước khi xuất PDF.'},409);
+  const blocks=document.pages.flatMap(p=>p.blocks),translations=blocks.map((b,i)=>({id:b.id,translation:state.translationParts[i]})),exported=madeFrom(state);validateBlockTranslations(blocks,translations);document=null;
   return counted(env,renderCap(env,reader),async()=>{
    // The parsed copy only served the checks above: the service gets the stored manifest as storage streams it, so the
    // Worker holds none of it while the export runs (the service checks the translations against what it receives).
@@ -339,20 +379,26 @@ export async function pdfLayoutRoute(request,env,path,reader){
    catch(error){if(error?.code==='pdf_overflow')return reply({error:error.message,code:error.code,blocks:error.blocks||[]},422);throw error;}
    const pdf=decodeBytes(result.pdfBase64),report=result.report;result=null;if(new TextDecoder().decode(pdf.subarray(0,5))!=='%PDF-')throw new Error('Engine không trả PDF hợp lệ.');
    // The export took seconds to minutes, and another tab or device may have saved this session meanwhile. The PDF is kept
-   // only while the session is what it was made from: the same save (revision), chapter and state.json. The chapter link
-   // checks the revision in the same statement, and state.json is written only over the copy compared here (its etag),
-   // so a save landing in between is never undone and its chapter never points at the older text.
-   const conflict=async(now)=>{now??=await session();return reply({error:EXPORT_CONFLICT,code:'history_conflict',...(now?{revision:Number(now.revision)||0,updatedAt:now.updated_at}:{})},409);};
+   // only while the session, as stored now, still holds what it was made from (madeFrom) in the same chapter; a save of
+   // the same text is linked at its own revision. The chapter link checks the revision read here in the same statement,
+   // and state.json (the copy read here, marked exported) is written only over that copy (its etag), so a save landing
+   // after this check is never undone and its chapter never points at an older text.
+   const conflict=async(now)=>{now??=await session();return refused(reply({error:EXPORT_CONFLICT,code:'history_conflict',...(now?{revision:Number(now.revision)||0,updatedAt:now.updated_at}:{})},409));};
    // A session gone meanwhile was deleted, often with its account (410 account_deleted, as every route answers then).
    const current=await session();if(!current)return await keepWritten(env,reader.id,[])||reply({error:'Không tìm thấy lịch sử trong tài khoản.'},404);
-   const revision=Number(row.revision)||0,currentState=current.state_key===row.state_key?await env.FILES.get(row.state_key):null;
-   if((Number(current.revision)||0)!==revision||current.library_chapter_id!==row.library_chapter_id||!currentState||await currentState.text()!==savedText)return conflict(current);
-   const key=assetKey(reader,assetId,'translated.pdf');await env.FILES.put(key,pdf,{httpMetadata:{contentType:'application/pdf'},customMetadata:{filename:`${title}.vi.pdf`,renderVersion:String(RENDER_VERSION)}});
+   const currentState=current.state_key===row.state_key?await env.FILES.get(row.state_key):null,latest=currentState?parsedState(await currentState.text()):null;
+   if(current.library_chapter_id!==row.library_chapter_id||madeFrom(latest)!==exported)return conflict(current);
+   const revision=Number(current.revision)||0,key=assetKey(reader,assetId,'translated.pdf'),file={httpMetadata:{contentType:'application/pdf'},customMetadata:{filename:`${title}.vi.pdf`,renderVersion:String(RENDER_VERSION)}};
+   await env.FILES.put(key,pdf,file);
    // Only this range's chapter: other ranges of the same book keep their own PDFs.
    const linked=await env.DB.prepare('UPDATE chapters SET file_key=?1,mime=?2 WHERE id=?3 AND story_id IN (SELECT id FROM stories WHERE owner_user_id=?4) AND EXISTS (SELECT 1 FROM study_sessions WHERE id=?5 AND user_id=?4 AND revision=?6 AND library_chapter_id=?3)').bind(key,'application/pdf',row.library_chapter_id,reader.id,row.id,revision).run();
    if(Number(linked?.meta?.changes??1)<1)return await keepWritten(env,reader.id,[key])||conflict();
-   state.pdfLayout.exported=true;state.pdfLayout.renderVersion=RENDER_VERSION;
-   if(!await putIfUnchanged(env,row.state_key,JSON.stringify(state),currentState.etag,{httpMetadata:{contentType:'application/json'}}))return await keepWritten(env,reader.id,[key])||conflict();
+   latest.pdfLayout.exported=true;latest.pdfLayout.renderVersion=RENDER_VERSION;
+   if(!await putIfUnchanged(env,row.state_key,JSON.stringify(latest),currentState.etag,{httpMetadata:{contentType:'application/json'}}))return await keepWritten(env,reader.id,[key])||conflict();
+   // A save of the same text that landed during the export may still be finishing: its last step removes the PDF of a
+   // copy it did not see exported (study-history.js), which would leave the chapter linked to nothing, so the PDF is
+   // stored again when it went meanwhile.
+   if(revision!==(Number(row.revision)||0)&&!await stat(env,key))await env.FILES.put(key,pdf,file);
    return await keepWritten(env,reader.id,[key,row.state_key])||reply({url:`${base}/assets/${assetId}/translated`,report,renderVersion:RENDER_VERSION});
   });
  });

@@ -4,7 +4,7 @@ Ngày đo: 2026-10-19. Mã dựng PDF `0bf0cefc9d8de3c5` (`services/pdf-layout/e
 
 **Sau ngày 22/10/2026:** `extract.py` đã đổi hai lần trong ngày (mục “Bộ tách trang 22/10/2026” và “Lượt sửa thứ hai cùng ngày”); trên 6 bộ scan thể loại, mọi chỉ số đo lại trước và sau lần đổi đầu đều giống hệt, lần đổi thứ hai chỉ chạm trang có lớp chữ, còn mẫu thật c01 được đo trên tệp PDF đã lưu. `frontend/math-text.js` được viết lại không dùng lookbehind, cho đúng cùng kết quả (so 20.000 chuỗi ngẫu nhiên); `engine.mjs` đổi phông trên Linux và cách dừng việc, không đổi cách dàn chữ trên Windows. Vì vậy các số dưới đây vẫn áp dụng, nhưng lệnh “Chạy lại” chưa được chạy lại sau các thay đổi đó (mã dựng nay khác `0bf0cefc9d8de3c5`).
 
-**Sau ngày 23/10/2026:** `extract.py` đổi lần thứ ba (mục “Lượt sửa thứ ba” ở cuối). Phần lớn thay đổi chỉ chạm trang có lớp chữ, nhưng thứ tự đọc dưới hai cột và cách quyết định trang nào là scan đổi cả với trang scan, nên các số dưới đây, nhất là thứ tự đọc, **chưa được đo lại** cho bộ tách hiện tại.
+**Sau ngày 23/10/2026:** `extract.py` đổi lần thứ ba rồi lần thứ tư trong ngày (mục “Lượt sửa thứ ba” và “Lượt sửa thứ tư” ở cuối). Phần lớn thay đổi chỉ chạm trang có lớp chữ, nhưng thứ tự đọc dưới hai cột (lượt thứ tư thêm quy tắc cho cột dài hơn) và cách quyết định trang nào là scan đổi cả với trang scan, nên các số dưới đây, nhất là thứ tự đọc, **chưa được đo lại** cho bộ tách hiện tại.
 
 Tài liệu này thay các câu chưa đo như “giữ nguyên 90–95% bố cục” và “tiết kiệm hơn 80% thời gian”. Bố cục không có một con số chung: mỗi chỉ số dưới đây đo một việc, có định nghĩa và có giới hạn.
 
@@ -148,7 +148,7 @@ Phân bố tỷ lệ dựng/in (14 đoạn văn): ≥1: 3, 0,95–1: 3, 0,85–0
 ## Câu nên dùng trong báo cáo
 
 - Thay “giữ nguyên 90–95% bố cục” bằng: “Trên 3 trang scan thật của sách Toán, toàn bộ phần không phải chữ (hình, khung, đường kẻ) giữ nguyên, chỉ lệch nhiễu nén ảnh; 98,9% chữ Việt nằm đúng khung đoạn gốc, không đoạn nào tràn. Tiêu đề chương và chân trang (36 chữ Hán) chưa được dịch. 8/14 đoạn văn giữ ≥85% cỡ chữ in; 3 đoạn nhỏ hơn rõ, khoảng 80%.” Với bộ thử nhiều thể loại: “Trên 7 trang mẫu của 6 thể loại có đáp án chuẩn, với bản dịch thử dài 1 chữ Việt cho mỗi chữ Hán, 99,5% diện tích chữ Trung được thay, 0 đoạn tràn, 84% đoạn giữ ≥85% cỡ chữ gốc (thân bài 33/35).”
-- Với PDF có lớp chữ, chỉ nói: “Trên 23 trang tổng hợp in từ trình duyệt, với bản dịch thử dài 1 chữ Việt cho mỗi chữ Hán, 0 đoạn tràn và thứ tự đọc 99%; chưa đo trên PDF thật.” (số của bộ tách 22/10/2026; nếu báo cáo nói về bản hiện tại, thêm “chưa đo lại sau lượt sửa ngày 23/10/2026”.)
+- Với PDF có lớp chữ, chỉ nói: “Trên 23 trang tổng hợp in từ trình duyệt, với bản dịch thử dài 1 chữ Việt cho mỗi chữ Hán, 0 đoạn tràn và thứ tự đọc 99%; chưa đo trên PDF thật.” (số của bộ tách 22/10/2026; nếu báo cáo nói về bản hiện tại, thêm “chưa đo lại sau các lượt sửa ngày 23/10/2026”.)
 - Bỏ “tiết kiệm hơn 80% thời gian” cho tới khi chạy quy trình dưới đây. Có thể nói: “10 trang trong một lượt cần 7 thao tác trên Hoa Trí; số phút tiết kiệm chưa đo.”
 
 ## Thời gian tiết kiệm: chưa đo
@@ -252,3 +252,15 @@ Lượt sửa so `extract.py` của `864cbf3` với bản mới trên 41 trang d
 - **Khác:** công thức hóa học có điều kiện trên và dưới dấu bằng vẽ hai nét thành một block, cả hai nét rời khỏi nền (`864cbf3`: “____”, nét dưới bị xóa, nét trên còn); trang có watermark mờ và trang có ảnh chữ tiếng Anh không còn sang OCR; bản scan nhỏ hơn trang có lớp chữ OCR bên dưới thì sang OCR; trang hai cột có niên biểu dưới cột trái: cột phải được đọc trước niên biểu.
 
 Giới hạn: mọi trang đều tổng hợp hoặc do lượt kiểm chứng soạn trong Word, không có sách thật của nhà xuất bản, WPS hay LaTeX; OCR được giả lập nên không đo được thay đổi trên trang scan; chưa chạy trên Linux. Muốn đo bằng các chỉ số ở trên phải chạy lại lệnh ở mục “Chạy lại” và harness của mục “Bộ tách trang 22/10/2026”.
+
+## Lượt sửa thứ tư (23/10/2026)
+
+`extract.py` sửa các lỗi mà lượt kiểm chứng thứ hai (bản `f5887e4` của lượt sửa thứ ba) tìm thấy, phần lớn là chỗ lượt sửa thứ ba làm hỏng điều `864cbf3` vẫn làm đúng: pinyin có âm cuốn lưỡi, dấu ngoặc kép hay chữ số; một dòng dựng cố ý làm bước nhận pinyin chạy theo hàm mũ; nhãn một chữ của hình và tiêu đề cột của bảng bị nối như chữ dãn; cột ô một chữ của bảng ba đường kẻ vẫn là chữ dọc, còn nhãn dọc cạnh thân bài bị tách từng chữ; đoạn văn trên giấy kẻ dòng hay giấy ô bị tách từng dòng; phần tiếp theo của một cột dài hơn bị đọc sau cột kia; trang có một path gồm rất nhiều nét tách chậm (chi tiết: `docs/pdf-layout-pipeline.md`, mục “Hình, công thức và scan”). 11 test mới trong `services/pdf-layout/test_text_layer_shapes.py` (nay 39 test): 9 đỏ trên `f5887e4`, 2 test giữ hành vi đạt trên cả hai. Các bảng ở trên **chưa được đo lại**, kể cả thứ tự đọc.
+
+Lượt sửa so `extract.py` của `f5887e4` với bản mới trên 145 trang, OCR giả lập, 0 lượt gọi Gemini (harness tạm, không nằm trong repo):
+
+- **Trang:** 96 tệp dựng lại bằng các trình tạo của cả hai lượt kiểm chứng (137 trang, kể cả 4 PDF xuất từ Word) và 8 trang thử của lượt sửa. 121 trang giống hệt (block, vùng giữ ảnh gốc, cảnh báo), 24 trang khác, đều do các bản sửa: 11 trang trở lại đúng như `864cbf3` (nhãn của hình, bảng số liệu, nhãn cách nhau 3 và 4 em, pinyin cuốn lưỡi, nhãn dọc ở khoảng cách dòng 1,6 em, bài văn trên giấy kẻ dòng, hai trang giấy ô, hai trang có cột dài hơn); 10 trang tốt hơn cả hai bản trước (9 trang bảng ba đường kẻ hay bảng không kẻ có cột ô một chữ: mỗi ô một block, không còn vùng giữ ảnh gốc; một trang hai cột có ảnh và chú thích trong cột trái: đọc đúng thứ tự cột); 3 trang thử của lượt sửa đổi đúng như dự định. Ảnh nền và ảnh inline chỉ đổi ở trang có block đổi.
+- **Thời gian tách:** tổng 40,5 s trước, 22,0 s sau. Trang có một path nhiều nét: vùng gạch chéo 60.000 nét 17,5 → 2,1 s, 120.000 nét 25,6 → 3,7 s, 20.000 nét 2,0–2,5 → 0,6 s, lưới 80×12 vẽ bằng một path 4,8–5,1 → 2,6–3,0 s (`864cbf3`, đo ở lượt kiểm chứng: 0,7, 1,2, 0,3–0,6 và 2,1–2,6 s); trang có một dòng pinyin dựng cố ý (từ 41 chữ cái) 49,5 → 0,1 s. Máy đo dùng chung với các việc khác, nên chỉ nên so từng cặp trước và sau.
+- **Mực còn trên nền** (bộ đếm điểm mực của lượt kiểm chứng, trên các trang đổi và trang liên quan): không có chữ mới bị mất, bị bỏ hay nằm dưới bản dịch; pinyin được xóa khỏi nền như ký hiệu phụ (trang có pinyin trong dòng: pinyin không còn nằm dưới bản dịch); nhãn tiếng Anh “nucleus” 72 → 72 điểm mực, “cell membrane” 130 → 130, “Source” 257 → 257 (giữ trên nền, là đoạn riêng được dịch, như lượt sửa thứ ba).
+
+Giới hạn: như lượt sửa thứ ba (trang tổng hợp và PDF soạn trong Word, OCR giả lập, chưa chạy trên Linux); các số thời gian đo trên máy dùng chung.

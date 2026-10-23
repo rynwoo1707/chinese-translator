@@ -4,8 +4,11 @@ small print over and under a line (pinyin and emphasis dots against glosses, cre
 conditions), drawn signs against blanks to fill in, short last lines of paragraphs, tight ruled tables, columns of
 one-character cells, lines cut by a picture, a drawing or letter-spacing, pages with a watermark or a picture of
 English text, and the smaller rules round them (reading order below two columns, a scan smaller than the page, boxes
-of one-line blocks, two one-line speeches, a wrapped citation, the time budget setting). Every case is general: none
-is tuned to one subject or one sample.
+of one-line blocks, two one-line speeches, a wrapped citation, the time budget setting). The second verification
+added pinyin with erhua, quotes or digits, the labels of a figure and the header of a table side by side, one-character
+columns of a three-line table against a side label on the body's baselines, a longer column going on after a heading
+or a figure, paragraphs on ruled or graph paper, and compound paths of many strokes. Every case is general: none is
+tuned to one subject or one sample.
 
 Pages are built with PyMuPDF; scan_layout is replaced by a stub, so no OCR runs.
 
@@ -16,7 +19,9 @@ import base64
 import os
 import subprocess
 import sys
+import time
 import unittest
+import unicodedata
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -103,6 +108,26 @@ def picture(text, width, height, size=11):
     page = src.new_page(width=width, height=height)
     page.insert_text((2, height - 3), text, fontname="tiro", fontsize=size)
     return page.get_pixmap(dpi=300, alpha=False)
+
+
+def drawing(width, height, parts=1):
+    """A raster of a drawing: parts boxes side by side (test tubes, a coin)."""
+    src = fitz.open()
+    page = src.new_page(width=width, height=height)
+    step = width / parts
+    for k in range(parts):
+        page.draw_rect(fitz.Rect(k * step + step / 3, 2, (k + 1) * step - step / 3, height - 2), color=(0, 0, 0), fill=(.8, .9, 1), width=.8)
+    return page.get_pixmap(dpi=150, alpha=False)
+
+
+def prose(page, x0, x1, y, text, size=SIZE, pitch=1.6, indent=2):
+    """A paragraph from baseline y in a column x0..x1, its first line indented by indent em; returns the next baseline."""
+    per, first = int((x1 - x0) // size), True
+    while text:
+        room = per - (indent if first else 0)
+        write(page, x0 + (indent * size if first else 0), y, text[:room], size)
+        text, y, first = text[room:], y + size * pitch, False
+    return y
 
 
 class StubbedOcr(unittest.TestCase):
@@ -413,6 +438,43 @@ class OneCharacterCells(StubbedOcr):
         self.assertFalse(any("chữ dọc" in w for w in document["warnings"]), document["warnings"])
         self.assertEqual("".join(b["source"] for b in document["pages"][0]["blocks"][1:]), "".join(chars))
 
+    def test_one_character_columns_of_three_line_tables_are_no_vertical_text(self):
+        # rules only over the table, under its header and under it: a result column of one character seven em right of
+        # the cells before it, and group labels in the first column of a table of four equal columns
+        tables = ((1.6, ((72, 150), (150, 330), (330, 440), (440, 523)), [("物质", "实验操作", "现象", "导电")]
+                   + [(name, "接入电路，闭合开关", ("灯泡发光", "灯泡不亮")[k % 2], "是否"[k % 2]) for k, name in enumerate(("食盐水", "蔗糖水", "稀硫酸", "酒精", "石墨"))]),
+                  (1.4, ((72, 185), (185, 298), (298, 411), (411, 523)), [("组别", "处理方法", "温度", "结果")] + [(group, "加水浸泡", "二十五度", "萌发") for group in "甲乙丙丁"]))
+        for pitch, cols, rows in tables:
+            doc = fitz.open()
+            page = doc.new_page(width=595, height=842)
+            write(page, 72, 80, "下表记录了几组实验的结果。")
+            top, height = 96, pitch * SIZE
+            page.draw_line((72, top), (523, top), width=1.2)
+            for r, cells in enumerate(rows):
+                for (a, b), text in zip(cols, cells):
+                    write(page, (a + b) / 2 - font("china-s").text_length(text, fontsize=SIZE) / 2, top + r * height + .72 * height, text)
+            page.draw_line((72, top + height), (523, top + height), width=.6)
+            page.draw_line((72, top + len(rows) * height), (523, top + len(rows) * height), width=1.2)
+            document = run(doc)
+            page = document["pages"][0]
+            self.assertEqual(page["protectedRegions"], [], f"row pitch {pitch} em")
+            self.assertFalse(any("in dọc" in w for w in document["warnings"]), document["warnings"])
+            self.assertEqual([b["source"] for b in page["blocks"]][1:], [cell for row in rows for cell in row], f"row pitch {pitch} em")
+
+    def test_a_side_label_on_the_baselines_of_the_body_is_still_vertical_text(self):
+        doc = fitz.open()
+        page = doc.new_page(width=595, height=842)
+        # one glyph a line at the body's own line pitch, two and a half em left of it: its glyphs share their baselines
+        # with the long lines of the body, which are no cells of a table
+        for k, ch in enumerate("第一单元力与运动"):
+            write(page, 60, 120 + k * 1.6 * SIZE, ch)
+        prose(page, 96, 474, 120, (TEXT * 2)[:178])
+        document = run(doc)
+        page = document["pages"][0]
+        self.assertEqual([b["source"].replace("\n", "") for b in page["blocks"]], [(TEXT * 2)[:178]])
+        self.assertEqual(len(page["protectedRegions"]), 1)
+        self.assertTrue(any(w.startswith("Trang 1: có 8 chữ Hán in dọc hoặc in xoay") for w in document["warnings"]), document["warnings"])
+
 
 class SplitLines(StubbedOcr):
     """MuPDF cuts a printed line where a picture or a drawing stands in it, or where its glyphs are spaced an em apart.
@@ -565,6 +627,45 @@ class Order(StubbedOcr):
         self.assertEqual([b["source"][:4] for b in blocks[:4]], ["第五课　", left[:4], right[:4], "大事年表"], [b["source"][:8] for b in blocks])
         self.assertEqual(starts[3:], sorted(starts[3:]))
 
+    def test_a_longer_column_goes_on_after_a_heading_or_a_figure_before_the_other_column(self):
+        left, right, more, first = (TEXT * 3)[:200], (TEXT * 3)[40:190], TEXT[:60], (TEXT * 3)[100:250]
+        # the left column runs on below the right one with a heading and a paragraph
+        doc = fitz.open()
+        page = doc.new_page(width=595, height=842)
+        write(page, 230, 70, "第二单元　春秋战国", 16)
+        y = prose(page, 50, 285, 110, left)
+        prose(page, 310, 545, 110, right)
+        write(page, 50, y + 8, "二、百家争鸣", 12)
+        prose(page, 50, 285, y + 30, more)
+        # the left column holds a picture and its caption under its first paragraph, then a box spans both columns
+        page = doc.new_page(width=595, height=842)
+        write(page, 200, 70, "第五课　秦统一中国", 16)
+        y = prose(page, 50, 285, 110, first)
+        page.insert_image(fitz.Rect(90, y + 4, 230, y + 94), pixmap=drawing(120, 80))
+        write(page, 120, y + 108, "图5-1　秦半两钱", 9)
+        y = prose(page, 50, 285, y + 130, more)
+        bottom = max(y, prose(page, 310, 545, 110, right)) + 20
+        page.draw_rect(fitz.Rect(50, bottom, 545, bottom + 60), width=.6)
+        write(page, 60, bottom + 18, "【知识拓展】", 11)
+        write(page, 60, bottom + 38, TEXT[60:105])
+        # an exam page: the left column runs one item longer, then the next section's heading and a question set across
+        # the page; the heading goes with the question, after both columns
+        page = doc.new_page(width=595, height=842)
+        write(page, 50, 70, "一、选择题", 12)
+        items = [f"{k + 1}．" + (TEXT * 2)[k * 20:k * 20 + 42] for k in range(9)]
+        y = yr = 95
+        for k, item in enumerate(items):
+            if k < 5:
+                y = prose(page, 50, 285, y, item, indent=0) + 4
+            else:
+                yr = prose(page, 310, 545, yr, item, indent=0) + 4
+        write(page, 50, y + 10, "二、填空题", 12)
+        prose(page, 50, 545, y + 34, "10．" + TEXT[20:100], indent=0)
+        pages = run(doc, "1-3")["pages"]
+        self.assertEqual([b["source"].replace("\n", "") for b in pages[0]["blocks"]], ["第二单元　春秋战国", left, "二、百家争鸣", more, right])
+        self.assertEqual([b["source"].replace("\n", "") for b in pages[1]["blocks"]], ["第五课　秦统一中国", first, "图5-1　秦半两钱", more, right, "【知识拓展】", TEXT[60:105]])
+        self.assertEqual([b["source"].replace("\n", "") for b in pages[2]["blocks"]], ["一、选择题"] + items + ["二、填空题", "10．" + TEXT[20:100]])
+
 
 class Boxes(StubbedOcr):
     def test_a_short_line_keeps_its_box_off_the_margin_and_off_its_neighbours(self):
@@ -610,6 +711,161 @@ class Citations(StubbedOcr):
         block = page["blocks"][0]
         self.assertEqual(block["source"], "已知函数@@PDF_INLINE_1@@。")
         self.assertEqual(block["inlines"][0]["text"], "f(x)=x+1")
+
+
+class Pinyin(StubbedOcr):
+    """Pinyin over a Han line is its markup whatever else it holds: an erhua r (nǎr, diǎnr), quotes and brackets, a
+    speaker's label, a digit, an ellipsis, tone marks written as combining marks. Every line stays in its paragraph and
+    no pinyin stays printed under the translation. A gloss is no pinyin, and a crafted line is judged in linear time."""
+
+    rows = (("小鸟在树上唱歌，", "xiǎo niǎo zài shù shàng chàng gē,"), ("我们一点儿也不累呀，", "wǒ men yì diǎnr yě bú lèi ya,"),
+            ("“去哪儿？”他问道，", "“Qù nǎr?” tā wèn dào,"), ("B：（下午）3点去，", "B：（xià wǔ）3 diǎn qù,"),
+            ("同学们都一齐回来了。", unicodedata.normalize("NFD", "tóng xué men") + " dōu yì " + unicodedata.normalize("NFD", "qí huí lái") + " le……"))
+
+    def test_pinyin_with_erhua_quotes_labels_and_digits_is_markup_of_its_lines(self):
+        doc = fitz.open()
+        page = doc.new_page(width=595, height=842)
+        y, marks = 120, []
+        for k, (han, sound) in enumerate(self.rows):
+            x = 72 + (28 if k == 0 else 0)
+            marks.append(fitz.Rect(x, y - 21, other_font(page, x, y - 14.32, sound, 7), y - 13))
+            write(page, x, y, han, 14)
+            y += 2.4 * 14
+        page = run(doc)["pages"][0]
+        self.assertEqual([b["source"] for b in page["blocks"]], ["\n".join(han for han, _ in self.rows)])
+        for rect in marks:
+            self.assertEqual(inked(page["background"], 595, rect), 0, f"{rect}: the pinyin leaves the background with its line")
+
+    def test_pinyin_is_told_from_glosses(self):
+        for text in ("Nǐ qù nǎr?", "zhèr yǒu yì diǎnr", "yíhuìr", "wánr", "huār", "“Nǐ hǎo!” lǎoshī shuō.", "(nǐ hǎo)", "（nǐ hǎo）", "wǒ 3 diǎn qù",
+                     "B：Nǐ hǎo!", "Wǒ xǐhuan kàn shū……", unicodedata.normalize("NFD", "nǐ hǎo"), "nĭ hăo", "Xī'ān", "lǜsè", "ɡē ɡe"):
+            self.assertTrue(extract.pinyin(text), text)
+        for text in ("nucleus", "Photo: Xinhua News Agency", "Chapter 1  Mechanical Motion", "x->0", "MnO2", "ni3 hao3", "……", ""):
+            self.assertFalse(extract.pinyin(text), text)
+        self.assertEqual(extract.pinyin_marks(["xiǎo niǎo", "nucleus", "“", "zài"]), [0, 2, 3], "a gloss beside pinyin is no pinyin")
+
+    def test_a_crafted_line_is_judged_in_linear_time(self):
+        started = time.perf_counter()
+        self.assertFalse(extract.pinyin("ā " + "nan" * 12 + "q"))
+        self.assertLess(time.perf_counter() - started, 1)
+        started = time.perf_counter()
+        self.assertFalse(extract.pinyin("ā " + "nan" * 4000 + "q"))
+        self.assertTrue(extract.pinyin("ā " + "zhuangr" * 2000))
+        self.assertLess(time.perf_counter() - started, 1)
+
+
+class Labels(StubbedOcr):
+    """One-character labels side by side are no letter-spaced line when each is tied to what stands over or under it:
+    the drawings or the picture of a figure they name, the columns of numbers under a table's header. A letter-spaced
+    heading still joins, a rule under it and a centred subtitle notwithstanding."""
+
+    def test_the_labels_of_a_figure_and_the_header_of_a_table_stay_apart(self):
+        doc = fitz.open()
+        page = doc.new_page(width=595, height=842)
+        write(page, 72, 80, "如图所示，取几只相同的烧杯，分别加入等量的不同液体。")
+        for k, label in enumerate("甲乙丙"):  # beakers drawn as paths, three em apart
+            cx = 200 + 3 * SIZE * k
+            page.draw_polyline([(cx - 11, 100), (cx - 11, 134), (cx + 11, 134), (cx + 11, 100)], width=.8)
+            write(page, cx - SIZE / 2, 150, label)
+        for k, label in enumerate("甲乙丙丁"):  # circles drawn as paths
+            cx = 200 + 33 * k
+            page.draw_circle((cx, 190), 12, width=.8)
+            write(page, cx - SIZE / 2, 222, label)
+        page.insert_image(fitz.Rect(178.5, 245, 318.5, 285), pixmap=drawing(140, 40, 4))  # one picture of four tubes
+        for k, label in enumerate("甲乙丙丁"):
+            write(page, 196 + 35 * k - SIZE / 2, 302, label)
+        # a three-line table whose header names groups with one character each over columns of decimals
+        top, xs = 330, (110, 166, 202, 238, 274)
+        page.draw_line((72, top), (330, top), width=1.2)
+        for x, text in zip(xs, ("温度", "甲", "乙", "丙", "丁")):
+            write(page, x - font("china-s").text_length(text, fontsize=SIZE) / 2, top + 14, text)
+        page.draw_line((72, top + 19), (330, top + 19), width=.6)
+        for r, cells in enumerate((("10", "2.5", "3.1", "1.8", "2.2"), ("20", "4.6", "5.2", "3.9", "4.1"))):
+            for x, text in zip(xs, cells):
+                latin(page, x - font("tiro").text_length(text, fontsize=SIZE) / 2, top + 33 + 16 * r, text)
+        page.draw_line((72, top + 54), (330, top + 54), width=1.2)
+        write(page, 72, top + 80, "哪一组植物的生长量受温度影响最大？")
+        blocks = run(doc)["pages"][0]["blocks"]
+        self.assertEqual([b["source"] for b in blocks], ["如图所示，取几只相同的烧杯，分别加入等量的不同液体。"] + list("甲乙丙") + list("甲乙丙丁") * 2
+                         + ["温度"] + list("甲乙丙丁") + ["哪一组植物的生长量受温度影响最大？"])
+
+    def test_a_letter_spaced_heading_over_a_rule_and_a_centred_subtitle_is_one_block(self):
+        doc = fitz.open()
+        page = doc.new_page(width=595, height=842)
+        for k, ch in enumerate("第一章"):  # its middle glyph lines up with the subtitle
+            write(page, 257.5 + 32 * k, 100, ch, 16)
+        page.draw_line((200, 106), (395, 106), width=.8)
+        subtitle = "（第二版）"
+        write(page, 297.5 - font("china-s").text_length(subtitle, fontsize=SIZE) / 2, 124, subtitle)
+        write(page, 72, 170, TEXT[:40])
+        self.assertEqual([b["source"] for b in run(doc)["pages"][0]["blocks"]], ["第一章", subtitle, TEXT[:40]])
+
+
+class RuledPaper(StubbedOcr):
+    """A paragraph written on paper ruled for writing (a rule under each line, longer than its text) or on graph paper
+    (a grid drawn as one path) is one block. The rules of a table without upright borders carry the other cells of
+    their row and still part its rows."""
+
+    def test_a_paragraph_on_ruled_or_graph_paper_is_one_block(self):
+        text = (TEXT * 2)[:118]
+        doc = fitz.open()
+        page = doc.new_page(width=595, height=842)
+        write(page, 240, 80, "范文　我的家乡", 14)
+        for k in range(5):  # a rule three points under each baseline, a path of its own from margin to margin
+            page.draw_line((60, 123 + 24 * k), (535, 123 + 24 * k), color=(.6, .6, .6), width=.5)
+        prose(page, 72, 492, 120, text, pitch=24 / SIZE)
+        page = doc.new_page(width=595, height=842)
+        shape = page.new_shape()  # a grid of five points drawn as one path
+        for k in range(96):
+            shape.draw_line((60 + 5 * k, 60), (60 + 5 * k, 300))
+        for k in range(49):
+            shape.draw_line((60, 60 + 5 * k), (535, 60 + 5 * k))
+        shape.finish(color=(.75, .85, .95), width=.4)
+        shape.commit()
+        prose(page, 72, 492, 80, text, pitch=24 / SIZE)
+        pages = run(doc, "1-2")["pages"]
+        self.assertEqual([b["source"].replace("\n", "") for b in pages[0]["blocks"]], ["范文　我的家乡", text])
+        self.assertEqual([b["source"].replace("\n", "") for b in pages[1]["blocks"]], [text])
+
+    def test_the_rows_of_a_table_ruled_across_without_upright_borders_stay_apart(self):
+        doc = fitz.open()
+        page = doc.new_page(width=595, height=842)
+        for r in range(len(TightTables.rows) + 1):
+            page.draw_line((72, 92 + 17 * r), (444, 92 + 17 * r), width=.5)
+        for r, (name, text) in enumerate(TightTables.rows):
+            write(page, 77.4, 92 + 17 * (r + 1) - 3.4, name)
+            write(page, 145.4, 92 + 17 * (r + 1) - 3.4, text)
+        blocks = run(doc)["pages"][0]["blocks"]
+        self.assertEqual([b["source"] for b in blocks], [cell for row in TightTables.rows for cell in row])
+
+
+class CompoundPaths(StubbedOcr):
+    def test_a_compound_path_of_many_strokes_keeps_extraction_fast(self):
+        def page_with(strokes):
+            doc = fitz.open()
+            page = doc.new_page(width=595, height=842)
+            for k in range(20):
+                write(page, 72, 80 + 17 * k, (TEXT * 2)[k:k + 40])
+            for k in range(10):
+                write(page, 72, 640 + 17 * k, (TEXT * 2)[k + 20:k + 60])
+            if strokes:
+                # a hatched region of a figure under part of the text: short slanted strokes of one path, written into the
+                # page's content stream (a Shape takes minutes to build so many)
+                ops = "".join(f"{300 + k % 200 * 1.2:.2f} {392 - k // 200 * 1.2:.2f} m {306 + k % 200 * 1.2:.2f} {390.8 - k // 200 * 1.2:.2f} l\n" for k in range(strokes))
+                xref = doc.get_new_xref()
+                doc.update_object(xref, "<<>>")
+                doc.update_stream(xref, f"q 0 G .3 w\n{ops}S Q\n".encode("ascii"))
+                doc.xref_set_key(page.xref, "Contents", "[" + " ".join(f"{x} 0 R" for x in page.get_contents() + [xref]) + "]")
+            return doc.tobytes()
+        pages = [page_with(0), page_with(60000)]
+        started = time.perf_counter()
+        plain = [b["source"] for b in run(pages[0])["pages"][0]["blocks"]]
+        alone = time.perf_counter() - started
+        started = time.perf_counter()
+        hatched = [b["source"] for b in run(pages[1])["pages"][0]["blocks"]]
+        spent = time.perf_counter() - started
+        self.assertEqual(hatched, plain)
+        self.assertLess(spent, 10 * alone + 4, f"{spent:.1f} s with 60,000 strokes against {alone:.2f} s without")
 
 
 class Settings(unittest.TestCase):

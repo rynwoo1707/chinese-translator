@@ -43,6 +43,31 @@ test('Gemini not serving the server\'s location is waited out with the key kept;
  assert.doesNotMatch(Object.keys(book).filter(name=>/Message$/u.test(name)).flatMap(name=>['stopped','busy','gemini_unavailable','quota_day','quota','quota_minute','gemini_key','rate_limited','pdf_busy','pdf_account','gemini_location','history_full','conflict','network','limit','x'].map(reason=>book[name](reason,null,0))).join('\n'),/thẻ/u);
 });
 
+test('A save that fails after Gemini translated part of a chunk pauses the book saying that part is only in this tab, never that the progress is saved; with nothing translated yet, or a copy saved elsewhere, the pause is as before',async()=>{
+ const FULL='Lịch sử dịch của tài khoản đã dùng 500 MB, mức tối đa cho mỗi tài khoản. Hãy xóa trong Lịch sử dịch những bản dịch không cần nữa rồi thử lại.';
+ // As study.js saveBeforeSpending throws them: a refusal keeps the server's words and code, anything else is a lost connection.
+ const failed=(status,data,message,keptInTab=true)=>Object.assign(error(status,data,message),{code:'save_failed',keptInTab});
+ const KEPT=' Phần đã dịch vẫn hiện trong tab này: đừng đóng tab. Các trang đã xong trước đó đã lưu; ';
+ assert.equal(book.pauseMessage('history_full',failed(413,{code:'history_full'},FULL)),`${FULL}${KEPT}dọn bớt xong, bấm Tiếp tục dịch cả quyển ở tab này.`);
+ assert.equal(book.pauseMessage('network',failed(0,undefined,'Đã dừng vì chưa lưu được tiến độ vào tài khoản, nên Hoa Trí không gửi thêm yêu cầu tới Gemini. Phần đã dịch vẫn hiện trong tab này: đừng đóng tab. Kiểm tra mạng rồi bấm Bắt đầu dịch để lưu và dịch tiếp.')),`Mất kết nối tới máy chủ.${KEPT}khi mạng ổn định, bấm Tiếp tục dịch cả quyển ở tab này.`);
+ assert.equal(book.pauseMessage('error',failed(400,{code:'history_invalid'},'Phiên bản lịch sử không hợp lệ.')),`Phiên bản lịch sử không hợp lệ.${KEPT}bấm Tiếp tục dịch cả quyển ở tab này để lưu và dịch tiếp.`);
+ assert.doesNotMatch(['history_full','network','error','rate_limited','limit','too_many_parts'].map(reason=>book.pauseMessage(reason,failed(413,{code:reason},FULL))).join('\n'),/Tiến độ (?:của quyển )?đã lưu/u);
+ assert.equal(book.pauseMessage('history_full',failed(413,{code:'history_full'},FULL,false)),`${FULL} Tiến độ của quyển đã lưu; dọn bớt xong, bấm Tiếp tục dịch cả quyển.`);
+ assert.match(book.pauseMessage('conflict',failed(409,{code:'history_conflict'},'Bản dịch này vừa được lưu từ một tab hoặc thiết bị khác.')),/^Phần đang dịch vừa được lưu từ một tab hoặc thiết bị khác.*Tiến độ của quyển đã lưu; bấm Tiếp tục dịch cả quyển để mở bản mới nhất/u);
+ // Through a run: the translate step's save is refused after a paid batch, and the run pauses for it in those words.
+ const job={id:'0b7e2a43-0000-4000-8000-000000000003',sourceSha256:'e'.repeat(64),filename:'sach.pdf',title:'Sách',storyId:null,totalPages:2,pageStates:'..',chunkSize:20,status:'ready',pauseReason:null,usage:{prompt:0,output:0,thinking:0,total:0,requests:0},glossary:{},createdAt:'2026-10-18T10:00:00.000Z',runner:null,leaseSeconds:0};
+ let current=job;
+ const api=async(path,options={})=>{
+  if(path===`book-jobs/${job.id}`){const body=JSON.parse(options.body);current={...current,...(body.status?{status:body.status,pauseReason:body.pauseReason??null}:{})};return {job:current};}
+  if(path==='pdf-layout/extract')return {assetId:'asset-0',document:{pages:[1,2].map(number=>({number,blocks:[{id:`p${number}-b1`}]}))}};
+  throw new Error(`unexpected ${path}`);
+ };
+ const steps={async open(){return null;},async start(){},async translate(){throw failed(413,{code:'history_full'},FULL);},async finish(){return {storyId:null,glossary:{}};}};
+ const outcome=await book.createBookRun({api,steps,source:{cut:async pages=>new Uint8Array(pages.length*10)},reports:book.reportStore(),sleep:async()=>false}).run(job);
+ assert.deepEqual({status:outcome.status,reason:outcome.reason,message:outcome.message},{status:'paused',reason:'history_full',message:`${FULL}${KEPT}dọn bớt xong, bấm Tiếp tục dịch cả quyển ở tab này.`});
+ assert.equal(current.pauseReason,'history_full');
+});
+
 // A run over a fake job: chunks are cut as the run asks, extraction numbers pages from the chunk's offset, and start()
 // may refuse a chunk as the history save does.
 function miniRun({total=25,start=null}={}){
