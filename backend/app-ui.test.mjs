@@ -5,7 +5,7 @@ import {readFile} from 'node:fs/promises';
 import {renderMathText,mathStyles} from '../frontend/math-text.js';
 import {termMatcher,highlightTerms,bindTermPopover} from '../frontend/reader-terms.js';
 import {footerHtml} from '../frontend/site-footer.js';
-import {isSample,sampleBadge,sampleCardNote,sampleIntro,sampleReaderNotice,SAMPLE_LABEL} from '../frontend/library-samples.js';
+import {isSample,sampleBadge,sampleCardNote,sampleReaderNotice,SAMPLE_LABEL} from '../frontend/library-samples.js';
 import {bilingualSource} from '../frontend/bilingual-reader.js';
 
 // app.js runs as in access-upload.test.mjs: imports stripped, the imported names given to the context, a fake fetch.
@@ -13,7 +13,7 @@ const source=(await readFile(new URL('../frontend/app.js',import.meta.url),'utf8
 const SHA='b'.repeat(64);
 function app({pathname='/'}={}){
  const root={innerHTML:''},calls=[];
- const context=vm.createContext({musicMarkup:()=>'',bindMusic(){},renderMathText,mathStyles,termMatcher,highlightTerms,bindTermPopover,hideTermPopover(){},attachHanziLookup(){},openHanziPanel(){},closeHanziPanel(){},setHanziTheme(){},footerHtml,isSample,sampleBadge,sampleCardNote,sampleIntro,sampleReaderNotice,SAMPLE_LABEL,bilingualSource,mountBilingual(){return {destroy(){}};},releaseBilingual(){},location:{pathname,hash:'',search:''},document:{querySelector:selector=>selector==='#app'?root:selector==='#modal'?{close(){}}:null,querySelectorAll:()=>[]},localStorage:{getItem:()=>null},window:{addEventListener(){}},setTimeout,clearTimeout,clearInterval,FormData,URL,console});
+ const context=vm.createContext({musicMarkup:()=>'',bindMusic(){},renderMathText,mathStyles,termMatcher,highlightTerms,bindTermPopover,hideTermPopover(){},attachHanziLookup(){},openHanziPanel(){},closeHanziPanel(){},setHanziTheme(){},footerHtml,isSample,sampleBadge,sampleCardNote,sampleReaderNotice,SAMPLE_LABEL,bilingualSource,mountBilingual(){return {destroy(){}};},releaseBilingual(){},location:{pathname,hash:'',search:''},document:{querySelector:selector=>selector==='#app'?root:selector==='#modal'?{close(){}}:null,querySelectorAll:()=>[]},localStorage:{getItem:()=>null},window:{addEventListener(){}},setTimeout,clearTimeout,clearInterval,FormData,URL,console});
  context.fetch=async(url,init)=>{calls.push({url,init});return {ok:true,status:200,json:async()=>pathname.startsWith('/admin')?{authenticated:false}:[]};};
  vm.runInContext(source,context);
  return {root,calls,context,run:code=>vm.runInContext(code,context)};
@@ -78,7 +78,7 @@ test('Library: samples carry the badge, the card note and the intro; the footer 
  const {run}=app();
  const html=run(`state.loaded=true;state.route='library';state.library=[{id:'s',title:'Hàm số',genre:'Toán học · STEM',chapters:2,sample:1,translated_pages:4},{id:'p',title:'Sử ký',genre:'Lịch sử Trung Hoa',chapters:1,sample:0}];publicLayout()`);
  assert.equal((html.match(/class="sample-badge"/gu)||[]).length,1);assert.match(html,/aria-label="Mở tài liệu Hàm số · Ví dụ mẫu"/u);assert.match(html,/aria-label="Mở tài liệu Sử ký"/u);
- assert.match(html,/4 trang dịch mẫu · giữ bố cục gốc/u);assert.match(html,/class="sample-intro"/u);
+ assert.match(html,/4 trang dịch mẫu · giữ bố cục gốc/u);assert.doesNotMatch(html,/sample-intro|Mới dùng Hoa Trí/u,'no sample hint above the library');
  assert.ok(html.includes(`<footer class="site-footer" data-site-footer>${footerHtml()}</footer>`));
 });
 

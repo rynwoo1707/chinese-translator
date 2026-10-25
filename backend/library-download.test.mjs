@@ -11,7 +11,7 @@ import * as assembly from '../frontend/book-assembly.js';
 import {renderMathText,mathStyles} from '../frontend/math-text.js';
 import {termMatcher,highlightTerms,bindTermPopover} from '../frontend/reader-terms.js';
 import {footerHtml} from '../frontend/site-footer.js';
-import {isSample,sampleBadge,sampleCardNote,sampleIntro,sampleReaderNotice,SAMPLE_LABEL} from '../frontend/library-samples.js';
+import {isSample,sampleBadge,sampleCardNote,sampleReaderNotice,SAMPLE_LABEL} from '../frontend/library-samples.js';
 import {bilingualSource} from '../frontend/bilingual-reader.js';
 
 // "Tải cả quyển" of a public library book, end to end: the real Worker on node:sqlite (every migration) with an
@@ -53,7 +53,7 @@ async function book(t){
 const source=(await readFile(new URL('../frontend/app.js',import.meta.url),'utf8')).replace(/^import .*\r?\n/gmu,'');
 async function reader(env,{fetch=null}={}){
  const saved=[],root={innerHTML:''};
- const context=vm.createContext({musicMarkup:()=>'',bindMusic(){},renderMathText,mathStyles,termMatcher,highlightTerms,bindTermPopover,hideTermPopover(){},attachHanziLookup(){},openHanziPanel(){},closeHanziPanel(){},setHanziTheme(){},footerHtml,isSample,sampleBadge,sampleCardNote,sampleIntro,sampleReaderNotice,SAMPLE_LABEL,bilingualSource,mountBilingual(){return {destroy(){}};},releaseBilingual(){},
+ const context=vm.createContext({musicMarkup:()=>'',bindMusic(){},renderMathText,mathStyles,termMatcher,highlightTerms,bindTermPopover,hideTermPopover(){},attachHanziLookup(){},openHanziPanel(){},closeHanziPanel(){},setHanziTheme(){},footerHtml,isSample,sampleBadge,sampleCardNote,sampleReaderNotice,SAMPLE_LABEL,bilingualSource,mountBilingual(){return {destroy(){}};},releaseBilingual(){},
   location:{pathname:'/',hash:'',search:''},document:{querySelector:selector=>selector==='#app'?root:null,querySelectorAll:()=>[],createElement:()=>({click(){},remove(){}}),body:{append(){}}},localStorage:{getItem:()=>null},window:{addEventListener(){}},
   URL:{createObjectURL:blob=>{saved.push(blob);return 'blob:hoatri';},revokeObjectURL(){}},Blob,setTimeout:(fn,ms)=>{const timer=setTimeout(fn,ms);timer.unref?.();return timer;},clearTimeout,clearInterval,FormData,console});
  context.fetch=fetch||((url,init={})=>worker.fetch(new Request(new URL(url,ORIGIN),{method:init.method||'GET',headers:init.headers,body:init.body}),env,{}));

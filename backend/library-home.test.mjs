@@ -5,7 +5,7 @@ import {readFile} from 'node:fs/promises';
 import {renderMathText,mathStyles} from '../frontend/math-text.js';
 import {termMatcher,highlightTerms,bindTermPopover} from '../frontend/reader-terms.js';
 import {footerHtml} from '../frontend/site-footer.js';
-import {isSample,sampleBadge,sampleCardNote,sampleIntro,sampleReaderNotice,SAMPLE_LABEL} from '../frontend/library-samples.js';
+import {isSample,sampleBadge,sampleCardNote,sampleReaderNotice,SAMPLE_LABEL} from '../frontend/library-samples.js';
 import {bilingualSource} from '../frontend/bilingual-reader.js';
 
 // The home page, deep links and reader chrome of app.js, run as in app-ui.test.mjs (imports stripped and given, a fake
@@ -19,7 +19,7 @@ function app({pathname='/',hash='',search='',answers=()=>null,compact=false}={})
  function apply(url){const parsed=new URL(url,'https://hoatri.test');location.pathname=parsed.pathname;location.search=parsed.search;location.hash=parsed.hash;}
  const toast={textContent:'',style:{}},modal={open:false,innerHTML:'',close(){this.open=false;},showModal(){this.open=true;},addEventListener(){}};
  const document={title:'',querySelector:selector=>({'#app':root,'#toast':toast,'#modal':modal})[selector]||null,querySelectorAll:()=>[]};
- const context=vm.createContext({musicMarkup:()=>'<div class="background-music">♫</div>',bindMusic(){},renderMathText,mathStyles,termMatcher,highlightTerms,bindTermPopover,hideTermPopover(){},attachHanziLookup(){},openHanziPanel(){},closeHanziPanel(){},setHanziTheme(){},footerHtml,isSample,sampleBadge,sampleCardNote,sampleIntro,sampleReaderNotice,SAMPLE_LABEL,bilingualSource,mountBilingual(){return {destroy(){}};},mountPdfPages(){return {destroy(){}};},releaseBilingual(){},
+ const context=vm.createContext({musicMarkup:()=>'<div class="background-music">♫</div>',bindMusic(){},renderMathText,mathStyles,termMatcher,highlightTerms,bindTermPopover,hideTermPopover(){},attachHanziLookup(){},openHanziPanel(){},closeHanziPanel(){},setHanziTheme(){},footerHtml,isSample,sampleBadge,sampleCardNote,sampleReaderNotice,SAMPLE_LABEL,bilingualSource,mountBilingual(){return {destroy(){}};},mountPdfPages(){return {destroy(){}};},releaseBilingual(){},
   location,history,document,matchMedia:query=>({matches:compact&&/max-width: 768px/u.test(query),addEventListener(){}}),localStorage:{getItem:()=>null},window:{addEventListener(){}},setTimeout,clearTimeout,clearInterval,FormData,console});
  context.fetch=async url=>{calls.push(url);const [status,body]=answers(url)||[200,url==='/api/me'?{authenticated:false}:url.startsWith('/api/my/')?{error:'Hãy đăng nhập.'}:[]];return {ok:status<300,status:url.startsWith('/api/my/')&&!answers(url)?401:status,json:async()=>body};};
  vm.runInContext(source,context);
@@ -33,9 +33,9 @@ test('Home: says what Hoa Trí does, for whom, with the two actions and the trus
  assert.equal(document.title,'Hoa Trí — Dịch tiếng Trung sang tiếng Việt, giữ bố cục trang');
  assert.match(html,/<p class="eyebrow">DÀNH CHO HỌC SINH VÀ GIÁO VIÊN<\/p>/u);
  assert.match(html,/<h1 id="home-title">Dịch tài liệu tiếng Trung sang tiếng Việt, giữ nguyên bố cục trang<\/h1>/u);
- assert.match(html,/pinyin, âm Hán Việt và nghĩa/u);assert.match(html,/khóa Gemini của chính mình/u);
+ assert.doesNotMatch(html,/hero-lead|Đưa PDF, sách điện tử/u,'no lead paragraph under the title');
  assert.match(html,/<a class="hero-cta hero-cta-primary" href="\/study">Dịch tài liệu của tôi <span aria-hidden="true">→<\/span><\/a><a class="hero-cta" href="#thu-vien" id="show-library">Xem thư viện<\/a>/u);
- assert.match(html,/Không quảng cáo, không theo dõi/u);assert.match(html,/Mã nguồn mở/u);
+ assert.doesNotMatch(html,/hero-trust|Không quảng cáo, không theo dõi/u,'no small commitment lines under the buttons');
  assert.doesNotMatch(html,/sử liệu, cổ văn|đã được đối chiếu|giáo viên đã duyệt/u,'no claim that the library is reviewed');
  assert.doesNotMatch(html,/study\.html/u,'workspace links use /study');assert.match(html,/<a href="\/study">/u);
  // Title visible under every cover; a ready book's cover opens it, a book without parts has no button.

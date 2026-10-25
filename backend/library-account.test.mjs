@@ -5,7 +5,7 @@ import {readFile} from 'node:fs/promises';
 import {renderMathText,mathStyles} from '../frontend/math-text.js';
 import {termMatcher,highlightTerms,bindTermPopover} from '../frontend/reader-terms.js';
 import {footerHtml} from '../frontend/site-footer.js';
-import {isSample,sampleBadge,sampleCardNote,sampleIntro,sampleReaderNotice,SAMPLE_LABEL} from '../frontend/library-samples.js';
+import {isSample,sampleBadge,sampleCardNote,sampleReaderNotice,SAMPLE_LABEL} from '../frontend/library-samples.js';
 import {bilingualSource} from '../frontend/bilingual-reader.js';
 
 // Account, sign-in, password reset (contract 7), admin reset links and the request dialog of app.js, run as in
@@ -42,7 +42,7 @@ function app({pathname='/',hash='',answers=()=>null,elements={},lists={},stored=
  const session=new Map(Object.entries(stored)),sessionStorage={getItem:key=>session.has(key)?session.get(key):null,setItem:(key,value)=>session.set(key,String(value)),removeItem:key=>session.delete(key)};
  const clipboard={text:'',async writeText(text){this.text=text;}};
  const document={title:'',querySelector:selector=>known[selector]||null,querySelectorAll:selector=>lists[selector]||[]};
- const context=vm.createContext({musicMarkup:()=>'',bindMusic(){},renderMathText,mathStyles,termMatcher,highlightTerms,bindTermPopover,hideTermPopover(){},attachHanziLookup(){},openHanziPanel(){},closeHanziPanel(){},setHanziTheme(){},footerHtml,isSample,sampleBadge,sampleCardNote,sampleIntro,sampleReaderNotice,SAMPLE_LABEL,bilingualSource,mountBilingual(){return {destroy(){}};},mountPdfPages(){return {destroy(){}};},releaseBilingual(){},
+ const context=vm.createContext({musicMarkup:()=>'',bindMusic(){},renderMathText,mathStyles,termMatcher,highlightTerms,bindTermPopover,hideTermPopover(){},attachHanziLookup(){},openHanziPanel(){},closeHanziPanel(){},setHanziTheme(){},footerHtml,isSample,sampleBadge,sampleCardNote,sampleReaderNotice,SAMPLE_LABEL,bilingualSource,mountBilingual(){return {destroy(){}};},mountPdfPages(){return {destroy(){}};},releaseBilingual(){},
   location,history,document,sessionStorage,navigator:{clipboard},matchMedia:()=>({matches:false,addEventListener(){}}),localStorage:{getItem:()=>null},window:{addEventListener(){}},setTimeout:(fn,ms)=>{const timer=setTimeout(fn,ms);timer.unref?.();return timer;},clearTimeout,clearInterval,FormData:FakeFormData,URL,console});
  context.fetch=async(url,init={})=>{calls.push({url,method:init.method||'GET',body:init.body});await new Promise(done=>setTimeout(done,1));const [status,body]=answers(url,init)||[200,url==='/api/me'?ME_OUT:url==='/api/status'?{authenticated:true}:[]];return {ok:status<300,status,json:async()=>body};};
  vm.runInContext(source,context);

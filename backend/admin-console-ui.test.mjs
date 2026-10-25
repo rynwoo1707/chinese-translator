@@ -5,7 +5,7 @@ import {readFile} from 'node:fs/promises';
 import {renderMathText,mathStyles} from '../frontend/math-text.js';
 import {termMatcher,highlightTerms,bindTermPopover} from '../frontend/reader-terms.js';
 import {footerHtml} from '../frontend/site-footer.js';
-import {isSample,sampleBadge,sampleCardNote,sampleIntro,sampleReaderNotice,SAMPLE_LABEL} from '../frontend/library-samples.js';
+import {isSample,sampleBadge,sampleCardNote,sampleReaderNotice,SAMPLE_LABEL} from '../frontend/library-samples.js';
 import {bilingualSource} from '../frontend/bilingual-reader.js';
 
 // The admin console against the paged light lists of backend/admin-lists.js: GET /api/stories, /api/jobs and
@@ -20,7 +20,7 @@ function console_(server,elements={},{all=()=>[],globals={}}={}){
  const root={innerHTML:''},calls=[],intervals=[],timeouts=[],listeners={},location={pathname:'/admin',hash:'',search:'',origin:'https://hoatri.test'};
  const toast={textContent:'',className:'',setAttribute(){}},modal={open:false,innerHTML:'',close(){this.open=false;},showModal(){this.open=true;},addEventListener(){},removeAttribute(){}};
  const document={title:'',visibilityState:'visible',querySelector:selector=>({'#app':root,'#toast':toast,'#modal':modal,...elements})[selector]||null,querySelectorAll:selector=>all(selector,root),addEventListener(type,fn){(listeners[type]||=[]).push(fn);}};
- const context=vm.createContext({musicMarkup:()=>'',bindMusic(){},renderMathText,mathStyles,termMatcher,highlightTerms,bindTermPopover,hideTermPopover(){},attachHanziLookup(){},openHanziPanel(){},closeHanziPanel(){},setHanziTheme(){},footerHtml,isSample,sampleBadge,sampleCardNote,sampleIntro,sampleReaderNotice,SAMPLE_LABEL,bilingualSource,mountBilingual(){return {destroy(){}};},mountPdfPages(){return {destroy(){}};},releaseBilingual(){},inAppBrowser:()=>null,openInBrowserHelp(){},
+ const context=vm.createContext({musicMarkup:()=>'',bindMusic(){},renderMathText,mathStyles,termMatcher,highlightTerms,bindTermPopover,hideTermPopover(){},attachHanziLookup(){},openHanziPanel(){},closeHanziPanel(){},setHanziTheme(){},footerHtml,isSample,sampleBadge,sampleCardNote,sampleReaderNotice,SAMPLE_LABEL,bilingualSource,mountBilingual(){return {destroy(){}};},mountPdfPages(){return {destroy(){}};},releaseBilingual(){},inAppBrowser:()=>null,openInBrowserHelp(){},
   location,document,matchMedia:()=>({matches:false,addEventListener(){}}),localStorage:{getItem:()=>null},sessionStorage:{getItem:()=>null,setItem(){},removeItem(){}},window:{addEventListener(type,fn){(listeners[type]||=[]).push(fn);}},setTimeout:(fn,ms)=>{timeouts.push({fn,ms});const timer=setTimeout(fn,ms);timer.unref?.();return timer;},clearTimeout,setInterval:fn=>{intervals.push(fn);return intervals.length;},clearInterval(){},FormData,console,...globals});
  context.fetch=async(url,init={})=>{
   calls.push({url,method:init.method||'GET',body:init.body,headers:init.headers||{}});await new Promise(done=>setTimeout(done,1));

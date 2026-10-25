@@ -9,7 +9,7 @@ import {PROMPT_VERSION,recognizeDocument,generate} from './ai.js';
 import {renderMathText,mathStyles} from '../frontend/math-text.js';
 import {termMatcher,highlightTerms,bindTermPopover} from '../frontend/reader-terms.js';
 import {footerHtml} from '../frontend/site-footer.js';
-import {isSample,sampleBadge,sampleCardNote,sampleIntro,sampleReaderNotice,SAMPLE_LABEL} from '../frontend/library-samples.js';
+import {isSample,sampleBadge,sampleCardNote,sampleReaderNotice,SAMPLE_LABEL} from '../frontend/library-samples.js';
 import {bilingualSource} from '../frontend/bilingual-reader.js';
 
 test('Readers cannot access management APIs or private configuration',async()=>{
@@ -46,7 +46,7 @@ test('Reader and admin layouts stay separated, including direct hashes and logou
  assert.doesNotMatch(runJobSource,/\/publish/,'Hoàn tất dịch không được tự động công bố');
  assert.doesNotMatch(source,/import-website|data-ai-cover|generateAiCover|\/web-import|\/generate-cover/);
  function browser(pathname,hash=''){
-  const app={innerHTML:''};const context=vm.createContext({musicMarkup:()=>'',bindMusic(){},renderMathText,mathStyles,termMatcher,highlightTerms,bindTermPopover,hideTermPopover:()=>{},attachHanziLookup(){},openHanziPanel(){},closeHanziPanel(){},setHanziTheme(){},footerHtml,isSample,sampleBadge,sampleCardNote,sampleIntro,sampleReaderNotice,SAMPLE_LABEL,bilingualSource,mountBilingual(){return {destroy(){}};},releaseBilingual(){},location:{pathname,hash},document:{querySelector:s=>s==='#app'?app:s==='#modal'?{close(){}}:null,querySelectorAll:()=>[]},localStorage:{getItem:()=>null},window:{addEventListener(){}},fetch:async()=>({ok:true,json:async()=>pathname.startsWith('/admin')?{authenticated:false}:[]}),setTimeout,clearTimeout,clearInterval,FormData,console});
+  const app={innerHTML:''};const context=vm.createContext({musicMarkup:()=>'',bindMusic(){},renderMathText,mathStyles,termMatcher,highlightTerms,bindTermPopover,hideTermPopover:()=>{},attachHanziLookup(){},openHanziPanel(){},closeHanziPanel(){},setHanziTheme(){},footerHtml,isSample,sampleBadge,sampleCardNote,sampleReaderNotice,SAMPLE_LABEL,bilingualSource,mountBilingual(){return {destroy(){}};},releaseBilingual(){},location:{pathname,hash},document:{querySelector:s=>s==='#app'?app:s==='#modal'?{close(){}}:null,querySelectorAll:()=>[]},localStorage:{getItem:()=>null},window:{addEventListener(){}},fetch:async()=>({ok:true,json:async()=>pathname.startsWith('/admin')?{authenticated:false}:[]}),setTimeout,clearTimeout,clearInterval,FormData,console});
   vm.runInContext(source,context);return {app,context};
  }
  for(const hash of ['','#translate','#requests','#users','#settings','#review']){

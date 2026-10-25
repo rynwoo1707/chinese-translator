@@ -5,7 +5,7 @@ import {readFile} from 'node:fs/promises';
 import {renderMathText,mathStyles} from '../frontend/math-text.js';
 import {termMatcher,highlightTerms,bindTermPopover} from '../frontend/reader-terms.js';
 import {footerHtml} from '../frontend/site-footer.js';
-import {isSample,sampleBadge,sampleCardNote,sampleIntro,sampleReaderNotice,SAMPLE_LABEL} from '../frontend/library-samples.js';
+import {isSample,sampleBadge,sampleCardNote,sampleReaderNotice,SAMPLE_LABEL} from '../frontend/library-samples.js';
 import {bilingualSource} from '../frontend/bilingual-reader.js';
 import {inAppBrowser,openInBrowserHelp} from '../frontend/in-app-browser.js';
 import {GOOGLE_FAILURE_CODES} from './reader-auth.js';
@@ -38,7 +38,7 @@ function app({hash='',answers=()=>null,elements={},agent='Mozilla/5.0 (Windows N
  const toast=new Element(),modal=new Element({open:false,showModal(){this.open=true;},close(){this.open=false;}}),modalForm=new Element(),modalError=new Element();
  const known={'#app':root,'#toast':toast,'#modal':modal,'#modal-form':modalForm,'#modal-error':modalError,'#close-modal':new Element(),...elements};
  const document={title:'',querySelector:selector=>known[selector]||null,querySelectorAll:()=>[]};
- const context=vm.createContext({musicMarkup:()=>'',bindMusic(){},renderMathText,mathStyles,termMatcher,highlightTerms,bindTermPopover,hideTermPopover(){},attachHanziLookup(){},openHanziPanel(){},closeHanziPanel(){},setHanziTheme(){},footerHtml,isSample,sampleBadge,sampleCardNote,sampleIntro,sampleReaderNotice,SAMPLE_LABEL,bilingualSource,mountBilingual(){return {destroy(){}};},mountPdfPages(){return {destroy(){}};},releaseBilingual(){},
+ const context=vm.createContext({musicMarkup:()=>'',bindMusic(){},renderMathText,mathStyles,termMatcher,highlightTerms,bindTermPopover,hideTermPopover(){},attachHanziLookup(){},openHanziPanel(){},closeHanziPanel(){},setHanziTheme(){},footerHtml,isSample,sampleBadge,sampleCardNote,sampleReaderNotice,SAMPLE_LABEL,bilingualSource,mountBilingual(){return {destroy(){}};},mountPdfPages(){return {destroy(){}};},releaseBilingual(){},
   inAppBrowser:()=>inAppBrowser(agent,{home:false}),openInBrowserHelp,
   location,history,document,sessionStorage:{getItem:()=>null,setItem(){},removeItem(){}},navigator:{clipboard:{async writeText(){}}},matchMedia:()=>({matches:false,addEventListener(){}}),localStorage:{getItem:()=>null},window:{addEventListener(){}},setTimeout:(fn,ms)=>{const timer=setTimeout(fn,ms);timer.unref?.();return timer;},clearTimeout,clearInterval,FormData:FakeFormData,console});
  context.fetch=async(url,init={})=>{calls.push({url,method:init.method||'GET',body:init.body});await new Promise(done=>setTimeout(done,1));const answer=answers(url,init);if(answer instanceof Error)throw answer;const [status,body]=answer||[200,url==='/api/me'?ME_OUT:[]];return {ok:status<300,status,json:async()=>body};};

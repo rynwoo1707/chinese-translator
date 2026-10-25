@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {isSample,sampleBadge,sampleCardNote,sampleIntro,sampleReaderNotice,SAMPLE_LABEL} from '../frontend/library-samples.js';
+import {isSample,sampleBadge,sampleCardNote,sampleReaderNotice,SAMPLE_LABEL} from '../frontend/library-samples.js';
 import {bilingualSource,nextZoom,ZOOMS} from '../frontend/bilingual-reader.js';
 
 const SHA='a'.repeat(64);
@@ -17,7 +17,6 @@ test('Sample card note, library intro and reader notice say the translation is A
  const note=sampleCardNote({sample:1,translated_pages:'4'});
  assert.match(note,/4 trang dịch mẫu · giữ bố cục gốc/u);assert.match(note,/do AI thực hiện để minh họa, chưa qua giáo viên duyệt/u);
  assert.doesNotMatch(sampleCardNote({sample:1}),/trang dịch mẫu/u,'no page count when the server does not send one');
- assert.equal(sampleIntro([{sample:0}]),'');assert.equal(sampleIntro(undefined),'');assert.match(sampleIntro([{sample:0},{sample:1}]),/Ví dụ mẫu/u);
  assert.equal(sampleReaderNotice({sample:0},{mime:'application/pdf'}),'');
  const pdf=sampleReaderNotice({id:'s1',sample:true},{mime:'application/pdf',source_sha256:SHA,source_pages:[5,6]});
  assert.match(pdf,/^<aside class="sample-notice" role="note"><strong>Ví dụ mẫu\.<\/strong> Bản dịch do AI thực hiện để minh họa cách Hoa Trí giữ bố cục trang; chưa được giáo viên duyệt\./u);

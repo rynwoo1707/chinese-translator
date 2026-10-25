@@ -5,7 +5,7 @@ import {readFile} from 'node:fs/promises';
 import {renderMathText,mathStyles} from '../frontend/math-text.js';
 import {termMatcher,highlightTerms,bindTermPopover} from '../frontend/reader-terms.js';
 import {footerHtml} from '../frontend/site-footer.js';
-import {isSample,sampleBadge,sampleCardNote,sampleIntro,sampleReaderNotice,SAMPLE_LABEL} from '../frontend/library-samples.js';
+import {isSample,sampleBadge,sampleCardNote,sampleReaderNotice,SAMPLE_LABEL} from '../frontend/library-samples.js';
 import {bilingualSource} from '../frontend/bilingual-reader.js';
 
 // The account page against the server's registration and deletion contracts: in domain mode only Google creates
@@ -21,7 +21,7 @@ function page(answers){
  const elements=new Map(),calls=[],get=selector=>{if(!elements.has(selector))elements.set(selector,element());return elements.get(selector);};
  const known=new Set(['#app','#toast','#modal','#modal-form','#close-modal','#modal-error','#reader-register-form','#reauth-row','#reauth-signout']);
  const modal=get('#modal');Object.assign(modal,{open:false,showModal(){this.open=true;},close(){this.open=false;}});
- const context=vm.createContext({musicMarkup:()=>'',bindMusic(){},renderMathText,mathStyles,termMatcher,highlightTerms,bindTermPopover,hideTermPopover(){},attachHanziLookup(){},openHanziPanel(){},closeHanziPanel(){},setHanziTheme(){},footerHtml,isSample,sampleBadge,sampleCardNote,sampleIntro,sampleReaderNotice,SAMPLE_LABEL,bilingualSource,mountBilingual(){return {destroy(){}};},releaseBilingual(){},
+ const context=vm.createContext({musicMarkup:()=>'',bindMusic(){},renderMathText,mathStyles,termMatcher,highlightTerms,bindTermPopover,hideTermPopover(){},attachHanziLookup(){},openHanziPanel(){},closeHanziPanel(){},setHanziTheme(){},footerHtml,isSample,sampleBadge,sampleCardNote,sampleReaderNotice,SAMPLE_LABEL,bilingualSource,mountBilingual(){return {destroy(){}};},releaseBilingual(){},
   location:{pathname:'/',hash:'',search:''},document:{querySelector:selector=>known.has(selector)?get(selector):null,querySelectorAll:()=>[]},localStorage:{getItem:()=>null},window:{addEventListener(){}},
   setTimeout:(fn,ms)=>{const timer=setTimeout(fn,ms);timer.unref?.();return timer;},clearTimeout,clearInterval,FormData:FakeFormData,console});
  context.fetch=async(url,init={})=>{calls.push({url,method:init.method||'GET',body:init.body});const [status,body]=answers(url,init)||[200,url==='/api/me'?{authenticated:false}:[]];return {ok:status<300,status,json:async()=>body};};

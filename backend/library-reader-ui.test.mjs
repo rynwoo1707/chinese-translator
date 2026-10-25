@@ -7,7 +7,7 @@ import pdfLibrary from './pdf.cjs';
 import {renderMathText,mathStyles} from '../frontend/math-text.js';
 import {termMatcher,highlightTerms,bindTermPopover} from '../frontend/reader-terms.js';
 import {footerHtml} from '../frontend/site-footer.js';
-import {isSample,sampleBadge,sampleCardNote,sampleIntro,sampleReaderNotice,SAMPLE_LABEL} from '../frontend/library-samples.js';
+import {isSample,sampleBadge,sampleCardNote,sampleReaderNotice,SAMPLE_LABEL} from '../frontend/library-samples.js';
 import {bilingualSource} from '../frontend/bilingual-reader.js';
 
 // The library and reader in a real browser engine with the real stylesheets: a closed glossary popover is really gone,
@@ -61,7 +61,7 @@ for(const width of [390,1440])test(`Glossary popover at ${width} px: closed by E
 // The library page as app.js draws it (run as in library-home.test.mjs), inside the real stylesheet.
 function libraryMarkup(){
  const source=read('app.js').replace(/^import .*\r?\n/gmu,''),root={innerHTML:''};
- const context=vm.createContext({musicMarkup:()=>'',bindMusic(){},renderMathText,mathStyles,termMatcher,highlightTerms,bindTermPopover,hideTermPopover(){},attachHanziLookup(){},openHanziPanel(){},closeHanziPanel(){},setHanziTheme(){},footerHtml,isSample,sampleBadge,sampleCardNote,sampleIntro,sampleReaderNotice,SAMPLE_LABEL,bilingualSource,mountBilingual(){},mountPdfPages(){},releaseBilingual(){},location:{pathname:'/',hash:'',search:''},document:{querySelector:selector=>selector==='#app'?root:null,querySelectorAll:()=>[]},localStorage:{getItem:()=>null},window:{addEventListener(){}},fetch:async()=>({ok:true,status:200,json:async()=>[]}),setTimeout,clearTimeout,clearInterval,FormData,console});
+ const context=vm.createContext({musicMarkup:()=>'',bindMusic(){},renderMathText,mathStyles,termMatcher,highlightTerms,bindTermPopover,hideTermPopover(){},attachHanziLookup(){},openHanziPanel(){},closeHanziPanel(){},setHanziTheme(){},footerHtml,isSample,sampleBadge,sampleCardNote,sampleReaderNotice,SAMPLE_LABEL,bilingualSource,mountBilingual(){},mountPdfPages(){},releaseBilingual(){},location:{pathname:'/',hash:'',search:''},document:{querySelector:selector=>selector==='#app'?root:null,querySelectorAll:()=>[]},localStorage:{getItem:()=>null},window:{addEventListener(){}},fetch:async()=>({ok:true,status:200,json:async()=>[]}),setTimeout,clearTimeout,clearInterval,FormData,console});
  vm.runInContext(source,context);
  return vm.runInContext(`state.loaded=true;state.route='library';state.library=[{id:'a',title:'Toán THPT (bản A) – Tự chọn bắt buộc, quyển 1',author:'Nhà xuất bản Giáo dục',genre:'Toán học · STEM',chapters:1,sample:1,translated_pages:3},{id:'b',title:'Sử ký',genre:'Lịch sử Trung Hoa',chapters:2}];publicLayout()`,context);
 }

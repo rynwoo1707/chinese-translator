@@ -9,7 +9,6 @@ export function sampleCardNote(story){
  if(!isSample(story))return '';const pages=Number(story.translated_pages)||0;
  return `${pages?`<p class="sample-card-pages">${pages} trang dịch mẫu · giữ bố cục gốc</p>`:''}<p class="sample-card-note">Bản dịch do AI thực hiện để minh họa, chưa qua giáo viên duyệt.</p>`;
 }
-export const sampleIntro=library=>(library||[]).some(isSample)?'<p class="sample-intro">Mới dùng Hoa Trí? Mở một sách có nhãn “Ví dụ mẫu” để xem bản dịch tiếng Việt giữ nguyên bố cục trang gốc.</p>':'';
 export function sampleReaderNotice(story,chapter){
  if(!isSample(story)&&!isSample(chapter))return '';
  const what=chapter?.mime==='application/pdf'?'giữ bố cục trang':'dịch tài liệu';
