@@ -3,9 +3,11 @@ import assert from 'node:assert/strict';
 import {spawnSync} from 'node:child_process';
 import {existsSync} from 'node:fs';
 import {fileURLToPath} from 'node:url';
-import {recognizePdfBlocks,ocrRequest,misassignedBlocks} from './pdf-block-ocr.js';
+import {recognizePdfBlocks,ocrRequest,misassignedBlocks,SPLIT_CALLS} from './pdf-block-ocr.js';
 import {pdfLayoutRoute} from './pdf-layout.js';
 import {ocrImageBatches,validateLayoutDocument,OCR_LIMITS} from '../frontend/pdf-box-layout.js';
+import {MODES,modeProfile} from '../frontend/translation-modes.js';
+import {classifyError} from '../frontend/whole-book.js';
 
 // OCR sheets: extract.py packs the OCR crops of a scanned page into a few images, one framed strip per block with a #N
 // tab, so Gemini 3 bills a few ~1,090-token images per page instead of one per block. Manifests without sheets keep
@@ -60,7 +62,7 @@ test('A sheet is sent once, after a JSON map from each tab label to its block, h
  assert.deepEqual(JSON.parse(parts[2].text),{'#3':{id:'p7-b6',sourceHint:blocks[2].source,formulaRegions:[{token:'@@PDF_INLINE_1@@',label:'@1'},{token:'@@PDF_INLINE_2@@'}]}});
  assert.deepEqual(JSON.parse(parts[4].text),{type:'protected-formula',blockId:'p7-b6',replaceWith:'@@PDF_INLINE_2@@'});
  for(const rule of [/sheet of separate framed strips/u,/blue tab #N/u,/maps each label to its strip's block/u,/text never runs across strips/u,/hidden in its strip/u,/beyond strip edges/u,/IMAGE is authoritative/u,/one visual row on one output line/u])assert.match(instruction,rule);
- assert.doesNotMatch(instruction,/Each paragraph image belongs/u);assert.ok(instruction.length<=2500,`${instruction.length} characters`);
+ assert.doesNotMatch(instruction,/Each paragraph image belongs/u);assert.ok(instruction.length<=2640,`${instruction.length} characters`);
  // a manifest without sheets keeps one paragraph image per block and the paragraph instruction
  const old=ocrRequest([{id:'p4-b0',source:'旧',image:png,box:[0,0,9,9]}]);
  assert.equal(old.parts.length,2);assert.match(old.instruction,/Each paragraph image belongs to the block ID/u);assert.equal(JSON.parse(old.parts[0].text).blockBox.length,4);
@@ -199,6 +201,84 @@ test('Refreshing a sheet manifest renumbers sheets, strips and block references 
  });
  const response=await pdfLayoutRoute(new Request(`https://example.test${base}/refresh`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({assetId,forceClone:true})}),env,base+'/refresh',reader),result=await response.json();
  assert.equal(response.status,201);assert.deepEqual(result.document,{...sheetDocument(),totalPages:88});
+});
+
+test('A call of several sheets that is refused or cut off is split by sheet, each half asked once more, before its blocks keep their machine text',async t=>{
+ const document=sheetDocument(),blocks=document.pages.flatMap(p=>p.blocks),sheets=document.pages.flatMap(p=>p.ocrSheets),readings={'p7-b1':REAL[0][2],'p7-b5':REAL[2][2],'p7-b6':'因为 @1 所以','p8-b2':REAL[4][2]};
+ const billed=(reason,total)=>Response.json({candidates:[{finishReason:reason}],usageMetadata:{promptTokenCount:total,candidatesTokenCount:0,totalTokenCount:total}});
+ const read=ids=>generationResponse({blocks:ids.map(id=>({id,text:readings[id]})),warnings:['Ảnh mờ.']});
+ let decide;const calls=[];
+ t.mock.method(globalThis,'fetch',async(url,options)=>{
+  const body=JSON.parse(options.body),ids=body.contents[0].parts.filter(p=>p.text&&!JSON.parse(p.text).type).flatMap(p=>Object.values(JSON.parse(p.text)).map(v=>v.id));
+  calls.push({ids,cap:body.generationConfig.maxOutputTokens});return decide(ids,calls.length);
+ });
+ // Three sheets refused together (RECITATION of one page): page 7's two sheets are read, page 8's is refused once more.
+ decide=(ids,n)=>n===1||ids.includes('p8-b2')?billed('RECITATION',500):read(ids);
+ const result=await recognizePdfBlocks(aiEnv,blocks,sheets);
+ assert.deepEqual(calls.map(c=>c.ids),[['p7-b1','p7-b5','p7-b6','p8-b2'],['p7-b1','p7-b5','p7-b6'],['p8-b2']]);
+ assert.deepEqual(result.blocks.map(b=>[b.id,b.text,b.ocrKept]),[['p7-b1',REAL[0][2],undefined],['p7-b5',REAL[2][2],undefined],['p7-b6','因为 @@PDF_INLINE_1@@ 所以',undefined],['p8-b2',REAL[4][1],'refused']]);
+ assert.deepEqual(result.usage,{prompt:500+2300+500,output:120,thinking:0,total:500+2420+500,requests:3,cacheHits:0},'every call is counted');
+ assert.deepEqual(result.warnings,['Trang 8 · đoạn 2: Gemini không trả bản đọc vì trùng khớp nguyên văn với nội dung có bản quyền. Đoạn này giữ chữ OCR máy, có thể sai; hãy đối chiếu với trang gốc.','Ảnh mờ.']);
+ assert.ok(calls[1].cap<calls[0].cap&&calls[2].cap<calls[0].cap,'each half is capped by its own hints');
+ // A one-sheet call is not split; a cut-off answer is split like a refusal, and the extra calls are bounded.
+ calls.length=0;decide=()=>billed('RECITATION',500);
+ assert.equal((await recognizePdfBlocks(aiEnv,[blocks[3]],[sheets[2]])).blocks[0].ocrKept,'refused');assert.equal(calls.length,1);
+ const six=Array.from({length:6},(_,i)=>({id:`p9-s${i+1}`,image:'data:image/png;base64,U0hFRVQx',strips:[strip(`p9-b${i+1}`,`#${i+1}`)]})),sixBlocks=six.map((s,i)=>block(`p9-b${i+1}`,`第${i+1}段`,s.id,`#${i+1}`));
+ calls.length=0;decide=()=>billed('MAX_TOKENS',100);
+ const capped=await recognizePdfBlocks(aiEnv,sixBlocks,six);
+ assert.equal(calls.length,1+SPLIT_CALLS);assert.deepEqual(calls.map(c=>c.ids.length),[6,3,3,2,1]);
+ assert.ok(capped.blocks.every(b=>b.ocrKept==='truncated'));assert.equal(capped.usage.requests,5);assert.equal(capped.warnings.length,1);
+ calls.length=0;decide=(ids,n)=>n===1?billed('MAX_TOKENS',100):read(ids);
+ assert.ok((await recognizePdfBlocks(aiEnv,blocks,sheets)).blocks.every(b=>!b.ocrKept));assert.equal(calls.length,3);
+ // A quota stop in a half keeps what the halves before it read (paid for): the result carries those blocks, the IDs still
+ // to read and the error, with every call it made counted; no call follows the stop.
+ const quota=()=>Response.json({error:{details:[{'@type':'type.googleapis.com/google.rpc.QuotaFailure',violations:[{quotaId:'GenerateRequestsPerDayPerProjectPerModel'}]}]}},{status:429});
+ calls.length=0;decide=(ids,n)=>n===1?billed('RECITATION',500):n===2?read(ids):quota();
+ const partial=await recognizePdfBlocks(aiEnv,blocks,sheets);
+ assert.deepEqual(calls.map(c=>c.ids),[['p7-b1','p7-b5','p7-b6','p8-b2'],['p7-b1','p7-b5','p7-b6'],['p8-b2']]);
+ assert.deepEqual(partial.blocks.map(b=>[b.id,b.text,b.ocrKept]),[['p7-b1',REAL[0][2],undefined],['p7-b5',REAL[2][2],undefined],['p7-b6','因为 @@PDF_INLINE_1@@ 所以',undefined]]);
+ assert.deepEqual(partial.pending,['p8-b2']);assert.equal(partial.stop.code,'quota_day');assert.deepEqual(partial.warnings,['Ảnh mờ.']);
+ assert.deepEqual([partial.usage.total,partial.usage.requests],[500+2420,2]);assert.deepEqual(partial.stop.usage,partial.usage);
+ // A stop before any half decided a block still fails the request, its calls counted; so does one in the first call.
+ const four=six.slice(0,4),fourBlocks=sixBlocks.slice(0,4);
+ calls.length=0;decide=(ids,n)=>n<=2?billed('RECITATION',500):quota();
+ await assert.rejects(()=>recognizePdfBlocks(aiEnv,fourBlocks,four),error=>error.code==='quota_day'&&error.usage.total===1000&&error.usage.requests===2);
+ calls.length=0;decide=()=>quota();
+ await assert.rejects(()=>recognizePdfBlocks(aiEnv,blocks,sheets),error=>error.code==='quota_day'&&error.usage.requests===0);assert.equal(calls.length,1);
+});
+
+test('A split half stopped by a quota: the route stores what the halves before it read and answers the error with those blocks, so only the rest is read again',async t=>{
+ const {env,FILES}=await stored(),readings={'p7-b1':REAL[0][2],'p7-b5':REAL[2][2],'p7-b6':'因为 @1 所以','p8-b2':REAL[4][2]},calls=[];let decide;
+ const minute=()=>Response.json({error:{details:[{'@type':'type.googleapis.com/google.rpc.QuotaFailure',violations:[{quotaId:'GenerateRequestsPerMinutePerProjectPerModel-FreeTier'}]},{'@type':'type.googleapis.com/google.rpc.RetryInfo',retryDelay:'40s'}]}},{status:429});
+ t.mock.method(globalThis,'fetch',async(url,options)=>{const body=JSON.parse(options.body),ids=body.contents[0].parts.filter(p=>p.text&&!JSON.parse(p.text).type).flatMap(p=>Object.values(JSON.parse(p.text)).map(v=>v.id));calls.push(ids);return decide(ids,calls.length);});
+ const read=ids=>generationResponse({blocks:ids.map(id=>({id,text:readings[id]})),warnings:[]});
+ const call=blockIds=>pdfLayoutRoute(new Request(`https://example.test${base}/ocr-blocks`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({assetId,apiKey:studentKey,model,blockIds,slim:true})}),env,base+'/ocr-blocks',reader);
+ // Three sheets refused together; page 7's two sheets are then read, page 8's meets the per-minute quota (40 s).
+ decide=(ids,n)=>n===1?Response.json({candidates:[{finishReason:'RECITATION'}],usageMetadata:{promptTokenCount:500,candidatesTokenCount:0,totalTokenCount:500}}):ids.includes('p8-b2')?minute():read(ids);
+ const response=await call(['p7-b1','p7-b5','p7-b6','p8-b2']),answer=await response.json();
+ assert.equal(response.status,429);assert.equal(response.headers.get('Retry-After'),'40');assert.equal(answer.code,'quota_minute');assert.equal(answer.retryAfter,40);assert.match(answer.error,/giới hạn số lượt gọi mỗi phút/u);
+ assert.deepEqual(answer.blocks.map(b=>[b.id,b.source,b.ocrCorrected]),[['p7-b1',REAL[0][2],true],['p7-b5',REAL[2][2],true],['p7-b6','因为 @@PDF_INLINE_1@@ 所以',true]],'the blocks read, as stored');
+ assert.deepEqual(answer.pending,['p8-b2']);assert.deepEqual([answer.usage.total,answer.usage.requests],[500+2420,2]);assert.equal(answer.ocrCorrectedVersion,0);assert.equal(answer.document,undefined);
+ assert.deepEqual(JSON.parse(storedText(FILES.values.get(manifestKey))).pages.flatMap(p=>p.blocks).map(b=>[b.id,b.ocrCorrected===true]),[['p7-b1',true],['p7-b5',true],['p7-b6',true],['p8-b2',false]]);
+ // In the browser it is a 429 as ever (a whole-book run waits it out); the request after it names only the sheet left.
+ assert.equal(classifyError(Object.assign(new Error(answer.error),{status:response.status,data:answer,retryAfter:40})).reason,'quota_minute');
+ calls.length=0;decide=ids=>read(ids);
+ const rest=await call(['p8-b2']);assert.equal(rest.status,200);assert.deepEqual(calls,[['p8-b2']]);assert.equal((await rest.json()).ocrCorrectedVersion,1);
+});
+
+test('A re-read names at most the mode\'s ocrBatch.blocks blocks, whole sheets as ever; a first reading may take a larger sheet',async t=>{
+ // One sheet a block larger than Kỹ nhất may re-read in one call (16 in translation-modes.js), within the 48 of a first
+ // reading and of a mode that re-reads more at once (Kỹ hơn: 24).
+ const most=modeProfile('premium').ocrBatch.blocks,wider=MODES.find(id=>modeProfile(id).reread&&modeProfile(id).ocrBatch.blocks>most),ids=Array.from({length:most+1},(_,i)=>`p7-b${i+1}`);
+ const doc={version:1,extractionVersion:3,totalPages:88,pages:[{number:7,width:600,height:800,ocr:true,background:png,original:png,blocks:ids.map((id,i)=>block(id,`第${i+1}段。`,'p7-s1',`#${i+1}`)),ocrSheets:[{id:'p7-s1',image:'data:image/png;base64,U0hFRVQx',strips:ids.map((id,i)=>strip(id,`#${i+1}`))}]}]};
+ const {env,FILES}=await stored(doc),calls=mockGeneration(t,{blocks:ids.map((id,i)=>({id,text:`第${i+1}段。`})),warnings:[]});
+ const call=extra=>pdfLayoutRoute(new Request(`https://example.test${base}/ocr-blocks`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({assetId,apiKey:studentKey,model,blockIds:ids,slim:true,...extra})}),env,base+'/ocr-blocks',reader);
+ assert.equal((await call({mode:'premium'})).status,200);const writes=FILES.writes.length;
+ // Part of a sheet is refused for a re-read as for a first reading.
+ for(const extra of [{mode:'premium',reread:true},{mode:wider,reread:true,blockIds:ids.slice(0,3)}])await assert.rejects(()=>call(extra),/không hợp lệ/u);
+ assert.equal(calls.length,1);assert.equal(FILES.writes.length,writes,'refused before any call or write');
+ const again=await (await call({mode:wider,reread:true})).json();
+ assert.equal(calls.length,2);assert.ok(again.blocks.every(b=>b.ocrRereads===1&&b.ocrCorrected));
 });
 
 const root=fileURLToPath(new URL('../',import.meta.url)),runtime=`${root}.runtime/pdf-python`,tessdata=process.env.TESSDATA_PREFIX||`${root}.runtime/tessdata`,python=process.env.PDF_PYTHON||'python';

@@ -212,9 +212,8 @@ body:is([data-session=out],[data-session=error]) .account-status{display:none}
  /* A fitted page needs no tall empty box under it; a zoomed one still scrolls inside. */
  .pdf-viewer-scroll{height:auto;max-height:min(520px,75vh)}
 }
-/* "Cách dịch" is left out where it changes nothing (a kept-layout PDF): Lĩnh vực then takes the whole row. */
-.control-grid>[hidden]{display:none}
-.control-grid:has(>[hidden]){grid-template-columns:1fr}
+/* "Cách dịch" counts in every run (text, kept layout, whole book): what the chosen mode does spans the row under both fields. */
+.control-grid .mode-hint{grid-column:1/-1;margin:-4px 0 0;line-height:1.6}
 /* A save refused because another tab saved since offers to open the newest copy. */
 .save-warning .save-warning-action{margin:6px 0 0;padding:6px 12px;border-color:#c98a7d;color:#7d2f23;font-size:12px}
 @media(max-width:680px){.save-warning .save-warning-action{min-height:44px}}

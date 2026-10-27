@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {translatePdfBlocks,MAX_CALLS} from './pdf-block-translation.js';
+import {translatePdfBlocks,MAX_CALLS,blockTranslationWarnings} from './pdf-block-translation.js';
 import {studyRoute} from './study-translation.js';
 import {errorResponse} from './http.js';
 
@@ -221,4 +221,99 @@ test('The study route passes partial through and answers 200 with failedBlocks',
  const response=await studyRoute(new Request(url,{method:'POST',headers:{Cookie:'cat_hien_session=temporary',Origin:url.origin,'Content-Type':'application/json'},body:JSON.stringify({blocks:line(2),apiKey:'student-key-long-enough',mode:'economy',partial:true})}),scoped,url,path);
  const data=await response.json();assert.equal(response.status,200);
  assert.deepEqual(data.blocks.map(b=>b.id),['p1-b0']);assert.deepEqual(data.failedBlocks.map(b=>[b.id,b.code]),[['p1-b1','gemini_refused']]);assert.equal(data.usage.requests,3);
+});
+
+// Each fake answer is answer(block as sent, call number): a translation may carry the shielded @@MATH token it was sent.
+function answered(t,answer){
+ const requests=[];
+ t.mock.method(globalThis,'fetch',async(url,options)=>{const sent=JSON.parse(JSON.parse(options.body).contents[0].parts[0].text).blocks;requests.push(sent.map(b=>b.id));const call=requests.length;return gemini(result(sent.map(b=>({id:b.id,translation:answer(b,call)}))));});
+ return requests;
+}
+
+test('Checks that cost no tokens warn in every mode: a number missing, a length far off, TeX the page cannot draw, one translation for two sources',async t=>{
+ const blocks=[
+  {id:'p2-b1',source:'第3章共有12节，约2.5万字，合3000页。'},
+  {id:'p2-b2',source:'物体的加速度与合力成正比，与质量成反比，这就是牛顿第二定律的内容。'},
+  {id:'p2-b3',source:String.raw`方程组的解为 \begin{tabular}{c}x=1\end{tabular}`},
+  {id:'p2-b4',source:'两个向量的方向相同且长度相等，则这两个向量相等。'},
+  {id:'p2-b5',source:'两个向量的方向相反且长度相等，则它们互为相反向量。'},
+  {id:'p2-b6',source:'两个向量的方向相同且长度相等，则这两个向量相等。'},
+  {id:'p2-b7',source:'圆周率约为3.14，第①题中x²+y²=1，共1 000个点。'},
+  {id:'p2-b8',source:'习题'},{id:'p2-b9',source:'练习'}
+ ];
+ const same='Hai vectơ cùng hướng và cùng độ dài thì bằng nhau.',answers={
+  // 12 is dropped; 2.5万 may become 25.000 and 3000 may be written 3.000
+  'p2-b1':'Chương 3 có các mục, khoảng 25.000 chữ, tương đương 3.000 trang.','p2-b2':'Gia tốc tỉ lệ.',
+  'p2-b4':same,'p2-b5':same,'p2-b6':same,'p2-b8':'Bài tập','p2-b9':'Bài tập',
+  // decimal comma, circled and superscript digits written plainly, thousands grouped differently: the same numbers
+  'p2-b7':'Số pi xấp xỉ 3,14; trong bài (1), x^2 + y^2 = 1, có tất cả 1000 điểm.'
+ };
+ const requests=answered(t,b=>answers[b.id]??`Nghiệm của hệ là ${b.source.match(/@@MATH_\d{4}@@/u)[0]}`);
+ const response=await translatePdfBlocks(env,{blocks});
+ assert.equal(requests.length,1,'warnings only: nothing is asked again');
+ assert.deepEqual(response.warnings.map(w=>w.split(':')[0]),['Block p2-b1','Block p2-b2','Block p2-b3','Block p2-b5']);
+ assert.equal(response.warnings[0],'Block p2-b1: bản dịch thiếu hoặc đổi số của nguyên tác: 12');
+ assert.equal(response.warnings[1],'Block p2-b2: bản dịch ngắn bất thường so với nguyên tác, có thể đã sót ý.');
+ assert.match(response.warnings[2],/^Block p2-b3: còn mã công thức chưa dựng được: \\begin\{tabular\}/u);
+ assert.equal(response.warnings[3],'Block p2-b5: bản dịch giống hệt Block p2-b4 dù nguyên tác khác nhau; có thể đã lẫn đoạn.');
+ assert.equal(response.blocks[2].translation,String.raw`Nghiệm của hệ là \begin{tabular}{c}x=1\end{tabular}`);
+ // A translation far longer than its source needs (commentary, a repetition) is named too.
+ answered(t,()=>'Nội dung này nói về vectơ. '.repeat(12));
+ assert.deepEqual((await translatePdfBlocks(env,{blocks:[{id:'p2-b1',source:'两个向量相等。'}]})).warnings,['Block p2-b1: bản dịch dài bất thường so với nguyên tác, có thể có phần thêm hoặc lặp lại.']);
+});
+
+test('One translation for two sources is named only when its words outside formulas reach 20 letters: tokens are numbered per block',async t=>{
+ const [t1,t2]=['@@PDF_INLINE_1@@','@@PDF_INLINE_2@@'],sum=String.raw`\(S_{n-1}=a_{1}+a_{2}+\cdots+a_{n-1}\quad(n\geq 2)\)`;
+ // Steps of a scanned solution: 所以/因此 both read "Do đó", while each block's tokens hold its own formula images; then
+ // 24 letters of words given to two sources that say opposite things (相同/相反).
+ const blocks=[{id:'p3-b4',source:`所以 ${t1}，${t2}`},{id:'p3-b9',source:`因此 ${t1}，${t2}`},{id:'p3-b5',source:`所以 ${sum}`},{id:'p3-b6',source:`因此 ${sum}`},{id:'p3-b10',source:`由 ${t1} 可知两个向量的方向相同，${t2}`},{id:'p3-b11',source:`由 ${t1} 可知两个向量的方向相反，${t2}`}];
+ const sentence=`Từ ${t1} suy ra hai vectơ cùng hướng, ${t2}`,answers={'p3-b4':`Do đó ${t1}, ${t2}`,'p3-b9':`Do đó ${t1}, ${t2}`,'p3-b10':sentence,'p3-b11':sentence};
+ for(const [body,options] of [[{blocks},{}],[{blocks,partial:true},{strict:true}]]){
+  const requests=answered(t,b=>answers[b.id]??`Do đó ${b.source.match(/@@MATH_\d{4}@@/u)[0]}`),response=await translatePdfBlocks(env,body,options);
+  assert.equal(requests.length,1,'warnings only: nothing is asked again');
+  assert.deepEqual(response.warnings,['Block p3-b11: bản dịch giống hệt Block p3-b10 dù nguyên tác khác nhau; có thể đã lẫn đoạn.']);
+ }
+});
+
+test('Strict mode asks once more for a block that keeps Chinese, lacks a number or is far too short, and keeps the better translation with its warnings',async t=>{
+ const blocks=[{id:'p3-b1',source:'向量的模是向量的长度。'},{id:'p3-b2',source:'第3节有12道习题。'},{id:'p3-b3',source:'“的”字在这里表示所属关系。'},{id:'p3-b4',source:'物体的加速度与合力成正比，与质量成反比，这就是牛顿第二定律的内容。'},{id:'p3-b5',source:'两个向量相等。'}];
+ // By call: Chinese left, then fixed; 12 dropped twice (the first stays); a character the source quotes, which may stay;
+ // far too short, then whole.
+ const answers={'p3-b1':['Môđun của 向量 là độ dài.','Môđun của vectơ là độ dài của vectơ.'],'p3-b2':['Mục 3 có các bài tập.','Mục có các bài tập.'],'p3-b3':['Chữ “的” ở đây chỉ quan hệ sở hữu.'],
+  'p3-b4':['Gia tốc tỉ lệ.','Gia tốc của vật tỉ lệ thuận với hợp lực và tỉ lệ nghịch với khối lượng; đó là nội dung định luật II Newton.'],'p3-b5':['Hai vectơ bằng nhau.']};
+ const answer=(b,call)=>answers[b.id][Math.min(call,answers[b.id].length)-1],ids=blocks.map(b=>b.id),again=['p3-b1','p3-b2','p3-b4'];
+ const chosen=[answers['p3-b1'][1],answers['p3-b2'][0],answers['p3-b3'][0],answers['p3-b4'][1],answers['p3-b5'][0]];
+ let requests=answered(t,answer);const strict=await translatePdfBlocks(env,{blocks},{strict:true});
+ assert.deepEqual(requests,[ids,again]);assert.deepEqual(strict.blocks.map(b=>b.translation),chosen);assert.equal(strict.usage.requests,2);
+ assert.deepEqual(strict.warnings,['Block p3-b3: còn chữ Hán chưa dịch: 的','Block p3-b2: bản dịch thiếu hoặc đổi số của nguyên tác: 12']);
+ // The same with partial answers: nothing fails, the same translations are chosen.
+ requests=answered(t,answer);const partial=await translatePdfBlocks(env,{blocks,partial:true},{strict:true});
+ assert.deepEqual(requests,[ids,again]);assert.deepEqual(partial.blocks.map(b=>b.translation),chosen);assert.deepEqual(partial.failedBlocks,[]);assert.deepEqual(partial.warnings,strict.warnings);
+ // Without strict these are warnings only, after one call.
+ requests=answered(t,answer);const loose=await translatePdfBlocks(env,{blocks});
+ assert.deepEqual(requests,[ids]);assert.deepEqual(loose.warnings.map(w=>w.split(':')[0]),['Block p3-b1','Block p3-b3','Block p3-b2','Block p3-b4']);
+ // A retry refused or unreadable leaves the first translations, never a failed block, and its tokens are counted.
+ for(const partialAnswers of [false,true]){
+  requests=blockGemini(t,(sent,n)=>n===1?gemini(result(sent.map(id=>({id,translation:answers[id][0]})))):refusal('SAFETY'));
+  const kept=await translatePdfBlocks(env,{blocks,partial:partialAnswers},{strict:true});
+  assert.deepEqual(kept.blocks.map(b=>b.translation),blocks.map(b=>answers[b.id][0]),String(partialAnswers));assert.equal(kept.usage.requests,2,String(partialAnswers));
+  if(partialAnswers)assert.deepEqual(kept.failedBlocks,[]);
+ }
+});
+
+test('Strict mode asks a block that failed a check and one that fell short of the strict checks again together; only the first can still fail',async t=>{
+ const blocks=[{id:'p5-b1',source:'1949年成立。'},{id:'p5-b2',source:'向量的模是向量的长度。'}];
+ const requests=answered(t,b=>b.id==='p5-b1'?'Được thành lập.':'Môđun của 向量 là độ dài.');
+ await assert.rejects(()=>translatePdfBlocks(env,{blocks},{strict:true}),/thiếu số hoặc dẫn chứng: 1949/u);
+ assert.deepEqual(requests,[['p5-b1','p5-b2'],['p5-b1','p5-b2']]);
+ answered(t,b=>b.id==='p5-b1'?'Được thành lập.':'Môđun của 向量 là độ dài.');
+ const partial=await translatePdfBlocks(env,{blocks,partial:true},{strict:true});
+ assert.deepEqual(partial.blocks,[{id:'p5-b2',translation:'Môđun của 向量 là độ dài.'}]);assert.deepEqual(partial.failedBlocks.map(b=>[b.id,b.code]),[['p5-b1','block_check']]);
+ assert.deepEqual(partial.warnings,['Block p5-b2: còn chữ Hán chưa dịch: 向量']);
+});
+
+test('A translation that leaves a \( or \[ open, or closes one never opened, is named: the page prints the delimiter as written',()=>{
+ const R=String.raw,blocks=[{id:'p2-b1',source:R`求 \(x^{2}+1\) 的最小值。`},{id:'p2-b2',source:R`已知 \[S_{n}=n^{2}\]，求 a_{n}。`}];
+ const warnings=blockTranslationWarnings(blocks,[{id:'p2-b1',translation:R`Tìm giá trị nhỏ nhất của \(x^{2}+1.`},{id:'p2-b2',translation:R`Biết \[S_{n}=n^{2}\], tìm a_{n}.`}],{});
+ assert.deepEqual(warnings.filter(w=>w.includes('mã công thức')),[R`Block p2-b1: còn mã công thức chưa dựng được: \(`]);
 });

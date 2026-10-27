@@ -30,6 +30,7 @@
  <link rel="modulepreload" href="/hanzi-lookup.js">
  <link rel="modulepreload" href="/gemini-key.js">
  <link rel="modulepreload" href="/in-app-browser.js">
+ <link rel="modulepreload" href="/translation-modes.js">
 </head>
 <body data-session="checking">
  <a class="skip-link" href="#main">Bỏ qua, đến nội dung chính</a>
@@ -109,7 +110,7 @@
       <p class="key-terms">Theo <a href="https://ai.google.dev/gemini-api/terms" target="_blank" rel="noopener">điều khoản Gemini API của Google<span class="visually-hidden"> (mở trong tab mới)</span></a>, người dùng phải từ 18 tuổi trở lên. Với gói miễn phí, Google có thể dùng nội dung bạn gửi để cải thiện sản phẩm và nhân viên của Google có thể đọc nội dung đó, nên đừng gửi thông tin nhạy cảm. Xem thêm mục <a href="/dieu-khoan#khoa-gemini">Khóa Gemini</a> trong Điều khoản sử dụng.</p>
      </div>
     </div>
-    <div class="control-grid"><label for="domain">Lĩnh vực tài liệu<select id="domain"><option value="general">Chuyên khảo · Nghiên cứu</option><option value="math">Toán học · STEM</option><option value="history">Lịch sử Trung Hoa</option><option value="physics">Vật lý</option><option value="chemistry">Hóa học</option><option value="biology">Sinh học</option><option value="informatics">Tin học</option></select></label><label id="mode-field" for="mode">Cách dịch<select id="mode"><option value="economy">Tiết kiệm (ít token nhất)</option><option value="balanced">Cân bằng</option><option value="quality">Kỹ hơn (tốn token hơn)</option></select></label></div>
+    <div class="control-grid"><label for="domain">Lĩnh vực tài liệu<select id="domain"><option value="general">Chuyên khảo · Nghiên cứu</option><option value="math">Toán học · STEM</option><option value="history">Lịch sử Trung Hoa</option><option value="physics">Vật lý</option><option value="chemistry">Hóa học</option><option value="biology">Sinh học</option><option value="informatics">Tin học</option></select></label><label id="mode-field" for="mode">Cách dịch<select id="mode" aria-describedby="mode-hint"><option value="economy">Tiết kiệm (ít token nhất)</option><option value="balanced">Cân bằng</option><option value="quality">Kỹ hơn (tốn token hơn)</option><option value="premium">Kỹ nhất (tốn nhiều token nhất)</option></select></label><p id="mode-hint" class="hint mode-hint" aria-live="polite">Đọc và dịch theo lượt lớn, không suy luận thêm. Hợp với khóa Gemini miễn phí.</p></div>
     <label for="glossary">Thuật ngữ cần thống nhất <small>Không bắt buộc</small></label>
     <textarea id="glossary" lang="zh" rows="4" spellcheck="false" placeholder="史料 = sử liệu&#10;明朝 = triều Minh" aria-describedby="glossary-hint"></textarea>
     <p id="glossary-hint" class="hint">Mỗi dòng một thuật ngữ: chữ Hán = cách dịch bạn muốn dùng.</p>
@@ -119,7 +120,7 @@
       <label for="gemini-model">Phiên bản Gemini dùng để dịch<select id="gemini-model" disabled><option value="">Tự chọn sau khi kiểm tra khóa</option></select></label>
       <p id="gemini-model-status" class="hint">Hoa Trí tự chọn phiên bản phù hợp với khóa của bạn trước khi gửi nội dung dịch.</p>
       <button id="check-gemini-model" type="button">Kiểm tra phiên bản dùng được với khóa</button>
-      <p class="usage-detail"><span>Chi tiết lượt dùng trong tab này:</span> <span id="usage-detail">0 lần gửi · 0 token gửi đi · 0 token nhận về</span></p>
+      <p class="usage-detail"><span>Chi tiết lượt dùng trong tab này:</span> <span id="usage-detail">0 lần gửi · 0 token gửi đi · 0 token nhận về · 0 token suy luận</span></p>
      </div>
     </details>
     <div id="run-bar" class="run-bar"><p id="save-warning" class="save-warning" role="alert" hidden></p><p id="run-bar-status" class="run-bar-status" aria-hidden="true"></p><div class="actions"><button id="translate" class="primary" type="button">Bắt đầu dịch <span aria-hidden="true">→</span></button><button id="stop" type="button" disabled hidden>Dừng sau lượt hiện tại</button></div></div>

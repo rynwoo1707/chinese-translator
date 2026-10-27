@@ -12,8 +12,10 @@ const root=resolve('tmp/pdf-layout/actual-scan'),originalPath=resolve(root,'mani
 const sheets=document.pages.filter(p=>p.ocr).flatMap(p=>p.ocrSheets||[]);let read=0;
 for(const ids of ocrImageBatches(blocks.filter(b=>!b.ocrCorrected),undefined,sheets)){
  const group=ids.map(id=>blocks.find(b=>b.id===id)),output=await recognizePdfBlocks(env,group,sheets.filter(s=>s.strips.some(strip=>ids.includes(strip.blockId))));tokens+=output.usage?.total||0;read+=group.length;
- for(const value of output.blocks){const block=blocks.find(b=>b.id===value.id);block.source=value.text;let text=value.text;for(const inline of block.inlines||[])text=text.replace(inline.token,inline.text);block.text=text;block.ocrCorrected=true;}
+ for(const value of output.blocks){const block=blocks.find(b=>b.id===value.id);block.source=value.text;let text=value.text;for(const inline of block.inlines||[])text=text.replace(inline.token,()=>inline.text);block.text=text;block.ocrCorrected=true;}
  await writeFile(resolve(root,'corrected-manifest.json'),JSON.stringify(document));console.log(`OCR image verification ${read}/${blocks.length} blocks (${output.model}).`);
+ // Stopped part-way (quota, overload): the blocks decided before it are in the checkpoint, so a re-run reads only the rest.
+ if(output.stop)throw output.stop;
 }
 document.ocrCorrectedVersion=1;for(const block of blocks){block.source=normalizeOcrMath(block.source);if(/^\d+(?:\.\d+){1,4}\s*[\u3400-\u9fff]/u.test(block.source)&&block.source.length<100){block.kind='heading';block.bold=true;}}await writeFile(checkpointPath,JSON.stringify(document));const all=document.pages.flatMap(p=>p.blocks),translations=process.argv.includes('--repair-geometry')?JSON.parse(await readFile(resolve(root,'translations.json'),'utf8')):[];let context='',glossary={};
 for(const batch of blockBatches(process.argv.includes('--repair-geometry')?all.filter(b=>['p4-b1','p4-b3','p4-b5','p5-b7'].includes(b.id)):all)){

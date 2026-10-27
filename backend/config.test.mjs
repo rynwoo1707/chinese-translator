@@ -73,6 +73,14 @@ test('Migrations have unique numbers, so wrangler applies them in one clear orde
  assert.equal(new Set(numbers).size,numbers.length,`two migrations share a number: ${files.join(', ')}`);
 });
 
+// npm run deploy applies migrations before the new code goes live, and a rollback leaves them in place: the admin
+// accounts' migration only adds tables, indexes and nullable or defaulted columns, so the code before it keeps working.
+test('Migration 0025 (admin accounts) only adds to the schema',()=>{
+ const statements=read('database/migrations/0025_admin_accounts.sql').replace(/--[^\n]*/gu,'').split(';').map(statement=>statement.trim().replace(/\s+/gu,' ')).filter(Boolean);
+ assert.deepEqual(statements.map(statement=>/^(CREATE TABLE|CREATE INDEX|ALTER TABLE jobs ADD COLUMN) (\w+)/u.exec(statement)?.slice(1).join(' ')),['CREATE TABLE admin_users','CREATE TABLE admin_sessions','CREATE INDEX idx_admin_sessions_admin','CREATE INDEX idx_admin_sessions_expiry','ALTER TABLE jobs ADD COLUMN mode','ALTER TABLE jobs ADD COLUMN thinking_tokens']);
+ for(const statement of statements.filter(statement=>statement.startsWith('ALTER TABLE')))assert.match(statement,/ADD COLUMN \w+ TEXT$|NOT NULL DEFAULT \d+$/u,statement);
+});
+
 test('Example env files carry no secret and stay readable by setup.mjs and docker compose',()=>{
  const keyLike=/AIza[0-9A-Za-z_-]{35}|[0-9a-f]{32,}/iu;
  for(const [path,secretNames] of [['.dev.vars.example',SECRET_NAMES],['deploy/pdf-layout/env.example',['PDF_LAYOUT_SERVICE_TOKEN']]]){

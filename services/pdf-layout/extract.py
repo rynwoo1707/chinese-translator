@@ -92,6 +92,9 @@ BOX_MIN_HEIGHT = 6.5
 INK_RUN = re.compile(rb"\x01+")
 # Han-sized cells of a page's text lines left in no block and no protected region before the page gets a warning.
 MISSED_CELLS = 10
+# A line of at most this many Han-sized cells (a heading, a label, a table cell) is read again at finer resolutions
+# when its reading holds fewer Han characters than its ink: misread whole, it would be lost.
+SHORT_LINE = 6
 # Han glyphs of a text layer that make it the page's text: glyphs in pictures beside it never send the page to OCR alone.
 SUBSTANTIAL_HAN = 20
 # Gemini 3 bills an image at ~1,090 input tokens whatever its pixel size: it rescales every image to ~1,120 token cells
@@ -105,6 +108,14 @@ SHEET_SIDE = 1_600
 # Same limit as one paragraph crop: a sheet of noisy scan pixels compresses badly. Fewer strips per sheet than the 48
 # blocks one OCR call may hold, so a sheet never needs more labels than one answer can map back.
 SHEET_BYTES, SHEET_STRIPS = 1_300_000, 20
+# The payload's quality 'fine' (the "Kỹ nhất" mode, X-PDF-Quality) cuts finer sheets for small print and formulas: crops
+# at 3 px/pt (less when a crop would not fit a sheet's width, never under the standard 2), half the area and at most 1100
+# px a side and 8 strips a sheet, so a token cell covers about 21x21 px instead of 30x30; a crop may reach 2 MB (still
+# within one OCR call's 4 MB and the extraction's IMAGE_BUDGET, which then holds fewer pages).
+FINE_SHEET_AREA, FINE_SHEET_SIDE, FINE_SHEET_STRIPS = 500_000, 1_100, 8
+# A paragraph crop is made at the first scale (px/pt) whose PNG data URL stays within its byte cap.
+CROP_SCALES, FINE_CROP_SCALE = (2, 1.6, 1.2, .8), 3
+CROP_BYTES, FINE_CROP_BYTES = 1_300_000, 2_000_000
 # Sheet layout in pixels: outer margin, numbered tab width and height, padding inside a strip's frame, gap between strips.
 SHEET_MARGIN, SHEET_TAB, SHEET_TAB_HEIGHT, SHEET_PAD, SHEET_GAP = 6, 56, 28, 6, 24
 SHEET_INK = (.05, .3, .75)
@@ -331,22 +342,28 @@ def ocr_words(raw, rect):
     return lines
 
 
-def han_heights(comps, lines, size):
+def han_heights(comps, lines, size, whole=False):
     """Ink heights under single-character Han OCR words. Every geometric test of the formula analysis is relative
-    to this glyph height H, so it holds for any font size or scan resolution."""
+    to this glyph height H, so it holds for any font size or scan resolution. whole: the Han characters of longer words
+    of Han only count too (a heading read as one word): their boxes are interpolated, but each Han character is an em."""
     heights = []
     for line in lines:
         for word in line["words"]:
             # 十 二 一 王 are as often a misread + = − as Han glyphs
             han = [ch for ch in word["chars"] if HAN.match(ch["c"]) and ch["c"] not in CONFUSABLE]
-            if len(word["text"].strip()) != 1 or not han:
+            text = word["text"].strip()
+            if not han or (len(text) != 1 and not (whole and len(han) == len(text))):
                 continue
-            box = han[0]["rect"]
-            inside = [c["rect"] for c in comps if box.x0 <= (c["rect"].x0 + c["rect"].x1) / 2 <= box.x1 and box.y0 <= middle(c["rect"]) <= box.y1]
-            if inside:
-                glyph = union_rect(inside)
-                if glyph.width >= .5 * size and glyph.height >= .5 * size:
-                    heights.append(glyph.height)
+            for ch in han:
+                box = ch["rect"]
+                # no glyph is half again as tall as the paragraph's text: a brace Tesseract read as 人 is, and so are
+                # the glyphs of two rows its box spans
+                inside = [c["rect"] for c in comps if box.x0 <= (c["rect"].x0 + c["rect"].x1) / 2 <= box.x1 and box.y0 <= middle(c["rect"]) <= box.y1 and c["rect"].height <= 1.6 * size]
+                if inside:
+                    glyph = union_rect(inside)
+                    # a Han glyph is about as wide as it is tall
+                    if glyph.width >= .5 * size and .5 * size <= glyph.height <= 1.6 * size and glyph.width >= .6 * glyph.height:
+                        heights.append(glyph.height)
     return heights
 
 
@@ -503,8 +520,8 @@ def classify_cell(cell, H, axis, pix, data):
             return
     if len(solid) == 2 and core.width <= .5 * H and not thin:
         top, dot = sorted((c["rect"] for c in solid), key=lambda r: r.y0)
-        # ? and ! : a hook or stroke with a dot below it on the baseline
-        if dot.height <= .3 * H and dot.width <= .3 * H and middle(dot) >= axis + .2 * H and top.y1 <= dot.y0 + .1 * H and min(top.x1, dot.x1) > max(top.x0, dot.x0) and top.height >= .4 * H:
+        # ? and ! : a hook or stroke with a dot centred below it on the baseline
+        if dot.height <= .3 * H and dot.width <= .3 * H and middle(dot) >= axis + .2 * H and top.y1 <= dot.y0 + .1 * H and top.x0 <= (dot.x0 + dot.x1) / 2 <= top.x1 and top.height >= .4 * H:
             cell["kind"] = "punct"
             return
     smalls = [c["rect"] for c in solid]
@@ -523,13 +540,41 @@ def classify_cell(cell, H, axis, pix, data):
         cell["kind"] = "small"
 
 
-def text_rows(comps, H, pix, data, lines):
+def kerned_script(comps, H, axis):
+    """Whether pieces of ink that make one cell are a Latin letter with a script kerned under its right side (Sₙ, Eₖ,
+    F_N): about a Han glyph's size together, but the tallest piece, leftmost, is a letter shorter than a Han glyph, and
+    the other pieces are script-sized (together a quarter of a Han glyph tall at least: a speck left by a blurred
+    stroke is no script), each right of that letter's middle and under the row's text axis, and drop below the
+    letter's foot as a subscript does. A Han glyph's parts end at its em box together. A comma kerned under the arm of
+    T, V, W or Y drops below the foot too, but less than a script, and it is narrower than a letter script and shorter
+    than a digit one."""
+    rects = [c["rect"] for c in comps if max(c["rect"].width, c["rect"].height) > .12 * H]
+    if not 2 <= len(rects) <= 5:
+        return False
+    letter = max(rects, key=lambda r: r.height)
+    if not .5 * H <= letter.height <= .86 * H or letter.x0 > min(r.x0 for r in rects) + .05 * H:
+        return False
+    rest = [r for r in rects if r is not letter]
+    script = union_rect(rest)
+    if not all(r.x0 >= (letter.x0 + letter.x1) / 2 and r.height <= .62 * H and middle(r) >= axis + .1 * H for r in rest):
+        return False
+    return script.y1 >= letter.y1 + .1 * H and script.height >= .25 * H and (script.width >= .22 * H or script.height >= .32 * H or script.y1 >= letter.y1 + .2 * H)
+
+
+def row_boxes(boxes, rows, index):
+    """The boxes of an OCR reading's words that may tell about the glyphs of row index: one reaching well into another
+    row (the Chinese model reads a system under a brace as one word over both rows) tells nothing about either."""
+    return [b for b in boxes if not any(k != index and min(b.y1, r["y1"]) - max(b.y0, r["y0"]) > .3 * (r["y1"] - r["y0"]) for k, r in enumerate(rows))]
+
+
+def text_rows(comps, H, pix, data, lines, confirmed=None):
     """Rows and cells of one paragraph's ink.
 
     Rows come from the vertical occupancy of glyph-sized ink. Thin marks (arrows, bars, dots, primes) and vertical
     rules join afterwards the row whose text axis is near, so a dashed border cannot glue two lines together while a
     stacked fraction stays in its row. Within a row, components whose x-ranges overlap form one cell: numerator +
-    bar + denominator, arrow + letters, letter + prime."""
+    bar + denominator, arrow + letters, letter + prime. confirmed: boxes of the words of Han characters the Chinese model
+    alone read on the paragraph, when the mixed reading (lines) took much of its Chinese for Latin letters."""
     body = [c for c in comps if c["rect"].height <= 1.5 * H and c["rect"].width <= 8 * H]
 
     def is_mark(c):
@@ -558,10 +603,18 @@ def text_rows(comps, H, pix, data, lines):
             row["comps"].append(c)
             row["y0"], row["y1"] = min(row["y0"], c["rect"].y0), max(row["y1"], c["rect"].y1)
     chars = [dict(ch, word=word) for line in lines for word in line["words"] for ch in word["chars"]]
+
+    def joined(a, b):
+        """Whether ink b, starting at or right of a, overlaps a's span enough to make one cell with it. A speck that only
+        grazes a glyph's span (a serif of the next letter broken off by a coarse scan) stays apart: the speck rule
+        below gives it to the glyph it belongs to."""
+        speck = next((r for r in (b, a) if max(r.width, r.height) <= .2 * H), None)
+        return b.x0 < a.x1 - .15 and (speck is None or min(a.x1, b.x1) - max(a.x0, b.x0) >= .5 * speck.width)
+
     for row in rows:
         cells = []
         for c in sorted(row["comps"], key=lambda c: c["rect"].x0):
-            if cells and c["rect"].x0 < cells[-1]["rect"].x1 - .15:
+            if cells and joined(cells[-1]["rect"], c["rect"]):
                 cells[-1]["comps"].append(c)
                 cells[-1]["rect"].include_rect(c["rect"])
             else:
@@ -571,12 +624,29 @@ def text_rows(comps, H, pix, data, lines):
         while merged:
             merged = False
             for i in range(len(cells) - 1):
-                if cells[i + 1]["rect"].x0 < cells[i]["rect"].x1 - .15:
+                if joined(cells[i]["rect"], cells[i + 1]["rect"]):
                     cells[i]["comps"] += cells[i + 1]["comps"]
                     cells[i]["rect"].include_rect(cells[i + 1]["rect"])
                     del cells[i + 1]
                     merged = True
                     break
+        # A speck touching a glyph (a serif, or the dot of an italic i, that a coarse scan broke off) belongs to it: on
+        # its own it reads as a period between a letter and its script. A period, a decimal point or a dot of an
+        # ellipsis keeps a gap to its neighbours; a speck hanging lower than a period sits (a subscript's serif) may
+        # keep a narrow one.
+        k = 0
+        while k < len(cells):
+            r = cells[k]["rect"]
+            reach = .1 * H if middle(r) >= row["axis"] + .5 * H else .06 * H
+            touching = [j for j in (k - 1, k + 1) if max(r.width, r.height) <= .2 * H and 0 <= j < len(cells) and max(cells[j]["rect"].width, cells[j]["rect"].height) > .2 * H and max(cells[j]["rect"].x0 - r.x1, r.x0 - cells[j]["rect"].x1) <= reach and cells[j]["rect"].y0 - .3 * H <= middle(r) <= cells[j]["rect"].y1 + .1 * H]
+            if touching:
+                # the glyph whose height the speck lies within, else the nearer one
+                j = min(touching, key=lambda j: (not cells[j]["rect"].y0 <= middle(r) <= cells[j]["rect"].y1, max(cells[j]["rect"].x0 - r.x1, r.x0 - cells[j]["rect"].x1)))
+                cells[j]["comps"] += cells[k]["comps"]
+                cells[j]["rect"].include_rect(r)
+                del cells[k]
+                continue
+            k += 1
         for cell in cells:
             cell["fraction"] = is_fraction(cell, H, pix, data)
         # The axis is the centre of full-height glyphs (Han, capitals, digits); x-height letters sit below it,
@@ -621,8 +691,14 @@ def text_rows(comps, H, pix, data, lines):
             # stacks like a fraction with a whole glyph's height on one side, and OCR reads Han at the stack; the parts
             # of a real fraction are letters or digits, smaller than a Han glyph (OCR reads 也 for v₀/a too)
             han_stack = han_stack or (any(HAN.match(c) and c not in CONFUSABLE for c in cell["ocr"]) and any(p.height >= .85 * H and p.width >= .7 * H for p in cell["parts"]))
-            cell["han_ocr"] = plausible and cell["ocr_han"] and not cell["confusable"]
-            cell["han"] = (cell["kind"] == "other" and (big or (plausible and cell["ocr_han"]))) or (cell["kind"] == "vector" and cell["ocr_han"] and not cell["confusable"] and r.height >= .8 * H and .7 * H <= r.width <= 1.4 * H) or (cell["kind"] == "vector" and not cell["arrow"] and r.height >= .85 * H and .75 * H <= r.width <= 1.3 * H and not re.search(r"[A-Za-z0-9]", cell["ocr"])) or (cell["kind"] == "fraction" and han_stack)
+            # A Latin letter with a script kerned under it (Sₙ, Eₖ, F_N) is one cell about a Han glyph's size, and OCR
+            # may read a Han character over it (玉 for Eₖ); its ink says otherwise (kerned_script), and size or OCR
+            # alone never make it Han.
+            cell["scripted"] = cell["kind"] == "other" and kerned_script(cell["comps"], H, row["axis"])
+            cell["han_ocr"] = plausible and cell["ocr_han"] and not cell["confusable"] and not cell["scripted"]
+            cell["han"] = not cell["scripted"] and ((cell["kind"] == "other" and (big or (plausible and cell["ocr_han"]))) or (cell["kind"] == "vector" and cell["ocr_han"] and not cell["confusable"] and r.height >= .8 * H and .7 * H <= r.width <= 1.4 * H) or (cell["kind"] == "vector" and not cell["arrow"] and r.height >= .85 * H and .75 * H <= r.width <= 1.3 * H and not re.search(r"[A-Za-z0-9]", cell["ocr"])) or (cell["kind"] == "fraction" and han_stack))
+            # about a Han glyph's size, if a little under the size the ink test needs (row_kinds)
+            cell["sized"] = core is not None and core.height >= .75 * H and .7 * H <= core.width <= 1.4 * H
             # English words are text, never part of a formula: 'the equation E=mc²' keeps 'the equation' as words.
             # Capitals only (ABCD, OEFOA) are point names or misread formulas, not words.
             cell["english"] = any(is_english(w["text"]) for w in cell["words"].values())
@@ -635,15 +711,43 @@ def text_rows(comps, H, pix, data, lines):
         box = han[0]["rect"]
         for row in (r for r in rows if r["y0"] <= box.y1 + 1 and r["y1"] >= box.y0 - 1):
             group = [c for c in row["cells"] if box.x0 <= (c["rect"].x0 + c["rect"].x1) / 2 <= box.x1 and box.y0 - 1 <= middle(c["rect"]) <= box.y1 + 1]
-            if len(group) >= 2 and not any(c["kind"] in ("fraction", "vector", "equals", "open", "close", "punct") for c in group):
+            # a letter and the script under it (Eₖ read as 玉) are no parts of one glyph
+            if len(group) >= 2 and not any(c["kind"] in ("fraction", "vector", "equals", "open", "close", "punct") or c["scripted"] for c in group) and not kerned_script([p for c in group for p in c["comps"]], H, row["axis"]):
                 glyph = union_rect([c["rect"] for c in group])
                 if glyph.height >= .62 * H and .7 * H <= glyph.width <= 1.4 * H:
                     for c in group:
                         c["han"] = True
+    # Where the mixed reading saw Latin junk, the Han characters the Chinese model alone reads (confirmed: boxes of its
+    # words of them, which place text only roughly) still tell glyphs a coarse scan cut into parts (列 into 歹 and 刂):
+    # near such a word, touching parts that together are a Han glyph's size, one of them as tall as one, are that glyph.
+    # No Latin letter or pair of letters is that tall, and a letter with its script stays one.
+    for index, row in enumerate(rows if confirmed else ()):
+        cells = row["cells"]
+        boxes = [b for b in row_boxes(confirmed, rows, index) if b.y0 <= row["y1"] + 1 and b.y1 >= row["y0"] - 1]
+
+        def part(c):
+            return not c["han"] and not c["scripted"] and c["kind"] in ("other", "small")
+
+        k = 0
+        while k < len(cells):
+            if not part(cells[k]):
+                k += 1
+                continue
+            j = k
+            while j + 1 < len(cells) and part(cells[j + 1]) and cells[j + 1]["rect"].x0 - cells[j]["rect"].x1 <= .12 * H and cells[j + 1]["rect"].x1 - cells[k]["rect"].x0 <= 1.15 * H:
+                j += 1
+            group = cells[k:j + 1]
+            glyph = union_rect([c["rect"] for c in group])
+            # (one cell of a Han glyph's size is judged by its ink and OCR above: a ∠ is as big)
+            if len(group) >= 2 and .85 * H <= glyph.height <= 1.3 * H and .7 * H <= glyph.width <= 1.15 * H and max(c["rect"].height for c in group) >= .9 * H and any(b.x0 - .5 * H <= (c["rect"].x0 + c["rect"].x1) / 2 <= b.x1 + .5 * H for b in boxes for c in group) and not kerned_script([p for c in group for p in c["comps"]], H, row["axis"]):
+                for c in group:
+                    c["han"] = True
+            k = j + 1
     for row in rows:
         cells, axis = row["cells"], row["axis"]
         # A left-right Han glyph OCR misread (则 = 贝 + 刂, 树) is two or three touching tall parts that together are
-        # one em wide and dense; a pair of Latin letters that size reads as two letters.
+        # one em wide and dense; a pair of Latin letters that size reads as two letters, but no two letters are both as
+        # tall as a Han glyph (a coarse scan's mixed reading puts a letter on each part of 则), and no taller.
         for i in range(len(cells)):
             for j in (i + 1, i + 2):
                 group = cells[i:j + 1]
@@ -653,7 +757,7 @@ def text_rows(comps, H, pix, data, lines):
                     continue
                 glyph = union_rect([c["rect"] for c in group])
                 ink = sum(c["ink"] for g in group for c in g["comps"])
-                if max(c["rect"].height for c in group) >= .9 * H and min(c["rect"].height for c in group) >= .5 * H and glyph.height >= .9 * H and .8 * H <= glyph.width <= 1.15 * H and ink >= .18 * glyph.width * glyph.height * INK_SCALE * INK_SCALE and len(re.findall(r"[A-Za-z0-9]", "".join(c["ocr"] for c in group))) < 2 and han_topped(pix, data, group):
+                if max(c["rect"].height for c in group) >= .9 * H and min(c["rect"].height for c in group) >= .5 * H and glyph.height >= .9 * H and .8 * H <= glyph.width <= 1.15 * H and ink >= .18 * glyph.width * glyph.height * INK_SCALE * INK_SCALE and (len(re.findall(r"[A-Za-z0-9]", "".join(c["ocr"] for c in group))) < 2 or all(.9 * H <= c["rect"].height <= 1.3 * H for c in group)) and han_topped(pix, data, group):
                     for c in group:
                         c["han"] = True
 
@@ -691,6 +795,13 @@ def text_rows(comps, H, pix, data, lines):
             elif cell["ocr_han"] and cell["rect"].width >= .5 * H:
                 cell["han"] = True
         for i, cell in enumerate(cells):
+            # A relation sign set larger than the letters round it (a full-width ⩾ or ≠) is as big as a Han glyph. OCR
+            # reads it as '=', '<' or '>', never as Han, or as '2' where its top is no stroke across like a Han glyph's,
+            # and reads no Han round it either (斗 reads as '2' too, before the parts of 小 that OCR reads as Han).
+            read = cell["ocr"].strip()
+            if cell["han"] and cell["kind"] == "other" and not cell["ocr_han"] and (re.fullmatch(r"[=<>≤≥≦≧⩽⩾≠]+", read) or (read == "2" and not han_topped(pix, data, [cell]))) and latin(i - 1) and latin(i + 1) and not any(c["ocr_han"] and not c["confusable"] for c in (cells[i - 1], cells[i + 1])) and gap(i - 1, i) <= .45 * H and gap(i, i + 1) <= .45 * H:
+                cell["han"], cell["kind"], cell["context"] = False, "operator", True
+        for i, cell in enumerate(cells):
             # sub/superscripts (H₂O, a₁, m², Fe³⁺): a small glyph right after a Latin letter or digit, below its
             # bottom or above the axis. A comma is shorter than .4 H; a degree sign narrower than .22 H.
             core, base = cell["core"], cells[i - 1] if i else None
@@ -705,6 +816,61 @@ def text_rows(comps, H, pix, data, lines):
             if above and len(cell["comps"]) == 1:
                 above = not is_prime(pix, data, cell["comps"][0])
             cell["script"] = below or above
+
+        # Letter scripts (Sₙ, a_{n−1}, x_i, K_sp, qⁿ⁻¹): a coarse scan blurs an x-height letter set as a script to the
+        # size of a comma, or breaks it into strokes each the size of one. It hangs under (or over) a Latin base glued
+        # to it, and what follows it tells it from sentence punctuation, which no operator, closing bracket, other
+        # script or further punctuation follows; at the end of a formula a letter is wider than a comma and no wedge.
+        # A script goes on over what is set at its level right after it: the minus, plus, digits and letters of n−1,
+        # i+1, sp.
+        def level(c):
+            # a script's top lies under the axis; a letter with a descender (the g of kg) reaches the x-height above it
+            k = c["core"] or c["rect"]
+            if k.height > .75 * H or k.width > .6 * H:
+                return None
+            if k.y0 >= axis + .05 * H and middle(k) >= axis + .2 * H:
+                return "low"
+            if k.y1 <= axis + .1 * H and middle(k) <= axis - .2 * H:
+                return "high"
+            return None
+
+        for i in range(1, len(cells)):
+            cell, before = cells[i], cells[i - 1]
+            where = level(cell)
+            if cell["script"] or cell["han"] or where is None or cell["kind"] not in ("punct", "small", "other", "plus", "bars", "operator"):
+                continue
+            k, after = cell["core"] or cell["rect"], cells[i + 1] if i + 1 < len(cells) else None
+            chained = (before["script"] and level(before) == where) or (before["scripted"] and where == "low")
+            if chained:
+                # the minus of n−1 keeps a thin space on each side
+                if gap(i - 1, i) > .35 * H:
+                    continue
+            else:
+                # the base is a letter, digit or bracket on the text's own line, not a script already, nor ink wider than a
+                # glyph that OCR reads as Han (a Han glyph the scan welded to the letter after it)
+                base = not before["han"] and not before["script"] and before["core"] is not None and before["core"].height >= .45 * H and before["kind"] in ("other", "vector", "close", "small", "plus") and not (before["ocr_han"] and not before["confusable"] and before["core"].width > 1.15 * H)
+                if not base or gap(i - 1, i) > .15 * H or cell["kind"] in ("bars", "operator", "plus"):
+                    continue
+                # a subscript drops below its base's foot, a superscript sits over its middle; many Han glyphs have a dot
+                # over a stroke (门 文 方), so OCR reading Han there leaves a raised piece alone
+                if (where == "low" and k.y1 < before["core"].y1 + .12 * H) or (where == "high" and (k.y1 > middle(before["core"]) or cell["ocr_han"] or before["ocr_han"])):
+                    continue
+            follows = after is not None and not after["han"] and ((after["kind"] == "punct" and gap(i, i + 1) <= H) or (gap(i, i + 1) <= .2 * H and (after["kind"] in ("equals", "operator", "bars", "plus", "close") or level(after) == where)))
+            # A letter: taller than an x-height mark, or as wide as a letter and no wedge, with text close after it (a
+            # full-width 。 or ， keeps most of its em blank after it, and ends a row as often). Ink the size of sentence
+            # punctuation (a Song face's ， right after a script is as tall as a blurred letter) is a letter only with
+            # text close after it, unless a piece of it lies over another: a dotted letter (the ᵢ of xᵢ, its dot over
+            # its stem) ends a row as well. The top dot of ; or : sits at the axis, above any script.
+            close = after is not None and gap(i, i + 1) <= .5 * H and not (len(cell["comps"]) == 1 and is_prime(pix, data, cell["comps"][0]))
+            mark = cell["kind"] == "punct"
+            dotted = any(a["rect"].y1 <= b["rect"].y0 for a in cell["comps"] for b in cell["comps"])
+            letter = (k.height >= .4 * H and (close or not mark or dotted)) or (k.width >= .28 * H and close)
+            # a minus or plus only continues a script (the not chained ones went above); a glyph is at least a dot's size
+            sign = cell["kind"] in ("bars", "operator", "plus")
+            if sign or (k.height >= .25 * H and ((chained and not mark) or follows or letter)):
+                cell["script"] = cell["lettered"] = True
+                if cell["kind"] == "punct":
+                    cell["kind"] = "small"
         for cell in cells:
             if cell["kind"] == "small" and not cell["script"] and middle(cell["core"]) >= axis + .12 * H and (not cell["ocr"].strip() or any(c in SENTENCE_PUNCTUATION for c in cell["ocr"]) or cell["core"].height <= .3 * H):
                 cell["kind"] = "punct"
@@ -777,10 +943,12 @@ def blocks_formula(cell):
     return cell["han"] or cell["english"]
 
 
-def grow_region(cells, i, j, H):
+def grow_region(cells, i, j, H, lettered=False):
     """Extend a run of seed cells over adjacent non-Han cells: up to .45 H apart, .75 H next to an operator and
     1 H inside an open bracket. Sentence punctuation stops it outside brackets, so 'OA=a，OB=b，' stays two formulas
-    with the commas as text, and a list label '(1)' set apart on the left is not taken."""
+    with the commas as text, and a list label '(1)' set apart on the left is not taken. lettered: the run's only
+    formula ink is letter scripts (the bₙ of '中{bₙ}', the cₙ of '则 cₙ'), whose letters are set tight: no more room next
+    to an operator."""
 
     def balance(a, b):
         depth = lowest = 0
@@ -790,9 +958,18 @@ def grow_region(cells, i, j, H):
         return depth, lowest
 
     def suspicious(cell, gap):
-        # a Han-sized glyph OCR did not read as Latin may be a Han character the ink tests missed (用, 示)
+        # a Han-sized glyph set apart may be a Han character the ink tests missed (用, 示): OCR reading it as Latin
+        # tells otherwise (a capital of a formula is as big)
         core = cell["core"]
-        return cell["kind"] == "other" and core is not None and core.height >= .85 * H and core.width >= .7 * H and not re.fullmatch(r"[A-Za-z0-9\u0370-\u03ff]+", cell["ocr"].strip()) and gap > .25 * H
+        if lettered and cell["kind"] not in ("open", "close"):
+            # Beside a formula only a letter script makes, ink as tall as a Han glyph (wider than the bar of |aₙ|) or that
+            # OCR reads as Han is Han however close: a letter with its script stands alone or in brackets, and a coarse
+            # scan's mixed reading puts a Latin letter on many a Han glyph (中, 明, 以) and cuts others into narrow parts
+            # (行, 乱).
+            return (cell["ocr_han"] and not cell["confusable"]) or (cell["rect"].height >= .85 * H and cell["rect"].width >= .25 * H)
+        if cell["kind"] != "other" or core is None or gap <= .25 * H or core.height < .85 * H:
+            return False
+        return core.width >= .7 * H and not re.fullmatch(r"[A-Za-z0-9\u0370-\u03ff]+", cell["ocr"].strip())
 
     while True:
         moved = False
@@ -800,7 +977,7 @@ def grow_region(cells, i, j, H):
         if j + 1 < len(cells):
             n = cells[j + 1]
             gap = n["rect"].x0 - cells[j]["rect"].x1
-            limit = (1.0 if depth > 0 else .75 if is_op(n, H) or is_op(cells[j], H) else .45) * H
+            limit = (1.0 if depth > 0 else .75 if (is_op(n, H) or is_op(cells[j], H)) and not lettered else .45) * H
             ok = not blocks_formula(n) and gap <= limit and not suspicious(n, gap)
             if ok and n["kind"] == "punct" and depth <= 0:
                 ok = False
@@ -813,7 +990,7 @@ def grow_region(cells, i, j, H):
         if i > 0:
             p = cells[i - 1]
             gap = cells[i]["rect"].x0 - p["rect"].x1
-            limit = (1.0 if lowest < 0 else .75 if is_op(p, H) or is_op(cells[i], H) else .45) * H
+            limit = (1.0 if lowest < 0 else .75 if (is_op(p, H) or is_op(cells[i], H)) and not lettered else .45) * H
             ok = not blocks_formula(p) and gap <= limit and not suspicious(p, gap)
             if ok and p["kind"] == "punct" and lowest >= 0:
                 ok = False
@@ -890,7 +1067,8 @@ def formula_regions(rows, lines, H):
     regions = []
     for index, row in enumerate(rows):
         cells = row["cells"]
-        marked = [False] * len(cells)
+        # strong: seeded by more than a letter script (grow_region)
+        marked, strong = [False] * len(cells), [False] * len(cells)
         for x0, x1, y0, y1 in seeds:
             # a Tesseract line box is inflated: the word belongs to the ink row it overlaps most
             best = max(range(len(rows)), key=lambda k: min(y1, rows[k]["y1"]) - max(y0, rows[k]["y0"]))
@@ -899,7 +1077,7 @@ def formula_regions(rows, lines, H):
             for i, cell in enumerate(cells):
                 r = cell["rect"]
                 if x0 <= (r.x0 + r.x1) / 2 <= x1 or min(r.x1, x1) - max(r.x0, x0) >= .5 * r.width:
-                    marked[i] = True
+                    marked[i] = strong[i] = True
         for i, cell in enumerate(cells):
             left = cells[i - 1] if i else None
             right = cells[i + 1] if i + 1 < len(cells) else None
@@ -910,16 +1088,21 @@ def formula_regions(rows, lines, H):
                 return (c["rect"].x0 - cell["rect"].x1 if side > 0 else cell["rect"].x0 - c["rect"].x1) <= .45 * H
 
             if cell["kind"] == "fraction" and not cell["han"]:
-                marked[i] = True
+                marked[i] = strong[i] = True
             elif cell["kind"] == "vector" and cell["arrow"]:
                 # an arrow with its head over letters is a vector whatever OCR reads under it
-                marked[i] = True
+                marked[i] = strong[i] = True
             elif (cell["kind"] in ("equals", "operator") or (cell["kind"] == "plus" and cell.get("context"))) and flank(left, -1) and flank(right, 1):
-                marked[i] = True
+                marked[i] = strong[i] = True
             elif cell["kind"] == "bars" and .55 * H <= cell["rect"].width <= 1.05 * H and any(n is not None and n["kind"] in ("vector", "fraction") for n in (left, right)) and flank(left, -1) and flank(right, 1):
-                marked[i] = True
+                marked[i] = strong[i] = True
             elif cell["script"]:
                 marked[i] = marked[i - 1] = True
+                if not cell.get("lettered"):
+                    strong[i] = strong[i - 1] = True
+            elif cell["scripted"]:
+                # a letter with its script kerned under it (Sₙ) is a formula on its own
+                marked[i] = True
         # Han, punctuation and English words never seed, even under an inflated OCR word box
         for i, cell in enumerate(cells):
             if blocks_formula(cell) or cell["kind"] == "punct":
@@ -941,7 +1124,7 @@ def formula_regions(rows, lines, H):
             i = j + 1
         grown = []
         for i, j in runs:
-            i, j = grow_region(cells, i, j, H)
+            i, j = grow_region(cells, i, j, H, not any(strong[i:j + 1]))
             if grown and i <= grown[-1][1] + 1 and joinable(cells, grown[-1][1], i, H):
                 grown[-1][1] = max(grown[-1][1], j)
             elif grown and i <= grown[-1][1]:
@@ -958,15 +1141,37 @@ def formula_regions(rows, lines, H):
             # it (no Latin letter or digit), a region with no operator, fraction or bar in its ink, or of one glyph's
             # size, is Han glyphs whose parts looked like a script, an arrow or a fraction: hidden under a label they
             # would come back as Chinese pixels inside the translation. Missing a small formula costs little, Gemini
-            # reads it in the crop; OCR reading Han beside an inked operator (p=x read as 卫一) is still a formula.
+            # reads it in the crop; OCR reading Han beside an inked operator (p=x read as 卫一) is still a formula, and so
+            # is a script on a base shorter than any Han glyph, or kerned under it (vₓ, Sₙ: the ink, not a misplaced OCR
+            # box, decides).
             box = union_rect([c["rect"] for c in cells[i:j + 1]])
             read = "".join(c["ocr"] for c in cells[i:j + 1])
-            han_read = any(HAN.match(c) and c not in CONFUSABLE for c in read) and not re.search(r"[A-Za-z0-9]", read)
+            letters = any(c["scripted"] or (c["script"] and k > i and cells[k - 1]["core"] is not None and cells[k - 1]["core"].height <= .84 * H) for k, c in enumerate(cells[i:j + 1], i))
+            han_read = any(HAN.match(c) and c not in CONFUSABLE for c in read) and not re.search(r"[A-Za-z0-9]", read) and not letters
             operator = any(c["kind"] in ("equals", "operator", "plus", "bars", "fraction") for c in cells[i:j + 1])
             if box.height > 2.9 * H or (han_read and (not operator or (.85 * H <= box.height <= 1.25 * H and .7 * H <= box.width <= 1.3 * H))):
                 continue
+            # Formulas on one row with only scripts, brackets, signs or digits between them (S_{n−1} (n≥2), no Han, no
+            # word, no sentence punctuation) are one formula: split, each piece's label would stand apart from the rest.
+            if regions and regions[-1]["row"] == index and bridged(cells, regions[-1]["last"], i, H):
+                regions[-1]["last"] = j
+                continue
             regions.append({"row": index, "first": i, "last": j})
-    return regions
+    # A lone letter or digit is no formula of its own (what is left of one OCR misread round a sign taken for Han): a
+    # picture of it beside the formula ink it belongs to would only make Gemini place a stray token. A cell wider than a
+    # glyph (a root over its radicand), or with a sign taller than one (an integral or a sum with its limits), is one;
+    # glyphs of two lines that a brace runs into one row, one over the other, are not.
+    lone = lambda g: rows[g["row"]]["cells"][g["first"]]
+    return [g for g in regions if g["first"] < g["last"] or lone(g)["kind"] in ("fraction", "vector") or lone(g)["scripted"] or lone(g)["rect"].width > 1.1 * H or max(c["rect"].height for c in lone(g)["comps"]) > 1.3 * H]
+
+
+def bridged(cells, a, b, H):
+    """Whether only scripts, brackets, signs or digits lie between cells a and b of a row (none Han, an English word or
+    sentence punctuation), each within .75 H of the next."""
+    for c in cells[a + 1:b]:
+        if blocks_formula(c) or c["kind"] == "punct" or not (c["script"] or c["kind"] in ("small", "open", "close", "equals", "operator", "bars", "plus") or re.fullmatch(r"\d+", c["ocr"].strip())):
+            return False
+    return all(cells[k + 1]["rect"].x0 - cells[k]["rect"].x1 <= .75 * H for k in range(a, b))
 
 
 def joinable(cells, a, b, H):
@@ -1013,7 +1218,8 @@ def region_geometry(region, rows, H, page_rect):
     last = cells[j]
     tail = max(last["comps"], key=lambda c: c["rect"].x1)
     others = [c["rect"] for c in last["comps"] if c is not tail]
-    if others and tail["rect"].height <= .35 * H and tail["rect"].width <= .3 * H and middle(tail["rect"]) >= row["axis"] + .25 * H and (tail["rect"].x0 + tail["rect"].x1) / 2 > max(r.x1 for r in others):
+    # (a script kerned under the last letter is the formula's own: Sₙ)
+    if others and not last.get("scripted") and not last.get("script") and tail["rect"].height <= .35 * H and tail["rect"].width <= .3 * H and middle(tail["rect"]) >= row["axis"] + .25 * H and (tail["rect"].x0 + tail["rect"].x1) / 2 > max(r.x1 for r in others):
         # sentence punctuation kerned under the last glyph: cut it off when the ink allows, else tell the renderer
         rest = union_rect(others)
         if tail["rect"].x0 >= rest.x1 - .1:
@@ -1031,7 +1237,13 @@ def region_geometry(region, rows, H, page_rect):
     box.y0, box.y1 = max(box.y0, top), min(box.y1, bottom)
     box &= page_rect
     mark = fitz.Rect(box.x0, max(min(box.y0, row["axis"] - .55 * H), top), box.x1, min(max(box.y1, row["axis"] + .55 * H), bottom))
-    return box, row["axis"], mark & page_rect, trail
+    # Where its label does not fit, the label of a narrow formula may also cover the blank paper beside it (a quarter
+    # glyph at most, short of the next ink): a letter with its script (Sₙ, xᵢ) then gets one too instead of going to
+    # Gemini as an image of its own.
+    left = max(box.x0 - .25 * H, cells[i - 1]["rect"].x1 + .3) if i > 0 else box.x0 - .25 * H
+    right = min(box.x1 + .25 * H, cells[j + 1]["rect"].x0 - .3) if j + 1 < len(cells) else box.x1 + .25 * H
+    room = fitz.Rect(min(box.x0, left), mark.y0, max(box.x1, right), mark.y1)
+    return box, row["axis"], mark & page_rect, trail, room & page_rect
 
 
 def region_text(region, rows, lines):
@@ -1113,11 +1325,12 @@ def row_text(words, row, members, tokens, H):
         return "han" if han else "punct" if punct else "other"
 
     def witness(ch, reach):
-        """The nearest unclaimed ink cell outside every region, of the character's own sort, within reach of its box."""
+        """The first unclaimed ink cell outside every region, of the character's own sort, within reach of its box.
+        Characters claim cells in reading order: Tesseract's boxes can sit a glyph off their ink, and the nearest cell
+        to a shifted box is the next character's (记 claiming the ink of 作 in 记作Sₙ, which then has none)."""
         want = sort_of(HAN.match(ch["c"]), False)
-        cx = (ch["rect"].x0 + ch["rect"].x1) / 2
-        found = [(abs((c["rect"].x0 + c["rect"].x1) / 2 - cx), n) for n, c in enumerate(outside) if n not in claimed and sort_of(c["han"], c["kind"] == "punct") == want and ch["rect"].x0 - reach <= (c["rect"].x0 + c["rect"].x1) / 2 <= ch["rect"].x1 + reach]
-        return min(found)[1] if found else None
+        found = [n for n, c in enumerate(outside) if n not in claimed and sort_of(c["han"], c["kind"] == "punct") == want and ch["rect"].x0 - reach <= (c["rect"].x0 + c["rect"].x1) / 2 <= ch["rect"].x1 + reach]
+        return min(found, key=lambda n: outside[n]["rect"].x0) if found else None
 
     # Punctuation is matched to punctuation ink over the whole row, closest pairs first: Tesseract boxes can sit a
     # glyph off their ink, and overlapping Tesseract lines of a formula row (numerators, main line, denominators)
@@ -1303,48 +1516,79 @@ def page_objects(page, scale, components, pix, dark=190000):
     return panels, figures, photos
 
 
-def dark_bands(page, pix, scale, components):
-    """Light text on a dark band: a heading printed white on a banner, a tab or a title bar. The band is one dense,
-    wide and short component; its glyphs are the light holes in it. Each band stays as pixels; each piece of its glyph
-    rows becomes a text box over the band, painted with the band's colour and written in the glyphs' colour."""
+def dark_bands(page, pix, scale, components, dark=190000):
+    """Light text on a dark band: a heading printed white on a banner, a tab or a title bar; or dark text on a band of
+    a middle tone, darker than the page's ink threshold (a tinted tab: band and glyphs then make one component of
+    ink). The band is one dense, wide and short component; its glyphs are the light holes in it, or its darkest pixels.
+    Each band stays as pixels; each piece of its glyph rows becomes a text box over the band, painted with the band's
+    colour and written in the glyphs' colour. dark: the page's ink threshold (luma x 1000)."""
     bands = []
     for component in components:
         rect = component["rect"]
         x0, y0, x1, y1 = component["pixels"]
-        if component["ink"] < .8 * (x1 - x0) * (y1 - y0) or not 9 <= rect.height <= 60 or rect.width < 1.6 * rect.height or rect.width > page.rect.width * .96:
+        if not 9 <= rect.height <= 60 or rect.width < 1.6 * rect.height or rect.width > page.rect.width * .96:
             continue
-        pieces = band_glyphs(page, pix, scale, rect)
-        if pieces:
-            bands.append({"band": rect, "pieces": pieces})
+        # A tab joined to the rule along the box it heads is dense only where the tab is: each run of columns inked
+        # across the whole height, wide enough for a band, is one.
+        rects = [rect] if component["ink"] >= .8 * (x1 - x0) * (y1 - y0) else dense_runs(pix, scale, component, dark)
+        for rect in rects:
+            pieces = band_glyphs(page, pix, scale, rect) or []
+            # the light holes found first (an icon's white disc) keep the dark glyphs inside them
+            apart = [[round((p["glyphs"].x0 - rect.x0) * INK_SCALE), round((p["glyphs"].y0 - rect.y0) * INK_SCALE), round((p["glyphs"].x1 - rect.x0) * INK_SCALE), round((p["glyphs"].y1 - rect.y0) * INK_SCALE)] for p in pieces]
+            pieces += band_glyphs(page, pix, scale, rect, light=False, apart=apart) or []
+            if pieces:
+                bands.append({"band": rect, "pieces": pieces})
     return bands
 
 
-def band_glyphs(page, pix, scale, rect):
+def dense_runs(pix, scale, component, dark):
+    """Runs of columns of a component's box that ink (darker than dark, luma x 1000) fills over four fifths of its
+    height, each at least 1.6 times as wide as the box is tall, as page rects."""
+    x0, y0, x1, y1 = component["pixels"]
+    width, samples, runs, start = pix.width, pix.samples, [], None
+    for x in range(x0, x1 + 1):
+        full = x < x1 and sum(1 for y in range(y0, y1) if samples[(y * width + x) * 3] * 299 + samples[(y * width + x) * 3 + 1] * 587 + samples[(y * width + x) * 3 + 2] * 114 < dark) >= .8 * (y1 - y0)
+        if full and start is None:
+            start = x
+        elif not full and start is not None:
+            if x - start >= 1.6 * (y1 - y0):
+                runs.append(fitz.Rect(start / scale, component["rect"].y0, x / scale, component["rect"].y1))
+            start = None
+    return runs
+
+
+def band_glyphs(page, pix, scale, rect, light=True, apart=()):
     """Rows of light glyphs inside a dark band, cut into pieces at wide gaps (the cells of a dark table header), or
     None. A banner frames its text: the band is solid above, below and left of every row. A bold heading blurred into
-    one dark run has light counters inside its glyphs, but paper between them reaches its edge."""
+    one dark run has light counters inside its glyphs, but paper between them reaches its edge.
+    light False: dark glyphs on a band of a middle tone (a tab tinted darker than the page's ink threshold, its heading
+    darker still), told from the band by a threshold set halfway to the band's own tone; paper within the band (the
+    white disc of an icon) counts as band. apart: pixel boxes of light holes found first (that disc), whose dark glyphs
+    belong to them."""
     grey = page.get_pixmap(matrix=fitz.Matrix(INK_SCALE, INK_SCALE), clip=rect, colorspace=fitz.csGRAY, alpha=False)
     width, height, stride, samples = grey.width, grey.height, grey.stride, grey.samples
     tones = sorted(samples[y * stride + x] for y in range(0, height, 3) for x in range(0, width, 3))
-    dark, light = tones[len(tones) // 4], tones[-max(1, len(tones) // 200)]
-    if light - dark < 80:
+    # the band is most of the pixels, its glyphs the lightest (or the darkest) few
+    band, tone = (tones[len(tones) // 4], tones[-max(1, len(tones) // 200)]) if light else (tones[len(tones) // 2], tones[len(tones) // 200])
+    if abs(tone - band) < 80:
         return None
-    cut = (dark + light) // 2
-    data = samples.translate(bytes(1 if v > cut else 0 for v in range(256)))
-    # holes: light components that do not reach the band's edge; specks of a halftone screen are not glyph strokes
+    cut = (band + tone) // 2
+    data = samples.translate(bytes(1 if (v > cut if light else v < cut) else 0 for v in range(256)))
+    # holes: glyph components that do not reach the band's edge; specks of a halftone screen are not glyph strokes
     holes = [b for b in label_runs(data, width, height, stride) if b[0] > 0 and b[1] > 0 and b[2] < width and b[3] < height and b[4] >= 8 and max(b[2] - b[0], b[3] - b[1]) >= 1.5 * INK_SCALE]
+    holes = [b for b in holes if not any(a[0] <= (b[0] + b[2]) / 2 <= a[2] and a[1] <= (b[1] + b[3]) / 2 <= a[3] for a in apart)]
     if not holes or not .01 <= sum(b[4] for b in holes) / (width * height) <= .45:
         return None
 
-    darker = bytes(range(cut + 1))
+    side = bytes(range(cut + 1)) if light else bytes(range(cut, 256))
 
     def solid(x0, x1, y0, y1):
-        """Share of band pixels (darker than the cut) in a pixel box."""
+        """Share of band pixels (on the band's side of the cut) in a pixel box."""
         total = count = 0
         for y in range(max(0, y0), min(height, y1)):
             row = samples[y * stride + max(0, x0):y * stride + min(width, x1)]
             total += len(row)
-            count += len(row) - len(row.translate(None, darker))
+            count += len(row) - len(row.translate(None, side))
         return count / total if total else 0
 
     rows = []
@@ -1391,17 +1635,18 @@ def band_glyphs(page, pix, scale, rect):
                 right += 1
             right = max(gx1 + 2, right - min(gx0 - (groups[i - 1][-1][2] if i else 0), round(.5 * th)))
             glyphs, box = page_box(gx0, ty0, gx1, ty1), page_box(gx0 - 2, by0, right, by1)
-            found.append({"rect": glyphs, "glyphs": glyphs, "box": box, "height": th / INK_SCALE, "band": rect, **band_colours(pix, scale, rect, glyphs, box, cut, light)})
+            found.append({"rect": glyphs, "glyphs": glyphs, "box": box, "height": th / INK_SCALE, "band": rect, "light": light, **band_colours(pix, scale, rect, glyphs, box, cut, tone, light)})
     return found
 
 
-def band_colours(pix, scale, band, glyphs, box, cut, light):
+def band_colours(pix, scale, band, glyphs, box, cut, tone, light=True):
     """The band's colour around the glyphs (the mask paints it over them, halftone screen averaged) and the glyphs'
-    colour (the translation is written in it), from the page pixmap."""
+    colour (the translation is written in it), from the page pixmap. tone: the glyphs' grey level, light: whether they
+    are lighter than the band."""
     width, samples = pix.width, pix.samples
     near = glyphs + (-1, -1, 1, 1)
-    # paint: the band round the glyphs; dark: band pixels among them (when the box is all glyphs); ink: glyph cores
-    paint, dark, ink = [[], [], []], [[], [], []], [[], [], []]
+    # paint: the band round the glyphs; among: band pixels among them (when the box is all glyphs); ink: glyph cores
+    paint, among, ink = [[], [], []], [[], [], []], [[], [], []]
     for y in range(int(box.y0 * scale), min(pix.height, int(box.y1 * scale) + 1)):
         for x in range(int(box.x0 * scale), min(width, int(box.x1 * scale) + 1)):
             offset = (y * width + x) * 3
@@ -1410,15 +1655,15 @@ def band_colours(pix, scale, band, glyphs, box, cut, light):
             point = fitz.Point((x + .5) / scale, (y + .5) / scale)
             if not near.contains(point):
                 target = paint
-            elif glyphs.contains(point) and luma >= (cut + light) / 2:
+            elif glyphs.contains(point) and (luma >= (cut + tone) / 2 if light else luma <= (cut + tone) / 2):
                 target = ink
-            elif luma <= cut:
-                target = dark
+            elif luma <= cut if light else luma >= cut:
+                target = among
             else:
                 continue
             for c in range(3):
                 target[c].append(rgb[c])
-    paint = paint if len(paint[0]) >= 12 else dark
+    paint = paint if len(paint[0]) >= 12 else among
     fill = tuple(round(sum(channel) / len(channel)) / 255 if channel else .2 for channel in paint)
     colour = "".join(f"{round(sum(channel) / len(channel)) if channel else 255:02x}" for channel in ink)
     return {"fill": fill, "color": "#" + colour}
@@ -1483,6 +1728,18 @@ def figure_captions(figures, protected, glyphs, em, ink):
                 found += [(box, index) for box in boxes]
                 taken = union_rect(boxes)
     return found
+
+
+def glyph_cells(glyphs):
+    """Cells of a row's glyph rects: touching or overlapping pieces (the halves of a glyph a scan cut apart) merged, as
+    han_glyphs merges them."""
+    cells = []
+    for g in sorted(glyphs, key=lambda g: g.x0):
+        if cells and g.x0 <= cells[-1].x1 + .4:
+            cells[-1] = cells[-1] | g
+        else:
+            cells.append(fitz.Rect(g))
+    return cells
 
 
 def han_glyphs(glyphs, em, ink):
@@ -2166,8 +2423,8 @@ def segment(page, pix, scale, components):
         else:
             region.y0 = min(art.y0, max(region.y0, box.y1 + 1.5))
     free_labels(figures, protected, glyph_rects, page_em(glyph_rects), {id(rect): ink for rect, glyph, ink in items})
-    # A heading printed light on a dark band is read from the inverted band in scan_layout; the band keeps its pixels.
-    bands = dark_bands(page, pix, scale, components)
+    # A heading printed light on a dark band (or dark on a tinted tab) is read in scan_layout; the band keeps its pixels.
+    bands = dark_bands(page, pix, scale, components, levels[0])
     protected += [band["band"] for band in bands]
     candidates, thin, excluded = [], [], []
     for rect, glyph, _ in items:
@@ -2371,6 +2628,32 @@ def ground(pix, scale, rect, ink=190000, step=2):
     return fill, near / max(1, total), dark / max(1, total)
 
 
+def shaded(pix, scale, rect, glyphs=(), step=2):
+    """Share of a crop's ground pixels within 24 levels on every channel of the median colour of their own pixel row,
+    or of their own column when that share is higher: a tab tinted flat or from one tone to another (along its text or
+    across it), and its edge on the paper, are their own ground row by row or column by column, while a photograph is
+    textured along every row and column. The boxes of glyphs (rects: the strokes of the text and an icon beside them,
+    as on a heading's tab) are no ground; with under a quarter of the crop outside them, all of it counts."""
+    width, samples = pix.width, pix.samples
+    ys = range(max(0, int(rect.y0 * scale)), min(pix.height, int(rect.y1 * scale) + 1), step)
+    xs = range(max(0, int(rect.x0 * scale)), min(width, int(rect.x1 * scale) + 1), step)
+    boxes = [((g.x0 - .5) * scale, (g.y0 - .5) * scale, (g.x1 + .5) * scale, (g.y1 + .5) * scale) for g in glyphs]
+    free = [(x, y) for y in ys for x in xs if not any(x0 <= x <= x1 and y0 <= y <= y1 for x0, y0, x1, y1 in boxes)]
+    if 4 * len(free) < len(ys) * len(xs):
+        free = [(x, y) for y in ys for x in xs]
+    best = 0
+    for axis in (1, 0):
+        runs = {}
+        for point in free:
+            runs.setdefault(point[axis], []).append((point[1] * width + point[0]) * 3)
+        near = 0
+        for offsets in runs.values():
+            fill = [sorted(samples[o + c] for o in offsets)[len(offsets) // 2] for c in range(3)]
+            near += sum(1 for o in offsets if abs(samples[o] - fill[0]) <= 24 and abs(samples[o + 1] - fill[1]) <= 24 and abs(samples[o + 2] - fill[2]) <= 24)
+        best = max(best, near / len(free) if free else 0)
+    return best
+
+
 def blank_span(pix, scale, rect, reach, ink=190000):
     """How far blank paper reaches left and right of rect on its band, up to reach points each way: (x0, x1)."""
     width, samples = pix.width, pix.samples
@@ -2388,17 +2671,43 @@ def blank_span(pix, scale, rect, reach, ink=190000):
     return left / scale, (right + 1) / scale
 
 
-def row_kinds(rows, regions):
-    """'prose' for an ink row with Han (by ink or by OCR) or English words outside its formulas, 'formula' for a row
-    holding a formula and nothing else to translate (labels, brackets, punctuation, digits), 'other' otherwise."""
+def row_kinds(rows, regions, chinese=None, braces=(), alone=None):
+    """'prose' for an ink row with Han glyphs or English words outside its formulas, 'formula' for a row holding a
+    formula and nothing else to translate (labels, brackets, punctuation, digits), 'other' otherwise.
+
+    A Han glyph needs ink and OCR to agree: Han-sized ink the mixed reading reads as Han, or failing that the Chinese
+    model alone (chinese: a function giving the boxes of its words of Han characters, read only when needed), on one
+    cell of a row with one or two such cells, on two of a longer row. OCR alone reads Han into the brace and the
+    letters of a display formula (人, 号), and ink alone takes big operators and welded letters for Han glyphs. braces:
+    tall brackets (a cases system, a matrix), formula ink across the rows they span. alone: a function telling
+    whether a reading of a row's rect by itself puts a Han character on one of the given cells' rects, for Han-sized
+    ink neither reading of the paragraph put any character on: Tesseract skips a short last line of a crop ('面MNP₁.'
+    under a long line). Where the mixed reading read no Han on a row at all (a coarse scan: it takes a row's Chinese for
+    Latin letters), glyphs about a Han glyph's size that the ink test left out, a little under the size it needs, ask
+    the Chinese model as Han-sized ink does. Only the Chinese model's boxes on the row itself count (row_boxes)."""
     kinds = []
     for index, row in enumerate(rows):
         spans = [(row["cells"][g["first"]]["rect"].x0, row["cells"][g["last"]]["rect"].x1) for g in regions if g["row"] == index]
         rest = [c for c in row["cells"] if not any(x0 - .1 <= (c["rect"].x0 + c["rect"].x1) / 2 <= x1 + .1 for x0, x1 in spans)]
-        if any(c["han"] or c["english"] or (c["ocr_han"] and not c["confusable"]) for c in rest):
+        inked = [c for c in rest if c["han"] or c["han_ocr"]]
+        prose = any(c["english"] for c in rest) or any(c["ocr_han"] and not c["confusable"] for c in inked)
+        # a Han glyph a coarse scan cut into thin parts (the 证 of 证：before a formula) is no Han-sized ink, but both
+        # readings read Han there; where a brace spans the row OCR invents Han, and that alone counts for nothing
+        spanned = any(b.y0 <= row["axis"] <= b.y1 for b in braces)
+        read = [c for c in rest if c not in inked and c["ocr_han"] and not c["confusable"]] if not spanned else []
+        sized = [c for c in rest if c not in inked and c["sized"] and c["kind"] == "other" and not c["scripted"]] if not spanned and not any(c["ocr_han"] and not c["confusable"] for c in row["cells"]) else []
+        if not prose and (inked or read or sized) and chinese is not None:
+            boxes = row_boxes(chinese(), rows, index)
+            under = lambda c: any(b.x0 - 1 <= (c["rect"].x0 + c["rect"].x1) / 2 <= b.x1 + 1 and b.y0 - 1 <= middle(c["rect"]) <= b.y1 + 1 for b in boxes)
+            agree = lambda cells: bool(cells) and sum(1 for c in cells if under(c)) >= min(2, len(cells))
+            prose = agree(inked) or any(under(c) for c in read) or agree(sized)
+            unread = [c for c in inked if not c["ocr"].strip() and not under(c)]
+            if not prose and unread and not spanned and alone is not None:
+                prose = alone(union_rect([c["rect"] for c in row["cells"]]), [c["rect"] for c in unread])
+        if prose:
             kinds.append("prose")
         else:
-            kinds.append("formula" if spans else "other")
+            kinds.append("formula" if spans or any(b.y0 <= row["axis"] <= b.y1 for b in braces) else "other")
     return kinds
 
 
@@ -2442,7 +2751,8 @@ def first_line_indent(lines, box, body):
     return round(first - box.x0, 3)
 
 
-def scan_layout(page, number):
+def scan_layout(page, number, fine=False):
+    """Blocks, masks, protected regions and notes of a scanned page. fine: quality 'fine' (finer OCR crops)."""
     pix, scale, components = scan_ink_components(page)
     width, height, samples = pix.width, pix.height, pix.samples
     layout = segment(page, pix, scale, components)
@@ -2452,12 +2762,75 @@ def scan_layout(page, number):
     han_language = next((name for name in languages.split("+") if name.startswith("chi")), None)
     blocks, masks, source_formulas, readings = [], [], [], []
     paper = [round(c * 255) for c in paper_fill(pix, scale, page.rect, 9)]
+    em = page_em([g for line in layout["lines"] for g in line["glyphs"]])
+    # Short lines no reading made out and that no block holds: the page says so.
+    unread = []
+    chinese_readings = {}
 
-    def on_picture(rect, text):
+    def chinese(rect, dpi=240):
+        """The Chinese model's own reading of a crop, (rawdict, text), read once."""
+        key = (tuple(round(v, 2) for v in rect), dpi)
+        if key not in chinese_readings:
+            chinese_readings[key] = tesseract(page, rect, han_language, dpi) if han_language else ({"blocks": []}, "")
+        return chinese_readings[key]
+
+    def chinese_han(rect, words=False, dpi=240):
+        """Boxes of the Han characters the Chinese model alone reads on a crop, or of its words that are mostly Han
+        characters (its reading of a formula mixes them with letters: 到BAA洗 over ∠BAA′)."""
+        found = []
+        for line in ocr_words(chinese(rect, dpi)[0], rect):
+            for word in line["words"]:
+                han = [ch["rect"] for ch in word["chars"] if HAN.match(ch["c"]) and ch["c"] not in CONFUSABLE]
+                found += ([word["rect"]] if han and 2 * len(han) >= len(word["text"].strip()) else []) if words else han
+        return found
+
+    def alone(rect, cells):
+        """Whether one row's ink read by itself shows a Han character on one of cells (rects), by the mixed model or
+        else the Chinese model alone, which takes 面 beside capitals for H less often (row_kinds)."""
+        clip = (rect + (-2, -2, 2, 2)) & page.rect
+        for read in [lambda: tesseract(page, clip, languages)] + ([lambda: chinese(clip)] if han_language and han_language != languages else []):
+            found = [ch["rect"] for line in ocr_words(read()[0], clip) for word in line["words"] for ch in word["chars"] if HAN.match(ch["c"]) and ch["c"] not in CONFUSABLE]
+            if any(c.x0 - 1 <= (b.x0 + b.x1) / 2 <= c.x1 + 1 and c.y0 - 1 <= middle(b) <= c.y1 + 1 for c in cells for b in found):
+                return True
+        return False
+
+    def short(paragraph):
+        """A line of a few Han glyphs on one row: a heading, a label, a table cell. Its pieces share one band, no taller
+        than two of its glyphs (the strokes and labels of a drawing reach over several rows), or where a scan cut its
+        glyphs into pieces (告 into a top and a bottom half, 思 into 田 and 心), no taller than one and a half of its
+        whole glyphs: the roughly square cells of its pieces merged (a dotted drawing's columns are tall, a stacked
+        fraction more than half again a glyph's height)."""
+        lines = paragraph["lines"]
+        if (paragraph.get("cjk") or 0) > 2 * SHORT_LINE or max(l["rect"].y0 for l in lines) >= min(l["rect"].y1 for l in lines):
+            return False
+        if paragraph["rect"].height <= 2 * median(l["height"] for l in lines):
+            return True
+        square = [c.height for c in glyph_cells([g for l in lines for g in l["glyphs"]]) if .75 * c.height <= c.width <= 1.33 * c.height]
+        return bool(square) and paragraph["rect"].height <= 1.5 * median(square)
+
+    def han_ink(lines):
+        """Han glyphs the ink of lines shows (han_glyphs: the formulas' letters and brackets are no such cells)."""
+        return han_glyphs([g for line in lines for g in line["glyphs"]], em, layout["ink"])
+
+    def junky(reading):
+        """Whether the mixed reading took much of the Chinese of a line for Latin letters: fewer than half the Han glyphs
+        the ink shows on a line of three or more."""
+        read = [middle(ch["rect"]) for line in reading["lines"] for word in line["words"] for ch in word["chars"] if HAN.match(ch["c"]) and ch["c"] not in CONFUSABLE]
+        for line in reading["paragraph"]["lines"]:
+            expected = han_ink([line])
+            if expected >= 3 and sum(1 for y in read if line["rect"].y0 - 1 <= y <= line["rect"].y1 + 1) < .5 * expected:
+                return True
+        return False
+
+    def on_picture(rect, text, glyphs=()):
         """One or two Han characters read on a photograph or a logo are noise, and a mask would paint a patch over the
         picture: a crop mostly unlike its own ground, or a single character without dark strokes on a ground unlike the
-        page's paper (a sky), is no text block. Words on paper or on a flat tint ('例1' on a coloured tab) stay."""
+        page's paper (a sky), is no text block. Words on paper or on a flat tint ('例1' on a coloured tab) stay, and so do
+        words with dark strokes on a tab tinted from one tone to another (shaded, around the boxes of the line's glyphs,
+        an icon among them) that the Chinese model alone reads too: a photograph is textured in every part of the crop."""
         fill, share, dark = ground(pix, scale, rect, layout["levels"][0])
+        if share < .3 and dark >= .02 and shaded(pix, scale, rect, glyphs) >= .6 and han_count(chinese(rect)[1]) >= max(1, min(2, han_count(text))):
+            return False
         return share < .3 or (han_count(text) <= 1 and dark < .02 and max(abs(a - b) for a, b in zip(fill, paper)) >= 20)
 
     def crop_rect(box, panel):
@@ -2470,17 +2843,32 @@ def scan_layout(page, number):
         """Tesseract reading of a paragraph crop, or None when it holds no Chinese to translate."""
         recognized, text = tesseract(page, rect, languages)
         rescued = verify = False
-        if not prose and not han_count(text) and paragraph.get("caption") is not None:
-            # A caption is small print with few Han glyphs ('图1.1-9'), and its row already showed a Han-sized glyph: a
-            # finer crop, then the Chinese model alone, read it before it is given up.
-            for language in (languages, han_language):
+        word = text.strip().rstrip(".,;:，。；：、")
+        formula = MATH_OPERATOR.search(text) or (word and " " not in word and (is_math_text(word) or is_chemical(word)))
+        caption = paragraph.get("caption") is not None
+        lone = not prose and (short(paragraph) or caption)
+        # the Han glyphs its ink shows, or for small print (a running head, measured against the body's glyphs) at least
+        # the two a line needs to be read at all; a caption at least one, however like a formula it reads ('FE 11-1'
+        # for 图1.1-1: its row showed a Han-sized glyph)
+        target = max(han_ink(paragraph["lines"]), 2 if paragraph["cjk"] >= 2 else 0, int(caption)) if lone and (caption or not formula) else 0
+        if han_count(text) < target:
+            # A short line (a heading, a label, a caption, a table cell) can be misread whole at 240 dpi ('EL' for
+            # 思考) or read as nothing: a finer crop, then the Chinese model alone (at 240 dpi, then finer still) read
+            # it again, and the first reading with the most Han characters stands. Not a formula, whose letters the
+            # Chinese model reads as Han characters, nor what spans several rows, as a drawing's labels do. The Chinese
+            # model alone reads an icon or a letter as Han characters too ('了?参直者' for a tab's icon and 思考): it
+            # stands in only for a line the mixed model read no Chinese on (fewer than two Han characters).
+            for language, dpi in ((languages, 320), (han_language, 240), (han_language, 400)):
+                if language != languages and han_count(text) >= 2:
+                    break
                 if language:
-                    recognized, text = tesseract(page, rect, language, 320)
-                    if han_count(text):
+                    again = tesseract(page, rect, language, dpi) if language == languages else chinese(rect, dpi)
+                    if han_count(again[1]) > han_count(text):
+                        (recognized, text), rescued = again, language != languages
+                    if han_count(text) >= target:
                         break
         if not prose and not han_count(text):
-            word = text.strip().rstrip(".,;:，。；：、")
-            formula = MATH_OPERATOR.search(text) or (word and " " not in word and (is_math_text(word) or is_chemical(word)))
+            # (still the first reading: another replaces it only with more Han characters)
             if paragraph["cjk"] < 2:
                 if formula:
                     # a formula with nothing to translate keeps its pixels, and text boxes around it never grow over it
@@ -2490,19 +2878,18 @@ def scan_layout(page, number):
                 # A label on a formula row ('交换律: a+b=b+a') can read as Latin too: the ink decides below whether
                 # the rows hold Han glyphs; a formula alone stays pixels.
                 verify = True
-            elif not text.strip():
-                # Small print (a running head, a table cell) can read as nothing at 240 dpi; a finer crop reads it.
-                recognized, text = tesseract(page, rect, languages, 320)
-            if not verify and not han_count(text):
-                # chi_sim+eng reads a short Chinese line full of Latin letters or arrows as Latin. The Chinese model
-                # alone reads it again, and rows stay text only where that reading or the ink shows Han glyphs.
-                if not han_language:
-                    return None
-                recognized, text = tesseract(page, rect, han_language)
-                if han_count(text) < 2:
-                    return None
-                rescued = True
-        if not prose and han_count(text) <= 2 and on_picture(rect, text):
+            else:
+                if not text.strip() and not lone:
+                    # Small print over several rows can read as nothing at 240 dpi; a finer crop reads it.
+                    recognized, text = tesseract(page, rect, languages, 320)
+                if not han_count(text):
+                    # chi_sim+eng reads a short Chinese line full of Latin letters or arrows as Latin. The Chinese
+                    # model alone reads it again, and rows stay text only where that reading or the ink shows Han.
+                    again = chinese(rect)
+                    if han_count(again[1]) < 2:
+                        return unreadable(paragraph, rect, again[1] if han_count(again[1]) else text)
+                    (recognized, text), rescued = again, True
+        if not prose and han_count(text) <= 2 and on_picture(rect, text, [g for line in paragraph["lines"] for g in line["glyphs"]]):
             source_formulas.append(rect)
             return None
         size = max(9, min(28, median(l["height"] for l in paragraph["lines"]) * 1.12))
@@ -2511,15 +2898,34 @@ def scan_layout(page, number):
         # worth keeping as pixels: they skip the ink analysis entirely.
         if rescued or verify or FORMULA_HINT.search(text):
             reading["ink"] = paragraph_ink(page, rect, size, others, ink_table)
-            reading["heights"] = han_heights(reading["ink"][0], reading["lines"], size)
+            heights = han_heights(reading["ink"][0], reading["lines"], size)
+            # too few single Han characters to measure (a heading read as one word): those of its words count too
+            reading["heights"] = heights if len(heights) >= 3 else han_heights(reading["ink"][0], reading["lines"], size, whole=True)
         return reading
 
+    def unreadable(paragraph, rect, text):
+        """A short line with Han glyphs no reading made out (a heading, a label, a table cell). Ink of two Han glyphs or
+        more set like text, not on a picture, is still a block, with the best reading or a placeholder as its hint:
+        Gemini reads its strip. Otherwise it stays as printed, and the page says so. A longer paragraph no reading
+        makes out is no text the page shows plainly: it is left to the count of missed Han glyphs."""
+        glyphs = [g for line in paragraph["lines"] for g in line["glyphs"]]
+        if han_glyphs(glyphs, em, layout["ink"]) < 2 or not short(paragraph):
+            return None
+        if on_picture(rect, text, glyphs):
+            unread.append(rect)
+            return None
+        size = max(9, min(28, median(l["height"] for l in paragraph["lines"]) * 1.12))
+        source = re.sub(r"\s+", " ", text).strip() if han_count(text) else "[□]"
+        return {"paragraph": paragraph, "rect": rect, "text": source, "lines": [], "size": size, "ink": None, "heights": [], "rescued": True, "verify": False}
+
     def read_band(piece):
-        """Tesseract reading of light glyphs on a dark band from the inverted crop, or None without Chinese."""
+        """Tesseract reading of light glyphs on a dark band from the inverted crop (dark glyphs on a tinted band from
+        the crop as it is), or None without Chinese."""
         rect = (piece["glyphs"] + (-1.5, -1.5, 1.5, 1.5)) & piece["band"]
-        text = tesseract(page, rect, languages, 320, invert=True)[1]
+        invert = piece.get("light", True)
+        text = tesseract(page, rect, languages, 320, invert=invert)[1]
         if not han_count(text) and han_language:
-            text = tesseract(page, rect, han_language, 320, invert=True)[1]
+            text = tesseract(page, rect, han_language, 320, invert=invert)[1]
         if not han_count(text):
             return None
         # one row of glyphs: Tesseract's line breaks inside it are not text
@@ -2556,29 +2962,50 @@ def scan_layout(page, number):
         # Han glyphs well under the page's size are reaction conditions over an arrow or a note, not the text size
         own = [h for h in reading["heights"] if not page_han or h >= .72 * page_han]
         H = median(own) if len(own) >= 3 else median(own + [page_han]) if page_han else median(own) if own else glyph_height(comps, reading["size"])
-        rows = text_rows(comps, H, pix, data, reading["lines"])
+        if len(own) < 3 and short(reading["paragraph"]):
+            # A heading set larger than the body (a tab's 思考) that OCR read too badly to measure goes by its own
+            # glyphs' height: against the body's, a long middle stroke of its glyphs stacks like a fraction bar. With
+            # no Han glyph measured anywhere (a page of plain prose), the page's em stands for the body's, and the
+            # short line's own glyphs for its height: its font size, the guess otherwise, is taller than any glyph.
+            # Its glyphs are the roughly square cells of its ink, each glyph's pieces merged (a scan cuts 告 into a top
+            # and a bottom half, and 宣's last stroke off), none under half the body's size (a speck, a comma).
+            square = [c.height for c in glyph_cells([p["rect"] for p in comps]) if .75 * c.height <= c.width <= 1.33 * c.height and c.height >= .5 * (page_han or em)]
+            line = median(square) if square else median(l["height"] for l in reading["paragraph"]["lines"])
+            if line >= 1.25 * (page_han or em):
+                H = max(H, line) if page_han or own else line
+            elif not page_han and not own:
+                H = max(em, line)
+        # Where the mixed reading took much of a line's Chinese for Latin letters (a coarse or blurred scan), the Chinese
+        # model's own reading tells which cells are Han glyphs.
+        confirmed = chinese_han(reading["rect"], words=True) if han_language and not reading["rescued"] and junky(reading) else None
+        rows = text_rows(comps, H, pix, data, reading["lines"], confirmed)
+        # a bracket taller than a text line (a cases system's brace, a matrix's) is formula ink across its rows
+        reading["braces"] = [c["rect"] for c in comps if c["rect"].height >= 1.6 * H and c["rect"].width <= .6 * c["rect"].height and bracket_side(pix, data, c)]
         return rows, sorted(formula_regions(rows, reading["lines"], H), key=lambda g: (g["row"], g["first"])), H
 
     def finish(reading, rows, regions, H):
         paragraph, rect, text, lines, size = reading["paragraph"], reading["rect"], reading["text"], reading["lines"], reading["size"]
-        inlines, source = [], "\n".join("".join(w["text"] for w in line["words"]) for line in lines).strip()
+        # a line no reading made out has no words: its hint is its best reading or a placeholder (unreadable)
+        inlines, source = [], "\n".join("".join(w["text"] for w in line["words"]) for line in lines).strip() or text
         tokens = [f"@@PDF_INLINE_{k + 1}@@" for k in range(len(regions))]
         for token, region in zip(tokens, regions):
-            box, axis, mark, trail = region_geometry(region, rows, H, page.rect)
-            inline = {"token": token, "text": region_text(region, rows, lines), "box": rect_list(box), "width": round(box.width, 3), "height": round(box.height, 3), "axis": round(axis, 3), "image": image_url(page, box, 2.5), "mark": mark}
+            box, axis, mark, trail, room = region_geometry(region, rows, H, page.rect)
+            inline = {"token": token, "text": region_text(region, rows, lines), "box": rect_list(box), "width": round(box.width, 3), "height": round(box.height, 3), "axis": round(axis, 3), "image": image_url(page, box, 2.5), "mark": mark, "room": room}
             if trail:
                 inline["trail"] = True
             inlines.append(inline)
         if regions:
             source = paragraph_source(lines, rows, regions, tokens, H)
-        for crop_scale in (2, 1.6, 1.2, .8):
+        cap = FINE_CROP_BYTES if fine else CROP_BYTES
+        for crop_scale in crop_scales(rect, fine):
             block_image = ocr_block_image(page, rect, inlines, crop_scale)
-            if len(block_image) <= 1_300_000:
+            if len(block_image) <= cap:
                 break
-        if len(block_image) > 1_300_000:
-            raise ValueError(f"Trang {number}: một đoạn văn có ảnh vượt 1 MB, quá lớn để đọc lại bằng OCR. Hãy giảm độ phân giải bản scan rồi thử lại.")
+        if len(block_image) > cap:
+            raise ValueError(f"Trang {number}: một đoạn văn có ảnh vượt {cap // 1_000_000} MB, quá lớn để đọc lại bằng OCR. Hãy giảm độ phân giải bản scan rồi thử lại.")
         for inline in inlines:
             inline.pop("mark", None)
+            inline.pop("room", None)
         # the text box and its mask may reach wider than the crop the OCR reads (a word alone in a table cell)
         box = reading.get("box", rect)
         kind = "caption" if paragraph.get("caption") is not None else "heading" if size > body_height * 1.4 else "paragraph"
@@ -2624,11 +3051,12 @@ def scan_layout(page, number):
         return runs
 
     def finish_band(reading):
-        """A heading on a dark band: its text box lies on the band, the mask paints the band's colour over the light
-        glyphs, and the translation is written in their colour."""
+        """A heading on a band (dark, or a tinted tab): its text box lies on the band, the mask paints the band's colour
+        over the glyphs, and the translation is written in their colour."""
         piece, text = reading["piece"], reading["text"]
         box, fill = piece["box"], piece["fill"]
-        image = ocr_block_image(page, (box + (-2, -2, 2, 2)) & page.rect, [], 2)
+        crop = (box + (-2, -2, 2, 2)) & page.rect
+        image = ocr_block_image(page, crop, [], crop_scales(crop, fine)[0])
         blocks.append({"id": f"p{number}-b{len(blocks) + 1}", "text": text, "source": text, "box": rect_list(box), "fontSize": round(max(9, min(28, piece["height"] * 1.12)), 3), "bold": True, "color": piece["color"], "inlines": [], "kind": "heading", "image": image, "backgroundColor": "#" + "".join(f"{round(channel * 255):02x}" for channel in fill)})
         masks.append((box, fill))
 
@@ -2644,19 +3072,47 @@ def scan_layout(page, number):
             # A formula row whose OCR read no Han holds Chinese only where the ink shows a Han glyph and the Chinese
             # model reads Han on it, twice at least: a letter with a welded subscript (E_p) can look Han-sized.
             glyphs = [c["rect"] for row in rows for c in row["cells"] if c["han"]]
-            seen = []
-            if glyphs and han_language:
-                raw, _ = tesseract(page, reading["rect"], han_language)
-                seen = [ch["rect"] for line in ocr_words(raw, reading["rect"]) for word in line["words"] for ch in word["chars"] if HAN.match(ch["c"]) and ch["c"] not in CONFUSABLE]
-            if sum(1 for g in glyphs if any(g.x0 - 1 <= (s.x0 + s.x1) / 2 <= g.x1 + 1 and g.y0 - 1 <= middle(s) <= g.y1 + 1 for s in seen)) < 2:
+
+            def on(glyph, boxes):
+                return any(glyph.x0 - 1 <= (s.x0 + s.x1) / 2 <= glyph.x1 + 1 and glyph.y0 - 1 <= middle(s) <= glyph.y1 + 1 for s in boxes)
+
+            def seen(dpi):
+                boxes = chinese_han(reading["rect"], dpi=dpi) if glyphs and han_language else []
+                return sum(1 for g in glyphs if on(g, boxes))
+
+            dpi = 240 if seen(240) >= 2 else 400 if short(reading["paragraph"]) and seen(400) >= 2 else None
+            if not dpi:
                 source_formulas.append(reading["rect"])
                 continue
-        kinds = row_kinds(rows, regions)
+            if short(reading["paragraph"]) and not regions:
+                # A short line the mixed model misread as a formula (a tab's heading read 'NY =' or '[==]='): the
+                # Chinese model finds Han on its Han-sized ink, at 240 dpi or on a finer crop, and its reading stands.
+                # Not where the ink holds a formula: the Chinese model reads its = − + and letters as Han characters,
+                # which would take the formula apart.
+                raw, text = chinese(reading["rect"], dpi)
+                lines = ocr_words(raw, reading["rect"])
+                reading = dict(reading, text=text, lines=lines, rescued=True, verify=False, heights=han_heights(reading["ink"][0], lines, reading["size"], whole=True))
+                rows, regions, H = analyse(reading)
+            elif short(reading["paragraph"]):
+                # The mixed reading stands, and it read none of the line's Chinese: a Han glyph of few strokes (入, 人)
+                # passes no ink test, and the formula beside it would take it in. Ink as big as a Han glyph both ways
+                # that the Chinese model reads Han on (that reading is already made) is one; not smaller or flatter ink
+                # (a letter, an arrow ⇔), which it reads as Han too.
+                boxes = chinese_han(reading["rect"], dpi=dpi)
+                for row in rows:
+                    for c in row["cells"]:
+                        if not c["han"] and c["kind"] == "other" and c["sized"] and min(c["core"].width, c["core"].height) >= .85 * H and on(c["rect"], boxes):
+                            c["han"] = c["ocr_han"] = True
+                regions = sorted(formula_regions(rows, reading["lines"], H), key=lambda g: (g["row"], g["first"]))
+        kinds = row_kinds(rows, regions, (lambda rect=reading["rect"]: chinese_han(rect, words=True)) if han_language else None, reading.get("braces", ()), alone)
         if "prose" not in kinds:
             # Nothing on any row to translate: a display formula or an equation list stays the original pixels,
             # protected from the text boxes around it.
             if "formula" in kinds:
                 source_formulas.append(reading["rect"])
+            elif reading["rescued"] and han_glyphs([g for line in reading["paragraph"]["lines"] for g in line["glyphs"]], em, layout["ink"]) >= 2:
+                # Han glyphs the Chinese model read but neither reading confirmed on the ink: not translated, said so
+                unread.append(reading["rect"])
             if "formula" in kinds or reading["rescued"]:
                 continue
             finish(reading, rows, regions, H)
@@ -2676,38 +3132,56 @@ def scan_layout(page, number):
     # Text in no block and no protected region stays Chinese in the export: the student is told rather than left to
     # find it. Only Han-like cells count (han_glyphs: a glyph's height, a quarter inked, one per em of width), so
     # numbers, a folio, a figure's letter labels, the dashes of a drawing or a stray speck say nothing.
-    covered = [fitz.Rect(b["box"]) for b in blocks] + [fitz.Rect(r) for r in protected + source_formulas]
-    em = page_em([g for line in layout["lines"] for g in line["glyphs"]])
+    # Short lines no reading made out are named on their own, however few: a heading or a label is all of its text.
+    unread = [r for k, r in enumerate(unread) if not any(fitz.Rect(b["box"]).contains(fitz.Point((r.x0 + r.x1) / 2, middle(r))) for b in blocks) and r not in unread[:k]]
+    covered = [fitz.Rect(b["box"]) for b in blocks] + [fitz.Rect(r) for r in protected + source_formulas + unread]
     missed = sum(han_glyphs([g for g in line["glyphs"] if not any(box.contains(fitz.Point((g.x0 + g.x1) / 2, middle(g))) for box in covered)], em, layout["ink"]) for line in layout["lines"])
     notes = [f"Trang {number}: khoảng {missed} chữ Hán không thuộc đoạn nào để dịch nên sẽ giữ nguyên trong bản xuất; hãy đối chiếu với PDF gốc."] if missed >= MISSED_CELLS else []
+    if unread:
+        notes.append(f"Trang {number}: {len(unread)} dòng chữ ngắn (như tiêu đề hay nhãn) OCR không đọc được nên sẽ giữ nguyên trong bản xuất; hãy đối chiếu với PDF gốc.")
     return blocks, masks, [rect_list(region) for region in protected + source_formulas], notes
+
+
+def crop_scales(rect, fine=False):
+    """Scales (px/pt) to try for the OCR crop of a block over rect, finest first. Quality 'fine' starts at as many
+    pixels per point as a fine sheet's strip holds, up to FINE_CROP_SCALE and never under the standard 2: a crop wider
+    than the sheet would sit alone on a sheet of its own, which Gemini bills as a whole image."""
+    if not fine:
+        return CROP_SCALES
+    width = FINE_SHEET_SIDE - 2 * SHEET_MARGIN - SHEET_TAB - 2 * SHEET_PAD - 2
+    height = FINE_SHEET_SIDE - 2 * SHEET_MARGIN - 2 * SHEET_PAD - 2
+    first = max(CROP_SCALES[0], math.floor(100 * min(FINE_CROP_SCALE, width / max(1, rect.width), height / max(1, rect.height))) / 100)
+    return (first,) + tuple(s for s in CROP_SCALES if s < first)
 
 
 def ocr_block_image(page, rect, inlines, scale):
     """Paragraph crop that Gemini reads. Each protected formula whose label fits is painted over with that label
     (@1 for @@PDF_INLINE_1@@), so the model sees where its token belongs without a separate formula image, which
-    Gemini bills like a whole paragraph. A formula too small to label stays visible and is sent as its own crop."""
+    Gemini bills like a whole paragraph. A narrow formula gets a narrower label (Courier), on the blank paper beside it
+    too if need be (room); one too small to label even so stays visible and is sent as its own crop."""
     marks = []
     for inline in inlines:
         inline.pop("label", None)
+        label = "@" + inline["token"].strip("@").rsplit("_", 1)[1]
         # an ink-tight box can be shorter than a label (a+b has no ascender); the label may cover the row's text
         # height around the formula, never more of the page
-        box = fitz.Rect(inline.get("mark") or inline["box"]) + (-rect.x0, -rect.y0, -rect.x0, -rect.y0)
-        label = "@" + inline["token"].strip("@").rsplit("_", 1)[1]
-        size = min(9, box.height * .8, box.width * .9 / fitz.get_text_length(label, fontsize=1))
-        if size * scale >= 10:
-            inline["label"] = label
-            marks.append((box, label, size))
+        for area, font in ((inline.get("mark"), "helv"), (inline.get("mark"), "cobo"), (inline.get("room"), "cobo")):
+            box = fitz.Rect(area or inline["box"]) + (-rect.x0, -rect.y0, -rect.x0, -rect.y0)
+            size = min(9, box.height * .8, box.width * .9 / fitz.get_text_length(label, fontname=font, fontsize=1))
+            if size * scale >= 10:
+                inline["label"] = label
+                marks.append((box, label, size, font))
+                break
     if not marks:
         return image_url(page, rect, scale)
     doc = fitz.open()
     try:
         target = doc.new_page(width=rect.width, height=rect.height)
         target.show_pdf_page(target.rect, page.parent, page.number, clip=rect)
-        for box, label, size in marks:
+        for box, label, size, font in marks:
             target.draw_rect(box, color=(.7, 0, 0), fill=(1, .93, .62), width=.5)
-            left = box.x0 + (box.width - fitz.get_text_length(label, fontsize=size)) / 2
-            target.insert_text((left, box.y0 + (box.height + size * .7) / 2), label, fontsize=size, color=(.7, 0, 0))
+            left = box.x0 + (box.width - fitz.get_text_length(label, fontname=font, fontsize=size)) / 2
+            target.insert_text((left, box.y0 + (box.height + size * .7) / 2), label, fontname=font, fontsize=size, color=(.7, 0, 0))
         return image_url(target, None, scale)
     finally:
         doc.close()
@@ -2720,9 +3194,9 @@ def sheet_extent(group):
     return width, height
 
 
-def sheet_fits(group):
+def sheet_fits(group, area=None, side=None):
     width, height = sheet_extent(group)
-    return width * height <= SHEET_AREA and max(width, height) <= SHEET_SIDE
+    return width * height <= (SHEET_AREA if area is None else area) and max(width, height) <= (SHEET_SIDE if side is None else side)
 
 
 def sheet_image(group, label):
@@ -2754,11 +3228,13 @@ def sheet_image(group, label):
     return "data:image/png;base64," + base64.b64encode(sheet.tobytes("png")).decode("ascii"), strips
 
 
-def ocr_sheets(number, blocks, label):
+def ocr_sheets(number, blocks, label, fine=False):
     """Packs the OCR crops of one page into sheets, so Gemini reads a few images instead of one per block. A big crop (a
     third of a sheet or more) shares its sheet with one other big crop at most; smaller crops fill sheets in reading
     order. Each block then names its sheet and tab label instead of carrying its own crop. Labels count on across the
-    pages of one extraction, so no two strips of a manifest share one. Returns (sheets, next label number)."""
+    pages of one extraction, so no two strips of a manifest share one. fine: the smaller sheets of quality 'fine'.
+    Returns (sheets, next label number)."""
+    area, side, most = (FINE_SHEET_AREA, FINE_SHEET_SIDE, FINE_SHEET_STRIPS) if fine else (SHEET_AREA, SHEET_SIDE, SHEET_STRIPS)
     crops = []
     for block in blocks:
         if block.get("image"):
@@ -2769,9 +3245,9 @@ def ocr_sheets(number, blocks, label):
     order = {id(block): k for k, (block, _) in enumerate(crops)}
     groups, open_groups = [], {True: [], False: []}
     for crop in crops:
-        big = crop[1].width * crop[1].height * 3 >= SHEET_AREA
+        big = crop[1].width * crop[1].height * 3 >= area
         group = open_groups[big]
-        if group and (big and len(group) >= 2 or len(group) >= SHEET_STRIPS or not sheet_fits(group + [crop])):
+        if group and (big and len(group) >= 2 or len(group) >= most or not sheet_fits(group + [crop], area, side)):
             groups.append(group)
             group = open_groups[big] = []
         group.append(crop)
@@ -4195,6 +4671,47 @@ def scan_reason(page, lines, unreadable, images, log):
     return None, cells
 
 
+def scan_dpi(page, images):
+    """Effective resolution (dots per inch) of a scanned page: that of the pictures that make it up (each covering at
+    least 2% of the page, together at least 30% of it), weighted by the area they cover. Where pictures overlap (a
+    scan's colour background under its sharp mask of the text, a watermark over a scan), the finest one there counts.
+    A picture under 30 dpi (a tint or a texture stretched under the page) is no scan of it where finer ones make one up;
+    where none do, one with 100 pixels a side or more is the page scanned that coarsely, and still measured. Sides are
+    matched by length, so a page image turned a quarter is measured right. None when the page is no picture of paper (an
+    unreadable text layer, text drawn as outlines)."""
+    area, found = page.rect.width * page.rect.height, []
+    for info in images:
+        box, width, height = fitz.Rect(info["bbox"]), info.get("width") or 0, info.get("height") or 0
+        shown = (box & page.rect) if not box.is_empty else fitz.Rect()
+        if not width or not height or shown.get_area() < .02 * area or min(box.width, box.height) < 1:
+            continue
+        dpi = 72 * min(max(width, height) / max(box.width, box.height), min(width, height) / min(box.width, box.height))
+        found.append((dpi, shown, min(width, height)))
+    # the finest picture at each point of a grid over the page, the share of points covered standing for the area: the
+    # finest pictures go first and each point takes the first that covers it, so a picture over the points of one
+    # before it adds nothing (a page can draw one picture thousands of times)
+    steps = 40
+    xs = [page.rect.x0 + (k + .5) * page.rect.width / steps for k in range(steps)]
+    ys = [page.rect.y0 + (k + .5) * page.rect.height / steps for k in range(steps)]
+    for pictures in ([p for p in found if p[0] >= 30], [p for p in found if p[0] >= 30 or p[2] >= 100]):
+        finest, spans = {}, set()
+        for dpi, shown, _ in sorted(pictures, key=lambda p: -p[0]):
+            span = (bisect_left(xs, shown.x0), bisect_left(xs, shown.x1), bisect_left(ys, shown.y0), bisect_left(ys, shown.y1))
+            if span in spans or len(finest) == steps * steps:
+                continue
+            spans.add(span)
+            for j in range(span[2], span[3]):
+                for i in range(span[0], span[1]):
+                    finest.setdefault(j * steps + i, dpi)
+        if len(finest) >= .3 * steps * steps:
+            return round(sorted(finest.values())[len(finest) // 2])
+    return None
+
+
+# Below this many dots per inch a scan's small print and formula scripts are a few pixels tall: the page is flagged.
+LOW_DPI = 150
+
+
 def remove_pictures(page, rects):
     """Inline pictures that went into blocks as tokens (rects: their boxes) leave the background: every image all of
     whose placements on the page lie in those boxes. One shown elsewhere on the page too stays; an image written into
@@ -4315,6 +4832,8 @@ def extract(payload):
     pages, page_sizes, page_warnings = [], [], []
     pixel_budget, encoded_budget, pdf_estimate, seen_streams = 0, 0, 0, set()
     stopped_by, label, too_large = None, 1, []
+    # quality 'fine' (X-PDF-Quality, the "Kỹ nhất" mode): finer OCR crops and sheets; anything else is standard.
+    fine = payload.get("quality") == "fine"
     # The caller may ask for less time than TIME_BUDGET (payload timeBudget, seconds: its own deadline), never for more.
     budget, asked = TIME_BUDGET, payload.get("timeBudget")
     if isinstance(asked, (int, float)) and not isinstance(asked, bool) and asked > 0:
@@ -4365,12 +4884,16 @@ def extract(payload):
             break
         notes = []
         blocks, scan_masks, protected, redactions = [], [], [], []
+        dpi = scan_dpi(page, image_infos) if scanned else None
         if scanned:
             try:
-                blocks, scan_masks, protected, missed = scan_layout(page, index + 1)
+                blocks, scan_masks, protected, missed = scan_layout(page, index + 1, fine)
                 if reason == "unreadable":
                     notes.append(f"Trang {index + 1}: lớp chữ của PDF không đọc được ({unreadable_cause(unreadable, unmapped)}) nên trang được đọc bằng OCR; hãy đối chiếu với PDF gốc.")
                 notes.append(f"Trang {index + 1}: dùng OCR; hãy đối chiếu công thức với PDF gốc.")
+                if dpi is not None and dpi < LOW_DPI:
+                    # the advice to pick "Kỹ nhất" is for a run that does not use it yet
+                    notes.append(f"Trang {index + 1}: bản quét chỉ khoảng {dpi} dpi nên chữ nhỏ và công thức dễ bị đọc sai. " + ("Nên dùng một bản quét rõ hơn nếu có." if fine else "Nên dùng Cách dịch \"Kỹ nhất\" hoặc một bản quét rõ hơn."))
                 notes += missed
             except (ValueError, MemoryError):
                 raise
@@ -4410,7 +4933,7 @@ def extract(payload):
         background_doc.close()
         # The OCR crops of the page go into a few sheets; the blocks keep only their sheet and tab label.
         label_before = label
-        sheets, label = ocr_sheets(index + 1, blocks, label) if scanned else ([], label)
+        sheets, label = ocr_sheets(index + 1, blocks, label, fine) if scanned else ([], label)
         page_bytes = len(original) + len(cleaned_image) + sum(len(b.get("image", "")) + sum(len(i["image"]) for i in b["inlines"]) for b in blocks) + sum(len(s["image"]) for s in sheets)
         if page_bytes > IMAGE_BUDGET or page_pdf + page_bytes > TOTAL_BUDGET:
             subset.delete_page(-1)
@@ -4427,7 +4950,7 @@ def extract(payload):
         pdf_estimate += page_pdf
         page_sizes.append(page_bytes)
         page_warnings.append(notes)
-        pages.append({"number": index + 1, "width": round(page.rect.width, 3), "height": round(page.rect.height, 3), "original": original, "background": cleaned_image, "blocks": blocks, "images": images, "drawings": drawings, "ocr": scanned, "protectedRegions": protected, "extractionVersion": EXTRACTION_VERSION, **({"ocrSheets": sheets} if sheets else {})})
+        pages.append({"number": index + 1, "width": round(page.rect.width, 3), "height": round(page.rect.height, 3), "original": original, "background": cleaned_image, "blocks": blocks, "images": images, "drawings": drawings, "ocr": scanned, "protectedRegions": protected, "extractionVersion": EXTRACTION_VERSION, **({"ocrSheets": sheets} if sheets else {}), **({"dpi": dpi} if dpi is not None else {})})
     if not pages:
         largest = max(size for _, size in too_large)
         raise ValueError(f"Trang {page_ranges([n for n, _ in too_large])} có ảnh quá lớn (khoảng {largest / 1048576:.1f} MB) để xử lý trong một lượt. Hãy giảm độ phân giải bản scan rồi thử lại.")
@@ -4457,7 +4980,8 @@ def extract(payload):
             cause = "đã dùng hết thời gian xử lý của một lượt" if out_of_time else "ảnh của các trang vượt giới hạn dung lượng của một lượt"
             notices.append(f"Lượt này xử lý {len(done)}/{len(indices)} trang đã chọn (trang {page_ranges(done)}) vì {cause}. Hãy dịch tiếp trang {page_ranges(remaining)} ở lượt sau.")
     warnings = notices + warnings
-    return {"document": {"version": 1, "extractionVersion": EXTRACTION_VERSION, "engine": "pymupdf", "totalPages": total, "pages": pages, "warnings": warnings}, "originalPdfBase64": selected_pdf}
+    # sheetQuality: how this run cut its OCR sheets; a later ocr-blocks call reads the sheets as they were cut here.
+    return {"document": {"version": 1, "extractionVersion": EXTRACTION_VERSION, "engine": "pymupdf", "totalPages": total, "pages": pages, "warnings": warnings, "sheetQuality": "fine" if fine else "standard"}, "originalPdfBase64": selected_pdf}
 
 
 def merge(payload):

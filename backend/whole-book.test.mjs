@@ -4,6 +4,7 @@ import {createHash,randomBytes} from 'node:crypto';
 import {createRequire} from 'node:module';
 import * as book from '../frontend/whole-book.js';
 import {parseStudyPageRange} from '../frontend/study-pages.js';
+import {MODES,modeProfile} from '../frontend/translation-modes.js';
 const {PDFDocument}=createRequire(import.meta.url)('@cantoo/pdf-lib');
 
 // "Dịch cả quyển" without a browser: page states, chunking, the token estimate, error handling and one whole run against
@@ -34,6 +35,15 @@ test('token estimate from measured page costs, and the projection from what the 
  // Unsurveyed pages range from a light text page to a heavy scan; the cover costs nothing.
  assert.equal(estimate.low,2*900+3000+6*900);assert.equal(estimate.high,2*2100+7*8000);
  assert.deepEqual(book.PAGE_TOKENS,{text:[900,2100],scan:[3000,8000]});
+ // Those are Tiết kiệm's measured costs; another Cách dịch scales them by its profile's estimate (an unknown one is economy).
+ assert.deepEqual(book.pageTokens(),{text:[900,2100],scan:[3000,8000]});assert.deepEqual(book.pageTokens('economy'),book.pageTokens());assert.deepEqual(book.pageTokens('turbo'),book.pageTokens());
+ assert.deepEqual(book.estimateTokens(states,['scan','text','text','scan'],'economy'),estimate);
+ for(const mode of MODES){
+  const factor=modeProfile(mode).estimate,costs=book.pageTokens(mode),scaled=book.estimateTokens(states,['scan','text','text','scan'],mode);
+  assert.deepEqual(costs,{text:[900,2100].map(n=>Math.round(n*factor)),scan:[3000,8000].map(n=>Math.round(n*factor))},mode);
+  assert.deepEqual([scaled.text,scaled.scan,scaled.unknown,scaled.low,scaled.high],[2,1,6,2*costs.text[0]+costs.scan[0]+6*costs.text[0],2*costs.text[1]+7*costs.scan[1]],mode);
+ }
+ assert.ok(book.estimateTokens(states,[],'premium').high>book.estimateTokens(states,[],'economy').high*2,'Kỹ nhất is estimated well above Tiết kiệm');
  assert.equal(book.usageProjection({pageStates:'cdd..',usage:{total:2000}}).remaining,2000);
  assert.equal(book.usageProjection({pageStates:'c....',usage:{total:0}}),null);
  assert.equal(book.formatTokenRange(75_000,200_000),'75–200 nghìn');assert.equal(book.formatTokenRange(540_000,1_300_000),'0,5–1,3 triệu');assert.equal(book.formatTokenRange(15_000,40_000),'15.000–40.000');
@@ -115,6 +125,11 @@ test('chunks are cut with pdf-lib from the original, page for page, and sent wit
  const cut=await PDFDocument.load(chunk);assert.equal(cut.getPageCount(),20);assert.deepEqual(cut.getPages().map(page=>page.getWidth()),Array.from({length:20},(_,i)=>322+i));
  const form=book.extractForm(chunk,Array.from({length:20},(_,i)=>i+22),{sourceSha256:'c'.repeat(64)});
  assert.equal(form.get('pages'),'1-20');assert.equal(form.get('pageOffset'),'21');assert.equal(form.get('sourceSha256'),'c'.repeat(64));assert.equal(form.get('file').name,'trang-22-41.pdf');assert.equal(form.get('file').size,chunk.byteLength);
+ // The chunk is extracted for the run's Cách dịch (Kỹ nhất has finer OCR sheets): the job's own, or the one given.
+ assert.equal(form.get('mode'),null,'a job without a mode sends none');
+ assert.equal(book.extractForm(chunk,[22],{sourceSha256:'c'.repeat(64),mode:'quality'}).get('mode'),'quality');
+ assert.equal(book.extractForm(chunk,[22],{sourceSha256:'c'.repeat(64),mode:'quality'},'premium').get('mode'),'premium');
+ assert.equal(book.extractForm(chunk,[22],{sourceSha256:'c'.repeat(64),mode:'turbo'}).get('mode'),null,'never a mode the Worker does not know');
  await assert.rejects(book.openSourcePdf(PDFDocument,new Uint8Array([1,2,3])),/Không mở được PDF để chia lượt dịch/u);
 });
 
@@ -142,7 +157,7 @@ function fakeAccount({total=45,cover=1,blank=[],processedLimit=Infinity,badPages
    return {job:view()};
   }
   if(path==='pdf-layout/extract'){
-   const form=options.body,offset=Number(form.get('pageOffset')),count=Number(form.get('pages').split('-')[1]);extracts.push({offset,count,size:form.get('file').size,sha:form.get('sourceSha256')});
+   const form=options.body,offset=Number(form.get('pageOffset')),count=Number(form.get('pages').split('-')[1]);extracts.push({offset,count,size:form.get('file').size,sha:form.get('sourceSha256'),mode:form.get('mode')});
    // The service names the page it cannot render, in pages of the original (the Worker shifts chunk page numbers).
    const refused=refuse({offset,count});if(refused)throw refused;
    const first=offset+1,bad=badPages.find(page=>page>offset&&page<=offset+count);if(bad)throw Object.assign(new Error(`Trang ${bad} quá lớn để render an toàn (2000×3000 pt).`),{status:400,data:{}});
@@ -153,16 +168,16 @@ function fakeAccount({total=45,cover=1,blank=[],processedLimit=Infinity,badPages
   if(path==='pdf-layout/capacity'&&capacity)return capacity();
   throw new Error(`unexpected ${path}`);
  };
- let run=null;const sessions=[];
+ let run=null;const sessions=[],opened=[];
  const steps={
-  async open(){return null;},
-  async start(result){sessions.push({pages:result.document.pages.map(page=>page.number)});},
+  async open(job,chunk,{mode}={}){opened.push({start:chunk.start,mode});return null;},
+  async start(result,job,{mode}={}){sessions.push({pages:result.document.pages.map(page=>page.number),mode});},
   async translate(){const failure=state.translateErrors.shift();if(failure)throw failure;run.recordUsage({prompt:600,output:267,thinking:0,total:867,requests:1});return {complete:true,model:'gemini-2.5-flash-lite'};},
   async finish(){return {storyId:'book-1',glossary:{史料:'sử liệu',向量:'vectơ'}};}
  };
  const sleeps=[],waits=[],source={cut:async pages=>new Uint8Array(pages.length*pageBytes)},reports=book.reportStore();
  const create=(options={})=>run=book.createBookRun({api,steps,source,reports,sleep:async(seconds,{stopped,early})=>{sleeps.push(seconds);waits.push({seconds,early});return stopped();},...options});
- return {state,calls,patches,extracts,sessions,sleeps,waits,steps,reports,create};
+ return {state,calls,patches,extracts,sessions,opened,sleeps,waits,steps,reports,create};
 }
 
 test('a whole run: chunks of 20 from the first pending page, blank pages free, one PATCH per chunk',async()=>{
@@ -182,6 +197,24 @@ test('a whole run: chunks of 20 from the first pending page, blank pages free, o
  assert.deepEqual(account.patches[0],{status:'running',pauseReason:null,runner});assert.deepEqual(account.patches.at(-1),{status:'done',pauseReason:null,runner});
  assert.ok(account.patches.every(body=>body.runner===runner));assert.deepEqual(chunkPatches.map(body=>body.reports.length),[1,1,1]);
  assert.equal(new Set(chunkPatches.map(body=>body.reports[0].id)).size,3);assert.deepEqual(account.reports.load(account.state.job.id),[]);
+});
+
+test('every chunk is extracted for the run\'s Cách dịch, or the job\'s own when the run names none, and opened in it',async()=>{
+ const own=fakeAccount({total:25,cover:0});own.state.job.mode='quality';
+ assert.equal((await own.create().run(own.state.job)).status,'done');assert.deepEqual(own.extracts.map(entry=>entry.mode),['quality','quality']);
+ const chosen=fakeAccount({total:25,cover:0});chosen.state.job.mode='economy';
+ assert.equal((await chosen.create({mode:'premium'}).run(chosen.state.job)).status,'done');assert.deepEqual(chosen.extracts.map(entry=>entry.mode),['premium','premium']);
+ // The new chunk's session is read and translated in the mode it was extracted for (study.js shows it in the field).
+ assert.deepEqual(own.sessions.map(entry=>entry.mode),['quality','quality']);assert.deepEqual(chosen.sessions.map(entry=>entry.mode),['premium','premium']);
+ assert.deepEqual(own.opened.map(entry=>entry.mode),['quality','quality']);assert.deepEqual(chosen.opened.map(entry=>entry.mode),['premium','premium']);
+ // A chunk begun earlier in another mode (a Cách dịch saved with the book since) goes on in the run's: what is left of it
+ // is read and translated in it, as the chunks after it are.
+ const begun=fakeAccount({total:25,cover:0});begun.state.job.mode='premium';const before=begun.steps.open;
+ begun.steps.open=async(job,chunk,options)=>{await before(job,chunk,options);return chunk.start===1?{document:{pages:Array.from({length:20},(_,i)=>({number:1+i,blocks:[{}]}))}}:null;};
+ assert.equal((await begun.create({mode:'economy'}).run(begun.state.job)).status,'done');
+ assert.deepEqual(begun.opened,[{start:1,mode:'economy'},{start:21,mode:'economy'}]);assert.deepEqual(begun.extracts.map(entry=>[entry.offset,entry.mode]),[[20,'economy']]);
+ const unknown=fakeAccount({total:5,cover:0});
+ assert.equal((await unknown.create({mode:'turbo'}).run(unknown.state.job)).status,'done');assert.deepEqual(unknown.extracts.map(entry=>entry.mode),[null]);
 });
 
 test('pages the extractor did not reach go to the next chunk, which is cut to what fitted',async()=>{
@@ -384,6 +417,11 @@ test('PDF service answers map to waiting, halving or a pause: busy is waited out
  for(const code of ['pdf_timeout','pdf_memory','pdf_too_large'])assert.deepEqual(book.classifyError(pdfError(413,code,'Tách PDF vượt thời gian cho phép. Hãy chọn ít trang hơn cho mỗi lượt.'),'extract'),{reason:'too_large',heavy:true},code);
  assert.deepEqual(book.classifyError(pdfError(413,'pdf_crash','Dịch vụ PDF dừng đột ngột…'),'extract'),{reason:'too_large'});
  assert.deepEqual(book.classifyError(pdfError(503,'pdf_unavailable','Dịch vụ PDF đang tạm ngừng.',30),'extract'),{reason:'network',backoff:true,retries:6,wait:30});
+ // A PDF service on other layout code (its image not rebuilt after a deploy): every render would be thrown away, so the
+ // run pauses at once, in the server's words, instead of drawing the chunk again as after a lost connection.
+ const outdated=pdfError(503,'pdf_service_outdated','Dịch vụ PDF chưa được cập nhật cùng phiên bản với trang web, nên PDF vừa dựng chưa được lưu và lượt xuất này không bị tính. Hãy thử xuất lại sau ít phút.');
+ assert.deepEqual(book.classifyError(outdated,'export'),{reason:'error'});
+ assert.equal(book.pauseMessage('error',outdated),'Dịch vụ PDF chưa được cập nhật cùng phiên bản với trang web, nên PDF vừa dựng chưa được lưu và lượt xuất này không bị tính. Hãy thử xuất lại sau ít phút. Tiến độ đã lưu; bấm Tiếp tục dịch cả quyển để thử lại.');
  // This account's own other PDF call (another tab) is the short wait of a limit, said in its own words.
  assert.deepEqual(book.classifyError(pdfError(429,'pdf_busy','Tài khoản của bạn đang có một lượt xử lý PDF khác…',30),'extract'),{reason:'pdf_account',wait:30,retries:20,capacity:true});
  assert.match(book.waitMessage('pdf_busy',20),/Dịch vụ PDF đang bận vì nhiều người dùng cùng lúc\. Tự thử lại sau 20 giây/u);

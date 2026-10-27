@@ -5,6 +5,7 @@ import {readdirSync,readFileSync} from 'node:fs';
 import {fileURLToPath} from 'node:url';
 import {studyHistoryRoute,placeBookPart} from './study-history.js';
 import {pdfLayoutRoute} from './pdf-layout.js';
+import {isMode} from '../frontend/translation-modes.js';
 
 const reader={id:'student-sqlite',name:'Lan'},historyBase='/api/my/study/history';
 const assetId='11111111-1111-4111-8111-111111111111';
@@ -78,6 +79,16 @@ test('Real SQLite PDF history moves between saved text and rendered PDF without 
  assert.equal((await studyHistoryRoute(request(historyPath,body,'PUT'),env,historyPath,reader)).status,200);assert.equal(chapter().file_key,null);assert.equal(chapter().mime,'text/plain');assert.equal(env.FILES.values.has(translatedKey),false);
  assert.equal((await pdfLayoutRoute(request(renderPath,{assetId,historyId:saved.id}),env,renderPath,reader)).status,200);assert.equal(renderCalls,2);assert.equal(chapter().file_key,translatedKey);assert.equal(chapter().mime,'application/pdf');
  assert.equal(sqlite.prepare('SELECT COUNT(*) AS count FROM stories').get().count,1);assert.deepEqual(sqlite.prepare('PRAGMA foreign_key_check').all(),[]);
+});
+
+test('A formula whose machine text holds a $ is kept as written in the saved text of a PDF session',async t=>{
+ const {sqlite,env}=environment(t),png='data:image/png;base64,AA==',source='公式 @@PDF_INLINE_0@@。';
+ const manifest={version:1,pages:[{number:4,width:600,height:800,original:png,background:png,blocks:[{id:'p4-b0',source,box:[20,20,200,80],fontSize:12,inlines:[{token:'@@PDF_INLINE_0@@',image:png,width:24,height:12,text:"$'(x) = $$ + $& - $`"}]}]}]};
+ await env.FILES.put(`study/${reader.id}/pdf-layout/${assetId}/manifest.json`,JSON.stringify(manifest));
+ const body={title:'Đạo hàm',filename:'lesson.pdf',domain:'math',state:{source,parts:[source],translationParts:['Đạo hàm @@PDF_INLINE_0@@ của hàm số.'],done:1,pdfLayout:{assetId}}};
+ const created=await studyHistoryRoute(request(historyBase,body),env,historyBase,reader),saved=await created.json();assert.equal(created.status,201);
+ const chapter=sqlite.prepare('SELECT * FROM chapters WHERE story_id=?').get(saved.libraryStoryId);
+ assert.equal(await (await env.FILES.get(chapter.text_key)).text(),"Đạo hàm $'(x) = $$ + $& - $` của hàm số.");
 });
 
 // Books: every page range of a textbook is its own study session and its own chapter of one private story.
@@ -248,4 +259,45 @@ test('Book placement keeps page order inside one file and puts another file at t
  // Rows saved before file hashes existed fall back to the file name and page count.
  assert.deepEqual(ids(placeBookPart([part('o4',4,null),part('x',1,SHA_B,{filename:'b.pdf'})],part('o1',1,null))),['o1','o4','x']);
  assert.deepEqual(ids(placeBookPart([part('a1',1),part('a5',5)],part('a5',3))),['a1','a5']);
+});
+
+test('Kỹ nhất is kept in engine (migration 0026) while mode keeps a value its old CHECK allows; an unknown mode is refused',async t=>{
+ const {sqlite,env}=environment(t),body=mode=>({title:'Bài học',filename:'bai.txt',domain:'math',...(mode===undefined?{}:{mode}),state:{source:'第一部分',parts:['第一部分'],translationParts:[''],done:0}});
+ const columns=()=>({...sqlite.prepare('SELECT mode,engine FROM study_sessions WHERE id=?').get(saved.id)});
+ const listed=async id=>(await (await studyHistoryRoute(new Request('https://example.test'+historyBase),env,historyBase,reader)).json()).find(row=>row.id===id);
+ const opened=async id=>(await studyHistoryRoute(new Request(`https://example.test${historyBase}/${id}`),env,`${historyBase}/${id}`,reader)).json();
+ assert.ok(sqlite.prepare('PRAGMA table_info(study_sessions)').all().some(column=>column.name==='engine'));
+ // Why the column exists: the CHECK of 0011 refuses the new mode, and SQLite cannot change it in place.
+ assert.throws(()=>sqlite.prepare("INSERT INTO study_sessions(id,user_id,title,state_key,mode) VALUES('x',?,'t','k','premium')").run(reader.id),/CHECK constraint failed/u);
+ const saved=await save(env,body('premium'));assert.equal(saved.http,201);
+ assert.deepEqual(columns(),{mode:'quality',engine:'premium'});assert.equal((await listed(saved.id)).mode,'premium');assert.equal((await opened(saved.id)).mode,'premium');
+ // Saved again in another mode: both columns follow it.
+ assert.equal((await save(env,body('balanced'),{id:saved.id})).http,200);assert.deepEqual(columns(),{mode:'balanced',engine:'balanced'});assert.equal((await opened(saved.id)).mode,'balanced');
+ // A session saved before 0026 has no engine and reads as its mode; a save without a mode (an older page) is economy.
+ sqlite.prepare("INSERT INTO study_sessions(id,user_id,title,state_key,mode) VALUES('before-0026',?,'Cũ','study/old/state.json','quality')").run(reader.id);
+ assert.equal((await listed('before-0026')).mode,'quality');
+ const plain=await save(env,body(undefined));assert.equal(plain.http,201);assert.deepEqual({...sqlite.prepare('SELECT mode,engine FROM study_sessions WHERE id=?').get(plain.id)},{mode:'economy',engine:'economy'});
+ // A mode this server does not know is refused rather than saved as economy, and nothing of the save is kept.
+ const count=()=>sqlite.prepare('SELECT COUNT(*) AS n FROM study_sessions').get().n,before=count(),files=env.FILES.values.size;
+ for(const mode of ['turbo','Premium',7,'__proto__'])await assert.rejects(()=>save(env,body(mode)),error=>error.status===400&&error.code==='bad_mode',String(mode));
+ await assert.rejects(()=>save(env,body('turbo'),{id:saved.id}),error=>error.code==='bad_mode');
+ assert.equal(count(),before);assert.equal(env.FILES.values.size,files);assert.deepEqual(columns(),{mode:'balanced',engine:'balanced'});
+});
+
+test('After a rollback the older version saves mode alone: engine counts only while mode still holds what was written beside it',async t=>{
+ const {sqlite,env}=environment(t),body=mode=>({title:'Bài học',filename:'bai.txt',domain:'math',mode,state:{source:'第一部分',parts:['第一部分'],translationParts:[''],done:0}});
+ const listed=async id=>(await (await studyHistoryRoute(new Request('https://example.test'+historyBase),env,historyBase,reader)).json()).find(row=>row.id===id);
+ const opened=async id=>(await studyHistoryRoute(new Request(`https://example.test${historyBase}/${id}`),env,`${historyBase}/${id}`,reader)).json();
+ // The older version's upsert (before 0026) names every column but engine.
+ const olderSave=(id,mode)=>sqlite.prepare("INSERT INTO study_sessions(id,user_id,title,state_key,mode) VALUES(?,?,'Bài học','',?) ON CONFLICT(id) DO UPDATE SET revision=study_sessions.revision+1,mode=excluded.mode,updated_at=CURRENT_TIMESTAMP").run(id,reader.id,mode);
+ // Kỹ nhất saved again as Kỹ hơn leaves the very columns Kỹ nhất has, so it still reads as Kỹ nhất.
+ for(const [mode,older,read] of [['premium','economy','economy'],['premium','balanced','balanced'],['economy','quality','quality'],['balanced','economy','economy'],['quality','balanced','balanced'],['premium','quality','premium'],['economy','economy','economy']]){
+  const saved=await save(env,body(mode));olderSave(saved.id,older);
+  const item=await opened(saved.id),label=`${mode}, then ${older} by the older version`;
+  assert.equal((await listed(saved.id)).mode,read,label);assert.equal(item.mode,read,label);
+  // The page restores engine before mode (frontend/study.js storedMode): it never brings the stale one back.
+  assert.equal([item.engine,item.mode].find(isMode),read,label);
+  // Saved again by this version: both columns follow the mode it was given.
+  assert.equal((await save(env,body(older),{id:saved.id})).http,200);assert.equal((await opened(saved.id)).mode,older,label);
+ }
 });

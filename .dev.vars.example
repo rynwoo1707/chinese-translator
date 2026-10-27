@@ -9,11 +9,20 @@
 GEMINI_API_KEY=
 # Same as the wrangler.jsonc default; local scripts (backend/check-gemini-runtime.mjs) read it from here.
 GEMINI_MODEL=gemini-3.6-flash
-# Optional: model for repairing a verified missing footnote/year marker and for the student "Đối chiếu kỹ" mode; empty = defaults.
+# Optional: model for repairing a verified missing footnote/year marker and for the student "Kỹ hơn" mode; empty = defaults.
 GEMINI_QUALITY_MODEL=
-# Optional: admin book pipeline reasoning. Empty = translation 'minimal', OCR 'low'. Use 'low' or 'default' (model's unbounded thinking, most tokens).
+# Optional: model for the "Kỹ nhất" mode (a Flash model, like every student mode); empty = GEMINI_MODEL.
+GEMINI_PREMIUM_MODEL=
+# Optional: the "Cách dịch" of admin book jobs that name none, and the one Xưởng dịch preselects in a browser signed in
+# to /admin: economy, balanced, quality or premium; empty = premium.
+ADMIN_TRANSLATION_MODE=
+# Optional: one reasoning level for every step of the admin book pipeline: 'minimal', 'low', 'medium', 'high' or 'default'
+# (model's unbounded thinking, most tokens). Empty = the levels of the job's "Cách dịch". Any other value is ignored like
+# empty (npm run deploy warns about such a value in wrangler.jsonc).
 GEMINI_THINKING=
-# Password for the /admin page and the key that encrypts a Gemini key saved there. Use a long random value.
+# Typed once on /admin to create the first admin account, and again only to reset an admin password. Also the key that
+# encrypts the Gemini key saved in Settings and keys the login-failure counters; CLI tools send it as a Bearer token.
+# Use a long random value (at least 32 characters; only this machine accepts a shorter one).
 ADMIN_TOKEN=replace-with-a-long-random-secret
 # Optional Google login: both values from a Google Cloud OAuth client (redirect URI <site>/api/auth/google/callback).
 GOOGLE_CLIENT_ID=

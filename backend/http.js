@@ -65,7 +65,8 @@ export function bodyLimit(path,method='POST'){
  if(/^\/api\/(?:my\/study\/(?:pdf-layout\/)?extract|requests|jobs|import-preview|stories\/[^/]+\/chapters)$/u.test(path))return 26*MB;
  if(path==='/api/my/study/ocr'||/^\/api\/jobs\/[^/]+\/pdf-page$/u.test(path))return 4*MB;
  if(path.endsWith('/cover'))return 6*MB;
- if(path.startsWith('/api/auth/')||path==='/api/me')return 64*KB;
+ // Sign-in and account forms (students' and admins').
+ if(path.startsWith('/api/auth/')||path.startsWith('/api/admin/')||path==='/api/me')return 64*KB;
  return 8*MB;
 }
 const sizeLabel=bytes=>bytes>=MB?`${Math.round(bytes/MB)} MB`:`${Math.round(bytes/KB)} KB`;

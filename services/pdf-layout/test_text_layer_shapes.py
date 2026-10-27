@@ -137,7 +137,7 @@ class StubbedOcr(unittest.TestCase):
         self.saved = extract.scan_layout
         self.scanned = []
 
-        def scan_layout(page, number):
+        def scan_layout(page, number, fine=False):
             self.scanned.append(number)
             return [{"id": f"p{number}-b1", "text": "OCR", "source": "OCR", "box": [10, 10, 60, 30], "fontSize": 10, "bold": False, "color": "#202020", "inlines": [], "image": extract.image_url(page, fitz.Rect(10, 10, 60, 30), 1)}], [], [], []
         extract.scan_layout = scan_layout

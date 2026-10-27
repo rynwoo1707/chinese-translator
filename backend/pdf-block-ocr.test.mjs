@@ -1,7 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {recognizePdfBlocks,normalizeOcrMath} from './pdf-block-ocr.js';
+import {recognizePdfBlocks,normalizeOcrMath,readingDoubt,undrawableTex} from './pdf-block-ocr.js';
 import {pdfLayoutRoute} from './pdf-layout.js';
+import {applyOcrReadings} from './pdf-layout-apply.js';
+import {MODES,modeProfile} from '../frontend/translation-modes.js';
+import {renderMathText,unsupportedMath} from '../frontend/math-text.js';
 
 const png='data:image/png;base64,AA==';
 const studentKey='student-ocr-key-12345678901234567890';
@@ -309,7 +312,12 @@ test('Block OCR instruction states line, notation and visible-text rules for any
  const calls=mockGeneration(t);await recognizePdfBlocks(aiEnv,blocks());
  const instruction=calls[0].body.systemInstruction.parts[0].text;
  for(const rule of [/IMAGE is authoritative/u,/one visual row on one output line/u,/verse line/u,/H₂O, Fe³⁺/u,/LaTeX inside \\\( \\\) only for stacked fractions \\frac\{a\}\{b\}, roots \\sqrt\{x\}, vectors \\vec\{AB\}/u,/every vector arrow, in prose as in lists/u,/never replace or drop visible text outside the boxes \(words, operators, =, brackets, punctuation/u,/punctuation included, belongs to its token/u])assert.match(instruction,rule);
- assert.doesNotMatch(instruction,/not LaTeX code|Join visual line wraps/u);assert.ok(instruction.length<=2300,`${instruction.length} characters are sent with every OCR call`);
+ // A system of equations or a matrix has one drawable form (the renderer's environments: display math on a row of its
+ // own, inline math inside a sentence), scripts are braced and relations named, so "S_{n-1} … n\geq 2" is never
+ // improvised as a bare \begin{cases} or "n 2 2".
+ for(const rule of [/brace system or matrix as one \\\[…\\\] on its own row, \\\(…\\\) inside a sentence \(only cases, aligned, array, matrix, pmatrix, bmatrix, vmatrix\)/u,/in LaTeX brace each script \(S_\{n-1\}\)/u,/use \\geq \\leq \\neq/u])assert.match(instruction,rule);
+ // 2,440 characters (about 610 tokens) with every call: those rules cost about 35 tokens more than the 2,300 before.
+ assert.doesNotMatch(instruction,/not LaTeX code|Join visual line wraps/u);assert.ok(instruction.length<=2440,`${instruction.length} characters are sent with every OCR call`);
 });
 
 // Real Gemini OCR output from two scanned exercise rows (p7-b8, p7-b10 of the vector chapter sample).
@@ -346,4 +354,228 @@ test('Block OCR output delimits bare LaTeX and spaces glued formula tokens only 
  const result=await recognizePdfBlocks(aiEnv,input);
  assert.equal(result.blocks[0].text,'@@PDF_INLINE_1@@ @@PDF_INLINE_2@@@@PDF_INLINE_3@@ 因为');
  assert.equal(result.blocks[1].text,String.raw`(1) @@PDF_INLINE_1@@@@PDF_INLINE_2@@ \(\frac{1}{2}\)`,'boxes on different rows are not spaced');
+});
+
+test('OCR math normalization delimits a bare environment the renderer draws: display alone on its line, inline in a sentence, never a command inside it',()=>{
+ for(const [input,output] of [
+  [String.raw`\begin{cases}x+y=1\\x-y=3\end{cases}`,String.raw`\[\begin{cases}x+y=1\\x-y=3\end{cases}\]`],
+  [String.raw`解方程组 \begin{cases}x+y=1\\x-y=3\end{cases} 得`,String.raw`解方程组 \(\begin{cases}x+y=1\\x-y=3\end{cases}\) 得`],
+  // the \left…\right fences go with it, and the \frac inside is never delimited on its own
+  [`因为\n${String.raw`\left\{\begin{array}{l}\frac{1}{2}x\\y\geq 0\end{array}\right.`}\n所以`,`因为\n${String.raw`\[\left\{\begin{array}{l}\frac{1}{2}x\\y\geq 0\end{array}\right.\]`}\n所以`],
+  [String.raw`a_{n}=\begin{pmatrix}1&0\\0&1\end{pmatrix}，`,String.raw`a_{n}=\(\begin{pmatrix}1&0\\0&1\end{pmatrix}\)，`],
+  // a row that starts with \frac keeps its break (three backslashes); two before a command are JSON escaping as before
+  [String.raw`\begin{cases}1,&x>0\\\frac{1}{2},&x\leq 0\end{cases}`,String.raw`\[\begin{cases}1,&x>0\\\frac{1}{2},&x\leq 0\end{cases}\]`]
+ ])assert.equal(normalizeOcrMath(input),output);
+ // already delimited, an environment the renderer does not draw, or one holding a formula image: as written
+ for(const text of [String.raw`\[\begin{cases}a\\b\end{cases}\]`,String.raw`$\begin{matrix}a&b\end{matrix}$`,String.raw`\begin{tabular}{cc}a&\frac{1}{2}\end{tabular}`,String.raw`\begin{cases}@@PDF_INLINE_1@@\\b\end{cases}`])assert.equal(normalizeOcrMath(text),text);
+});
+
+test('OCR math normalization makes display math holding an environment inline when it shares its line with other text',()=>{
+ const R=String.raw,piecewise=R`f(x)=\begin{cases}\log_2 x, & x>0\\3^x, & x\leq 0\end{cases}`;
+ for(const [input,output] of [
+  // an exercise row of any subject read as the prompt once asked: the system inside the sentence becomes inline, as the
+  // same system written bare would (the renderer would set \[…\] as a block the row's box cannot hold)
+  [R`已知函数 \[${piecewise}\]，则 f(f(\frac{1}{4})) 的值为____`,R`已知函数 \(${piecewise}\)，则 f(f(\(\frac{1}{4}\))) 的值为____`],
+  [R`矩阵 $$A=\begin{pmatrix}1&2\\3&4\end{pmatrix}$$ 的逆矩阵`,R`矩阵 \(A=\begin{pmatrix}1&2\\3&4\end{pmatrix}\) 的逆矩阵`],
+  [R`\[\left\{\begin{array}{l}x+y=1\\x-y=3\end{array}\right.\]，解得 x=2`,R`\(\left\{\begin{array}{l}x+y=1\\x-y=3\end{array}\right.\)，解得 x=2`],
+  // alone on its row (other rows around it) it stays display math
+  [R`解方程组${'\n'}\[\begin{cases}x+y=1\\x-y=3\end{cases}\]${'\n'}得 x=2`,R`解方程组${'\n'}\[\begin{cases}x+y=1\\x-y=3\end{cases}\]${'\n'}得 x=2`]
+ ])assert.equal(normalizeOcrMath(input),output);
+ // display math without an environment, an environment the renderer does not draw, and inline math stay as written
+ for(const text of [R`由 \[x^2+y^2=1\] 得`,R`如下 \[\begin{tabular}{cc}a&b\end{tabular}\] 所示`,R`解 \(\begin{cases}a\\b\end{cases}\) 得`])assert.equal(normalizeOcrMath(text),text);
+ // the page sets the sentence's system inline, on the row's own line, never as a block of its own
+ const html=renderMathText(normalizeOcrMath(R`已知函数 \[${piecewise}\]，则`));
+ assert.doesNotMatch(html,/math-display/u);assert.match(html,/class="math-inline"/u);assert.match(html,/math-env-cases/u);
+});
+
+test('OCR math normalization takes the \\left…\\right fences with an environment only as a pair, as translation shielding does',()=>{
+ // the |…| of a determinant holds more than the matrix: both fences stay text, so neither is cut from its partner
+ assert.equal(normalizeOcrMath(String.raw`\det\left|A-\lambda\begin{matrix}1&0\\0&1\end{matrix}\right|=0`),String.raw`\det\left|A-\lambda\(\begin{matrix}1&0\\0&1\end{matrix}\)\right|=0`);
+ assert.equal(normalizeOcrMath(String.raw`\left\{\begin{matrix}a\\b\end{matrix} 和 c`),String.raw`\left\{\(\begin{matrix}a\\b\end{matrix}\) 和 c`);
+ assert.equal(normalizeOcrMath(String.raw`\left(\begin{matrix}a&b\end{matrix}\right)`),String.raw`\[\left(\begin{matrix}a&b\end{matrix}\right)\]`);
+});
+
+test('OCR math normalization takes an environment nested in one of its own name whole, and leaves one never closed as text',async t=>{
+ const block=String.raw`\begin{matrix}\begin{matrix}a&b\end{matrix}&c\\d&e\end{matrix}`;
+ for(const [input,output] of [
+  // a block matrix: the first \end{matrix} closes the inner one, and the outer one runs on to the last
+  [`矩阵\n${block}\n的秩`,`矩阵\n\\[${block}\\]\n的秩`],
+  [String.raw`已知 \begin{array}{c}\begin{array}{cc}1&2\end{array}\\3\end{array} 所以`,String.raw`已知 \(\begin{array}{c}\begin{array}{cc}1&2\end{array}\\3\end{array}\) 所以`],
+  // with its fences, and a \frac after the inner one is still inside the outer one
+  [String.raw`\left|\begin{matrix}\begin{matrix}1\end{matrix}&\frac{1}{2}\end{matrix}\right|`,String.raw`\[\left|\begin{matrix}\begin{matrix}1\end{matrix}&\frac{1}{2}\end{matrix}\right|\]`],
+  // a cases left open (a cut-off reading) is text: the words after it stay out of math, the closed one after them is math
+  [String.raw`\begin{cases}x>0 再看 \begin{cases}a\\b\end{cases}`,String.raw`\begin{cases}x>0 再看 \(\begin{cases}a\\b\end{cases}\)`]
+ ])assert.equal(normalizeOcrMath(input),output);
+ // one holding a formula image stays as written, and nothing inside it is delimited
+ const image=String.raw`\begin{matrix}\begin{matrix}@@PDF_INLINE_1@@\end{matrix}&\frac{1}{2}\end{matrix}`;assert.equal(normalizeOcrMath(image),image);
+ // read by Gemini: stored whole, not doubtful, and drawn as a grid with no \begin, \end, & or \\ printed
+ mockGeneration(t,{blocks:[{id:'p2-b1',text:`矩阵\n${block}\n的秩`}],warnings:[]});
+ const [read]=(await recognizePdfBlocks(aiEnv,[{id:'p2-b1',source:'矩阵 的秩',image:png,box:[20,20,220,80],fontSize:12}])).blocks;
+ assert.equal(read.text,`矩阵\n\\[${block}\\]\n的秩`);assert.equal(read.ocrDoubt,undefined);
+ const visible=html=>html.replace(/<[^>]+>/gu,'').replace(/&(?:lt|gt|quot|#39);/gu,' ').replace(/&amp;/gu,'&');
+ for(const bare of [true,false]){const shown=visible(renderMathText(read.text,{bare}));assert.doesNotMatch(shown,/\\begin|\\end|&|\\\\/u,shown);assert.match(shown,/^矩阵\s*a\s*b\s*c\s*d\s*e\s*的秩$/u,shown);}
+});
+
+test('A reading that passes the checks but looks doubtful is used, marked ocrDoubt and named in the warnings unless asked not to',async t=>{
+ const inline=n=>({token:`@@PDF_INLINE_${n}@@`,label:`@${n}`,box:[40*n,30,40*n+30,45],image:png,text:'x',width:30,height:15});
+ const block=(id,source,count=0)=>({id,source,image:png,box:[20,20,220,80],fontSize:12,inlines:Array.from({length:count},(_,i)=>inline(i+1))});
+ const [t1,t2]=['@@PDF_INLINE_1@@','@@PDF_INLINE_2@@'];
+ // Tesseract hints and Gemini readings: ",_;" stuck to a formula (the S_{n-1} line of the screenshot), TeX the page cannot
+ // draw, two formulas swapped, most of the Chinese dropped; then a hint with two misread characters around its formula,
+ // and a system of equations the renderer draws.
+ const input=[block('p4-b1',`显然 ${t1}，而${t2}，于是`,2),block('p4-b2','表格如下：'),block('p4-b3',`已知 ${t1}，求证 ${t2} 成立`,2),block('p4-b4','两个向量所在的直线平行或重合，这些向量叫做平行向量。'),block('p4-b5',`癌量 ${t1} 的槙。`,1),block('p4-b6','求解方程组')];
+ const readings=[`显然 ${t1}，而S${t2},_;(n 2 2, 于是`,String.raw`表格如下：\begin{tabular}{cc}a&b\end{tabular}`,`已知 ${t2}，求证 ${t1} 成立`,'两个向量所在的直线。',`向量 ${t1} 的模。`,String.raw`求解方程组 \begin{cases}x+y=1\\x-y=3\end{cases}`];
+ mockGeneration(t,{blocks:input.map((b,i)=>({id:b.id,text:readings[i]})),warnings:['Ảnh mờ.']});
+ const result=await recognizePdfBlocks(aiEnv,input);
+ assert.deepEqual(result.blocks.map(b=>b.ocrDoubt),['glued','tex','hint','han',undefined,undefined]);
+ assert.ok(result.blocks.every(b=>b.ocrKept===undefined),'a doubtful reading is still the reading');assert.equal(result.blocks[0].text,readings[0]);
+ assert.equal(result.blocks[5].text,String.raw`求解方程组 \(\begin{cases}x+y=1\\x-y=3\end{cases}\)`,'an environment the renderer draws is not doubtful');
+ assert.deepEqual(result.warnings.map(w=>w.split(':')[0]),['Trang 4 · đoạn 2','Trang 4 · đoạn 1','Trang 4 · đoạn 3','Trang 4 · đoạn 4','Ảnh mờ.']);
+ for(const note of result.warnings.slice(0,4)){assert.match(note,/có thể bị đọc sai; hãy đối chiếu với trang gốc\.$/u);assert.doesNotMatch(note,/giữ chữ OCR máy/u,'never taken for a note on kept machine text');}
+ assert.deepEqual((await recognizePdfBlocks(aiEnv,input,[],{noteDoubts:false})).warnings,['Ảnh mờ.']);
+ // A fill-in line or one mark beside a formula is ordinary text, and a hint with Latin junk for Chinese leaves the count alone.
+ for(const [hint,reading,count] of [[`则 ${t1}`,`则 ${t1}______`,1],[`则 ${t1}，`,`则 ${t1}；`,1],['iii | ll .. ,','1.1 空间向量及其运算',0]])assert.equal(readingDoubt(reading,block('p4-b9',hint,count)),null,reading);
+ // The TeX names the block translation reports too; a path and an escaped & are text.
+ const found=undrawableTex(String.raw`\begin{tabular}{c}a\end{tabular} x &= y\\ z \begin{cases}1\\2\end{cases}`);
+ for(const name of [String.raw`\begin{tabular}`,String.raw`\\`,'&'])assert.ok(found.includes(name),`${name} in ${found}`);
+ assert.deepEqual(undrawableTex(String.raw`C:\Users\Lan 和 A\&B，\[\begin{aligned}a&=b\\c&=d\end{aligned}\]`),[]);
+});
+
+test('Only TeX the page prints as written counts as undrawable: rows inside math, a braced \\\\, a lone \\left and prices are drawn or prose',()=>{
+ const R=String.raw;
+ // Drawn: a two-line limit, rows of delimited math (gathered, aligned), columns of an inline formula, a bare \substack,
+ // a \left without its \right (its delimiter alone); prose with prices and "Q&A" (Pandoc's $…$ rule), a path, \&.
+ for(const text of [R`\[\sum_{\substack{1\leq i\leq n\\ i\neq j}} a_{ij}\]`,R`\[x+y=1 \\ x-y=3\]`,R`\[S_n &= a_1+a_2 \\ &= 2a_1+d\]`,R`\(a&b\)`,R`由 \sum_{\substack{0<i<m\\0<j<n}} a_{ij} 得`,R`\(\left( x+1\)`,'Chi phí R&D là $5 tỷ, phần Q&A là $2 tỷ.',R`C:\Users\Lan 和 A\&B，\[\begin{aligned}a&=b\\c&=d\end{aligned}\]`]){
+  assert.deepEqual(undrawableTex(text),[],text);assert.equal(readingDoubt(text,{source:text}),null,text);
+ }
+ // Drawn too: rows and columns of delimited math that also holds environments (the opener comes first, so the renderer
+ // sets the formula's own rows round them), a delimited environment alone, and row spacing (\\[2pt]) in or out of math.
+ for(const text of [R`已知矩阵 \[ A &= \begin{pmatrix} 1 & 2 \\ 3 & 4 \end{pmatrix} \\ B &= \begin{pmatrix} 5 & 6 \\ 7 & 8 \end{pmatrix} \]`,R`\[ D &= \begin{vmatrix} a & b \\ c & d \end{vmatrix} \\ &= ad-bc \]`,R`\[ f(x) = \begin{cases} x, & x \geq 0 \\ -x, & x < 0 \end{cases} \\ g(x) = x^2 \]`,R`求解方程组 \(\begin{cases}x+y=1\\x-y=3\end{cases}\)`,R`\[\begin{pmatrix}1&2\\3&4\end{pmatrix}\]`,R`\begin{aligned} a &= 1 \\[2pt] b &= 2 \end{aligned}`,R`\[ a \\[4pt] b \]`,R`echo $$ 输出当前进程号`]){
+  assert.deepEqual(unsupportedMath(text),[],text);assert.deepEqual(undrawableTex(text),[],text);assert.equal(readingDoubt(text,{source:text}),null,text);
+ }
+ // Printed as written: rows and columns typed outside math, a row break after a group that closed or in one that never
+ // does, an aligned row between escaped dollars (no math), a row after a bare environment, and a \( or \[ left open or a
+ // \) or \] never opened (the page shows the delimiter; a $$ left open is prose, echo $$).
+ for(const [text,names] of [[R`a &= b \\ c &= d`,[R`\\`,'&']],[R`{a} x+y=1 \\ x-y=3`,[R`\\`]],[R`{a \\ b`,[R`\\`]],[R`\$x &= 1\$`,['&']],[R`\begin{pmatrix}1&2\end{pmatrix} \\ x &= 3`,[R`\\`,'&']],[R`求 \(x^{2}+1 的最小值。`,[R`\(`]],[R`求 x^{2}+1\) 的最小值。`,[R`\)`]],[R`已知 \[ S_{n}=n^{2} 求 a_{n}。`,[R`\[`]],[R`已知 S_{n}=n^{2} \] 求 a_{n}。`,[R`\]`]],[R`已知 \(\begin{cases} x=1 \\ y=2 \end{cases} 求 x`,[R`\(`]]]){
+  const found=undrawableTex(text);for(const name of names)assert.ok(found.includes(name),`${name} in ${text}: ${found}`);assert.equal(readingDoubt(text,{source:text}),'tex',text);
+ }
+});
+
+test('A row break in a braced group of bare text counts unless the page draws it: \\substack does, a bare {…}, \\boxed, \\underset or a script prints it as written',()=>{
+ const R=String.raw,printed=text=>/(?:^|[^\\])\\\\(?![A-Za-z])/u.test(renderMathText(text).replace(/<[^>]*>/gu,''));
+ // Drawn: the rows of a \substack, under a sum or a limit or on its own.
+ for(const text of [R`由 \sum_{\substack{0<i<m\\0<j<n}} a_{ij} 得`,R`由 \lim_{\substack{x\to 0 \\ y\to 0}} f(x,y) 得`,R`由 \substack {i<n \\ j<m} 得`]){
+  assert.equal(printed(text),false,text);assert.deepEqual(undrawableTex(text),[],text);assert.equal(readingDoubt(text,{source:text}),null,text);
+ }
+ // Printed as written: a system typed in bare braces, rows boxed, stacked, in a script or under a limit, a group inside
+ // \substack's own, and a \substack a formula splits (the page reads the text on each side of a formula on its own).
+ for(const text of [R`已知 {x+y=1 \\ x-y=3} 求 x`,R`由 \boxed{x \\ y} 得`,R`由 \underset{x \\ y}{\max} f 得`,R`由 \overset{a \\ b}{=} 得`,R`由 x^{a \\ b} 得`,R`由 \lim_{x \\ y} f 得`,R`由 \substack{{a \\ b}} 得`,R`由 \substack{a \(x\) \\ b} 得`]){
+  assert.equal(printed(text),true,text);assert.ok(undrawableTex(text).includes(R`\\`),`${text}: ${undrawableTex(text)}`);assert.equal(readingDoubt(text,{source:text}),'tex',text);
+ }
+});
+
+test('Block OCR gives a call that thinks more room for its answer: the output cap grows with the thinking level',async t=>{
+ const calls=mockGeneration(t),cap=1024+4*blocks().reduce((n,b)=>n+b.source.length,0);
+ for(const level of ['minimal','low','medium','high'])await recognizePdfBlocks({...aiEnv,GEMINI_THINKING:level},blocks());
+ assert.deepEqual(calls.map(call=>call.body.generationConfig.maxOutputTokens),[cap,cap+2048,cap+8192,cap+16384]);
+ assert.deepEqual(calls.map(call=>call.body.generationConfig.thinkingConfig),['minimal','low','medium','high'].map(thinkingLevel=>({thinkingLevel})));
+});
+
+test('The OCR route reasons as the session\'s mode says and reads blocks again only in a mode that does so',async t=>{
+ const {env,FILES}=environment();await FILES.put(manifestKey(reader),JSON.stringify(document()));
+ const calls=mockGeneration(t),cap=1024+4*blocks().reduce((n,b)=>n+b.source.length,0),config=()=>calls.at(-1).body.generationConfig;
+ // Thinking tokens count against the cap (ai.js thinkingHeadroom); the levels are the modes' own (translation-modes.js).
+ const headroom={minimal:0,low:2048,medium:8192,high:16384},expect=(level,label)=>{assert.deepEqual(config().thinkingConfig,{thinkingLevel:level},label);assert.equal(config().maxOutputTokens,cap+headroom[level],label);};
+ // The hint stays the machine text once a block is read, so every call below has the same cap before thinking.
+ for(const mode of [undefined,'turbo',...MODES]){assert.equal((await ocrRoute(env,body({mode,slim:true}))).status,200,String(mode));expect(modeProfile(mode).ocrThinking,String(mode));}
+ assert.equal(modeProfile('turbo').ocrThinking,modeProfile('economy').ocrThinking,'an unknown mode is economy');
+ // A re-read is refused before any call or write where the mode has none (economy, or no or an unknown mode).
+ const made=calls.length,writes=FILES.writes.length;
+ for(const mode of [undefined,'turbo',...MODES.filter(mode=>!modeProfile(mode).reread)])await assert.rejects(()=>ocrRoute(env,body({mode,reread:true})),error=>error.code==='bad_mode'&&error.status===400,String(mode));
+ assert.equal(calls.length,made);assert.equal(FILES.writes.length,writes);
+ const rereading=MODES.filter(mode=>modeProfile(mode).reread);assert.ok(rereading.includes('premium'));
+ for(const mode of rereading){assert.equal((await ocrRoute(env,body({mode,reread:true,slim:true}))).status,200,mode);expect(modeProfile(mode).reread.thinking,mode);}
+});
+
+test('A re-read is sent the machine text as its hint, never replaces a reading with a failed one, and counts itself; a good one replaces text and marks',async t=>{
+ const {env,FILES}=environment();await FILES.put(manifestKey(reader),JSON.stringify(document()));
+ let answer;const calls=mockGeneration(t,()=>({blocks:answer,warnings:[]}));
+ const stored=()=>JSON.parse(storedText(FILES.values.get(manifestKey(reader)))).pages[0].blocks;
+ // A mode that reads doubtful blocks again (Kỹ nhất does).
+ const mode=MODES.find(id=>modeProfile(id).reread?.doubt);assert.ok(modeProfile('premium').reread?.doubt);
+ const read=async extra=>(await (await ocrRoute(env,body({mode,slim:true,...extra}))).json());
+ const marks=result=>result.blocks.map(b=>[b.source,b.ocrDoubt,b.ocrKept,b.ocrRereads]);
+ // The first reading of p4-b1 has ",_;" stuck to its formula: used, and doubtful; the mode reads it again, so no note yet.
+ const doubtful='向量 @@PDF_INLINE_0@@,_; 的模。';answer=[corrected()[0],{id:'p4-b1',text:doubtful}];
+ let result=await read();
+ assert.deepEqual(marks(result),[[corrected()[0].text,undefined,undefined,undefined],[doubtful,'glued',undefined,undefined]]);assert.deepEqual(result.warnings,[]);
+ assert.deepEqual(stored().map(b=>b.ocrHint),[machine['p4-b0'],machine['p4-b1']],'the machine text is kept for a re-read');
+ // A re-read whose answer loses the formula keeps the earlier reading and its doubt, and says so; only the count grows.
+ answer=[corrected()[0],{id:'p4-b1',text:'向量 的模。'}];result=await read({reread:true});
+ assert.deepEqual(marks(result),[[corrected()[0].text,undefined,undefined,1],[doubtful,'glued',undefined,1]]);
+ assert.deepEqual(result.warnings,['Trang 4 · đoạn 1: bản đọc của Gemini làm mất hoặc thừa mã công thức. Đoạn này giữ bản đọc trước đó của Gemini; hãy đối chiếu với trang gốc.']);
+ const sent=calls.at(-1).body.contents[0].parts.filter(part=>part.text&&JSON.parse(part.text).id).map(part=>JSON.parse(part.text).sourceHint);
+ assert.deepEqual(sent,[machine['p4-b0'],machine['p4-b1']],'a re-read is compared with what Tesseract saw, not with the reading it checks');
+ // A re-read never makes a block worse: one doubtful in its own way replaces a doubtful reading, carrying that doubt, now
+ // named; a clean reading whose re-read looks doubtful stays as it was, and that re-read is not named.
+ const tabular=String.raw` \begin{tabular}{c}a\end{tabular}`,other=`${corrected()[1].text}${tabular}`;
+ answer=[{id:'p4-b0',text:`空间向量${tabular}`},{id:'p4-b1',text:other}];result=await read({reread:true});
+ assert.deepEqual(marks(result),[[corrected()[0].text,undefined,undefined,2],[other,'tex',undefined,2]]);
+ assert.deepEqual(result.warnings,['Trang 4 · đoạn 1: bản đọc của Gemini còn mã công thức chưa dựng được. Đoạn này có thể bị đọc sai; hãy đối chiếu với trang gốc.']);
+ // A good re-read replaces the text and clears the doubt.
+ answer=corrected();result=await read({reread:true});
+ assert.deepEqual(marks(result),[[corrected()[0].text,undefined,undefined,3],[corrected()[1].text,undefined,undefined,3]]);assert.deepEqual(result.warnings,[]);
+ assert.deepEqual(stored().map(b=>[b.ocrDoubt,b.ocrRereads,b.ocrHint]),[[undefined,3,machine['p4-b0']],[undefined,3,machine['p4-b1']]]);
+});
+
+// A sheet is read whole, so a re-read of one block of it reads the others of the sheet too (sheet-mates).
+const sheetDocument=()=>({version:1,extractionVersion:3,totalPages:88,pages:[{number:7,width:600,height:800,ocr:true,background:png,original:png,
+ blocks:[['p7-b1','在平面向量的学习中我们学习了向量的投影类似地在空间向量的投影有什么意义'],['p7-b2','选择恰当的向量表示问题中的几何元素通过向量运算得出几何元素的关系是解决立体几何问题的常用方法']].map(([id,source],i)=>({id,source,text:source,box:[20,20+60*i,520,60+60*i],fontSize:12,inlines:[],ocrSheet:'p7-s1',ocrLabel:`#${i+1}`})),
+ ocrSheets:[{id:'p7-s1',image:png,strips:[{blockId:'p7-b1',label:'#1',box:[74,12,474,68]},{blockId:'p7-b2',label:'#2',box:[74,90,474,140]}]}]}]});
+test('A re-read of one block of a sheet never makes its sheet-mates worse: only the blocks chosen (rereadIds) count it and are named',async t=>{
+ const {env,FILES}=environment(),[hint1,hint2]=sheetDocument().pages[0].blocks.map(b=>b.source);await FILES.put(manifestKey(reader),JSON.stringify(sheetDocument()));
+ let answer;const calls=mockGeneration(t,()=>({blocks:answer,warnings:[]}));
+ const stored=()=>JSON.parse(storedText(FILES.values.get(manifestKey(reader)))).pages[0].blocks;
+ const read=async extra=>(await (await ocrRoute(env,body({mode:'premium',slim:true,blockIds:['p7-b1','p7-b2'],...extra}))).json());
+ const marks=result=>result.blocks.map(b=>[b.id,b.source.length,b.ocrDoubt,b.ocrRereads]);
+ // First reading: p7-b1 clean, p7-b2 drops most of its Chinese (doubtful, 'han').
+ answer=[{id:'p7-b1',text:hint1},{id:'p7-b2',text:hint2.slice(0,5)}];await read();
+ // The browser chose p7-b2; this time Gemini drops most of p7-b1 and reads p7-b2 well.
+ answer=[{id:'p7-b1',text:hint1.slice(0,3)},{id:'p7-b2',text:hint2}];let result=await read({reread:true,rereadIds:['p7-b2']});
+ assert.deepEqual(marks(result),[['p7-b1',hint1.length,undefined,undefined],['p7-b2',hint2.length,undefined,1]],'p7-b1 keeps its clean reading and is not counted');
+ assert.deepEqual(result.warnings,[]);assert.deepEqual(stored().map(b=>[b.source,b.ocrDoubt,b.ocrRereads]),[[hint1,undefined,undefined],[hint2,undefined,1]]);
+ assert.equal(calls.length,2);
+ // An older page names no rereadIds: every block named counts, and a clean reading still stays clean.
+ await FILES.put(manifestKey(reader),JSON.stringify(sheetDocument()));answer=[{id:'p7-b1',text:hint1},{id:'p7-b2',text:hint2.slice(0,5)}];await read();
+ answer=[{id:'p7-b1',text:hint1.slice(0,3)},{id:'p7-b2',text:hint2}];result=await read({reread:true});
+ assert.deepEqual(marks(result),[['p7-b1',hint1.length,undefined,1],['p7-b2',hint2.length,undefined,1]]);
+ // rereadIds must name blocks of the call, each once, before any call or write.
+ const made=calls.length,writes=FILES.writes.length;
+ for(const rereadIds of [[],['p7-b3'],['p7-b2','p7-b2'],'p7-b2'])await assert.rejects(()=>read({reread:true,rereadIds}),/không hợp lệ/u,JSON.stringify(rereadIds));
+ assert.equal(calls.length,made);assert.equal(FILES.writes.length,writes);
+});
+
+test('A re-read of blocks kept with their machine text that fails again changes nothing but its count; one of blocks never read stores them handled',async t=>{
+ const {env,FILES}=environment();await FILES.put(manifestKey(reader),JSON.stringify(document()));
+ let reply;t.mock.method(globalThis,'fetch',async()=>reply());
+ const refused=()=>Response.json({candidates:[{finishReason:'RECITATION'}],usageMetadata:{promptTokenCount:900,candidatesTokenCount:0,totalTokenCount:900}});
+ const mode=MODES.find(id=>modeProfile(id).reread),read=async extra=>(await (await ocrRoute(env,body({mode,slim:true,...extra}))).json());
+ // A re-read may name blocks no call read yet: kept, they are handled like any reading that failed.
+ reply=refused;let result=await read({reread:true});
+ assert.deepEqual(result.blocks.map(b=>[b.source,b.ocrKept,b.ocrCorrected,b.ocrRereads]),[[machine['p4-b0'],'refused',true,1],[machine['p4-b1'],'refused',true,1]]);
+ assert.equal(result.ocrCorrectedVersion,1);
+ reply=()=>Response.json({candidates:[{finishReason:'SAFETY'}],usageMetadata:{promptTokenCount:900,candidatesTokenCount:0,totalTokenCount:900}});
+ result=await read({reread:true});
+ assert.deepEqual(result.blocks.map(b=>[b.source,b.ocrKept,b.ocrRereads]),[[machine['p4-b0'],'refused',2],[machine['p4-b1'],'refused',2]]);
+ assert.equal(result.usage.total,900);assert.match(result.warnings[0],/bộ lọc an toàn/u);
+ // A later reading clears the mark; the count stays.
+ reply=()=>generationResponse({blocks:corrected(),warnings:[]});result=await read();
+ assert.deepEqual(result.blocks.map(b=>[b.source,b.ocrKept,b.ocrRereads]),[[corrected()[0].text,undefined,2],[corrected()[1].text,undefined,2]]);
+});
+
+test('A formula whose machine text holds a $ (OCR often reads S as $) goes into the block text as written, never as a replacement pattern',()=>{
+ const inline={token:'@@PDF_INLINE_0@@',image:png,width:24,height:12,text:"$'(x) = $$ + $& - $`"};
+ const document={version:1,pages:[{number:4,width:600,height:800,ocr:true,background:png,original:png,blocks:[{id:'p4-b0',source:'Tesseract 猜错',image:png,box:[20,20,220,80],fontSize:12,inlines:[inline]}]}]};
+ applyOcrReadings(document,{blocks:[{id:'p4-b0',text:'函数 @@PDF_INLINE_0@@ 的导数。'}]});
+ assert.equal(document.pages[0].blocks[0].text,"函数 $'(x) = $$ + $& - $` 的导数。");assert.equal(document.pages[0].blocks[0].source,'函数 @@PDF_INLINE_0@@ 的导数。');
 });

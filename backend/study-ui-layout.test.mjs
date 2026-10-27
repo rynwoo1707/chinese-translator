@@ -376,11 +376,13 @@ test('Blocks asked for again after a refusal are named, not counted as a range o
 
 test('The block editor names a formula box it lost or holds twice, and a block emptied or too long, in its own words ("Đoạn k", "[Công thức n]"), and saves nothing',{skip,timeout:120000},async()=>{
  const document=manifest(2),block=document.pages[0].blocks[0];
- Object.assign(block,{text:'设 x 为实数。',source:'设@@PDF_INLINE_1@@为实数。',inlines:[{token:'@@PDF_INLINE_1@@',image:PNG,width:10,height:12,text:'x'}]});
+ // The formula's machine text holds $-patterns (OCR reads S as $): the translation text keeps them as written.
+ Object.assign(block,{text:"设 $'x$$ 为实数。",source:'设@@PDF_INLINE_1@@为实数。',inlines:[{token:'@@PDF_INLINE_1@@',image:PNG,width:10,height:12,text:"$'x$$"}]});
  const account=fakeAccount(document,{translate:json=>({blocks:json.blocks.map(b=>({id:b.id,translation:b.id==='p1-b1'?'Đặt @@PDF_INLINE_1@@ là số thực.':translated(b.id)})),failedBlocks:[],context:'',glossary:{},usage:{prompt:600,output:200,total:800,requests:1},warnings:[],model:'gemini-test'})});
  const {context,page,errors}=await openStudy(account.api);
  try{
   await pickPdf(page);await page.click('#translate');await waitProgress(page,/^PDF tiếng Việt đã được lưu vào Thư viện riêng/u);await idle(page);
+  assert.equal((await page.inputValue('#translation')).split('\n\n')[0],"Đặt $'x$$ là số thực.");
   await page.click('#pdf-dual-viewer .pdf-block-editor > summary');await page.selectOption('[data-pdf-edit-select]','p1-b1');
   assert.equal(await page.inputValue('[data-pdf-edit-text]'),'Đặt [Công thức 1] là số thực.');
   const saves=account.saves.length;

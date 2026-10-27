@@ -130,7 +130,9 @@ if(vars===null){vars=readFileSync('.dev.vars.example','utf8');console.log('Đã 
 else console.log('.dev.vars đã có: chỉ thêm giá trị còn thiếu.');
 const current=key=>valueIn(vars,key);
 function setVar(key,value){const line=`${key}=${value}`;vars=new RegExp(`^${key}=`,'mu').test(vars)?vars.replace(new RegExp(`^${key}=[^\\r\\n]*`,'gmu'),()=>line):`${vars.replace(/\s*$/u,'')}\n${line}\n`;}
-if(!current('ADMIN_TOKEN')||current('ADMIN_TOKEN')==='replace-with-a-long-random-secret'){setVar('ADMIN_TOKEN',secret());console.log('Đã tạo ADMIN_TOKEN ngẫu nhiên (mã đăng nhập trang /admin, xem trong .dev.vars).');}
+// ADMIN_TOKEN is typed on /admin once, to create the first admin account (and again to reset a forgotten admin
+// password); it also encrypts the Gemini key saved in Settings, so a later change means typing that key again.
+if(!current('ADMIN_TOKEN')||current('ADMIN_TOKEN')==='replace-with-a-long-random-secret'){setVar('ADMIN_TOKEN',secret());console.log('Đã tạo ADMIN_TOKEN ngẫu nhiên trong .dev.vars: mã dùng ở trang /admin để tạo tài khoản quản trị đầu tiên (và đặt lại mật khẩu quản trị khi quên), đồng thời là khóa mã hóa khóa Gemini lưu trên máy chủ.');}
 if(current('PDF_LAYOUT_SERVICE_TOKEN').length<24){setVar('PDF_LAYOUT_SERVICE_TOKEN',secret());console.log('Đã tạo PDF_LAYOUT_SERVICE_TOKEN ngẫu nhiên.');}
 if(!current('PDF_LAYOUT_SERVICE_URL'))setVar('PDF_LAYOUT_SERVICE_URL','http://127.0.0.1:8091');
 for(const [key,value] of Object.entries(machine))if(current(key)!==value){setVar(key,value);console.log(`Đã ghi ${key} cho máy này.`);}
@@ -159,4 +161,5 @@ ${problems.length?`${skipped.length?`Bước ${skipped.join(' và ')} bị bỏ 
   ${npm} start${windows?'   (hoặc bấm đúp start.cmd)':''}
 Lệnh này chạy cả dịch vụ PDF giữ bố cục (cổng ${layoutPort}) lẫn trang web, rồi mở trình duyệt; giữ cửa sổ đó mở trong lúc dùng, bấm Ctrl+C để tắt.
 Sau đó: tạo tài khoản ở /#account, mở /study, nhập "Tên nội dung", dán khóa Gemini API của bạn và chọn tệp để dịch.
+Trang quản trị /admin: lần đầu, tạo tài khoản quản trị bằng mã ở dòng ADMIN_TOKEN của .dev.vars; các lần sau đăng nhập bằng tên đăng nhập và mật khẩu đó.
 `);

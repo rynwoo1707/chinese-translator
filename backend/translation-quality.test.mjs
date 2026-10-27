@@ -25,6 +25,18 @@ test('Mathematical expressions are replaced locally and restored byte-for-byte',
  assert.equal(restored,'Cho \\(\\vec a=(1,2,3)\\) và \\[x^2/a^2+y^2/b^2=1\\].');
  assert.throws(()=>restoreMathExpressions('Thiếu công thức.',protectedValue.formulas),/không bảo toàn công thức/);
 });
+test('A formula holding dollar signs comes back byte for byte: $$…$$ keeps both, and $&, $\' or $` inside one paste nothing',async t=>{
+ const R=String.raw;
+ for(const formula of [R`$$ \frac{a}{b}=1 $$`,R`\[\text{lãi $5$&$6$}\]`,R`$&x$`,R`\(a$'b\)`,R`\(a$${'`'}b\)`,R`\[\text{giá $$ và $1}\]`]){
+  const shielded=protectMathExpressions(`由 ${formula} 得`);
+  assert.deepEqual(shielded.formulas.map(f=>f.formula),[formula],formula);
+  assert.equal(restoreMathExpressions('Từ @@MATH_0001@@ suy ra.',shielded.formulas),`Từ ${formula} suy ra.`,formula);
+ }
+ // Through a translation: the display formula stays display ($$), not a $…$ the page would print with its dollars.
+ t.mock.method(globalThis,'fetch',async()=>Response.json({candidates:[{finishReason:'STOP',content:{parts:[{text:JSON.stringify({translation:'Từ @@MATH_0001@@ suy ra.',contextUpdate:'',glossaryUpdates:{}})}]}}]}));
+ const result=await translate({GEMINI_API_KEY:'test'},R`由 $$ \frac{a}{b}=1 $$ 得`,{context:'',genre:'Toán học · STEM',glossary:'{}'});
+ assert.equal(result.translation,R`Từ $$ \frac{a}{b}=1 $$ suy ra.`);
+});
 test('Math translation receives textbook terminology and cannot rewrite formulas',async t=>{
  let payload;
  t.mock.method(globalThis,'fetch',async(url,options)=>{const body=JSON.parse(options.body);payload=JSON.parse(body.contents[0].parts[0].text);return Response.json({candidates:[{finishReason:'STOP',content:{parts:[{text:JSON.stringify({translation:'Elip có phương trình @@MATH_0001@@.',contextUpdate:'',glossaryUpdates:{}})}]}}]});});

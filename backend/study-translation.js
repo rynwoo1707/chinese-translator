@@ -12,12 +12,30 @@ import {isStudyModel,listStudyModels,selectStudyModel} from './gemini-models.js'
 import {rateLimit} from './rate-limit.js';
 import {isSubject,subjectOf,ownTerms,textModeTerms,ownTermWarnings,GLOSSARY_WARNING} from './subject-glossaries.js';
 import {unifyHan,unifyGlossaryKeys} from './han-text.js';
+import {UserError} from './http.js';
+import {MODES,DEFAULT_MODE,isMode,modeProfile} from '../frontend/translation-modes.js';
 
 const reply=(data,status=200)=>Response.json(data,{status,headers:{'Cache-Control':'no-store','X-Content-Type-Options':'nosniff'}});
+// A mode's own variable, then GEMINI_MODEL, then the default; "Kỹ nhất" (premium) falls back on quality's, a Flash model.
 const MODELS={economy:'gemini-2.5-flash-lite',balanced:'gemini-3.1-flash-lite',quality:'gemini-2.5-flash'};
-const modelFor=(env,mode)=>env[{economy:'GEMINI_ECONOMY_MODEL',balanced:'GEMINI_BALANCED_MODEL',quality:'GEMINI_QUALITY_MODEL'}[mode]]||env.GEMINI_MODEL||MODELS[mode];
-export const studyModelConfig=env=>({economy:modelFor(env,'economy'),balanced:modelFor(env,'balanced'),quality:modelFor(env,'quality'),pdf:env.GEMINI_PDF_BLOCK_MODEL||modelFor(env,'economy'),runtimeVersion:'pdf-layout-v2-key-model-selection'});
+const MODEL_VARS={economy:'GEMINI_ECONOMY_MODEL',balanced:'GEMINI_BALANCED_MODEL',quality:'GEMINI_QUALITY_MODEL',premium:'GEMINI_PREMIUM_MODEL'};
+const modelFor=(env,mode)=>env[MODEL_VARS[mode]]||env.GEMINI_MODEL||MODELS[mode]||MODELS.quality;
+// modes: what the "Cách dịch" select offers (frontend/translation-modes.js); layoutModes: the modes that change a kept-layout
+// PDF, which is every one of them now that each sets its own reasoning, batches and OCR sheets.
+export const studyModelConfig=env=>({economy:modelFor(env,'economy'),balanced:modelFor(env,'balanced'),quality:modelFor(env,'quality'),premium:modelFor(env,'premium'),pdf:env.GEMINI_PDF_BLOCK_MODEL||modelFor(env,'economy'),modes:MODES.map(id=>{const {label,hint,estimate}=modeProfile(id);return {id,label,hint,estimate};}),layoutModes:[...MODES],runtimeVersion:'pdf-layout-v2-key-model-selection'});
 function requestModel(body,fallback){if(!body.model)return fallback;if(!isStudyModel(body.model))throw new Error('Hãy chọn một model Gemini Flash trong danh sách khả dụng.');return body.model;}
+// A request without a mode (a page from before modes existed) is economy; a mode this server does not know is refused
+// rather than quietly run as another one.
+function requestMode(value){
+ if(value===undefined||value===null||value==='')return DEFAULT_MODE;
+ if(!isMode(value))throw new UserError('Cách dịch không hợp lệ. Hãy tải lại trang rồi thử lại.',400,'bad_mode');
+ return value;
+}
+// A mode's layoutBatch is the most one block request may carry; a block longer than its characters still goes, alone.
+function checkBatch(blocks,{chars,blocks:most}){
+ const length=blocks.reduce((sum,block)=>sum+(typeof block?.source==='string'?block.source.length:0),0);
+ if(blocks.length>most||blocks.length>1&&length>chars)throw new UserError(`Mỗi lượt dịch của cách dịch đã chọn nhận tối đa ${most} đoạn và ${new Intl.NumberFormat('vi-VN').format(chars)} ký tự. Hãy tải lại trang rồi dịch tiếp.`,400,'bad_batch');
+}
 const validKey=value=>typeof value==='string'&&value.length>=20&&value.length<=500&&!/[\r\n\0]/.test(value);
 const MAX_STUDY_CHARACTERS=2_000_000,TOO_LONG='Tệp không có văn bản hoặc vượt giới hạn 2 triệu ký tự của không gian học tập.';
 const scopedEnv=(env,apiKey,model,thinking=model==='gemini-2.5-flash'?'default':'minimal')=>new Proxy(env,{get(target,property){if(property==='GEMINI_API_KEY')return apiKey;if(property==='GEMINI_MODEL')return model;if(property==='GEMINI_THINKING')return thinking;if(property==='GEMINI_MODEL_RECOVERY')return true;if(property==='GEMINI_PREFERRED_MODEL')return target.GEMINI_MODEL||'gemini-3.6-flash';if(property==='FILES')return undefined;return Reflect.get(target,property);}});
@@ -48,7 +66,7 @@ export async function studyRoute(request,env,url,path){
  if(rule){const limit=await rateLimit(env,[{binding:rule.binding,key:`${rule.key}:${reader.id}`}]);if(limit)return limit;}
  if(path==='/api/my/study/config'&&request.method==='GET')return reply(studyModelConfig(env));
  if(path==='/api/my/study/models'&&request.method==='POST'){
-  const body=await request.json(),apiKey=String(body.apiKey||'').trim(),mode=Object.hasOwn(MODELS,body.mode)?body.mode:'economy';if(!validKey(apiKey))throw new Error('Khóa Gemini API không hợp lệ.');
+  const body=await request.json(),apiKey=String(body.apiKey||'').trim(),mode=requestMode(body.mode);if(!validKey(apiKey))throw new Error('Khóa Gemini API không hợp lệ.');
   const requested=body.purpose==='pdf'?(env.GEMINI_PDF_BLOCK_MODEL||modelFor(env,mode)):modelFor(env,mode),models=await listStudyModels(apiKey),selected=selectStudyModel(models,requested,env.GEMINI_MODEL||'gemini-3.6-flash');
   return reply({models,requested,selected,runtimeVersion:studyModelConfig(env).runtimeVersion});
  }
@@ -65,12 +83,16 @@ export async function studyRoute(request,env,url,path){
  if(request.method!=='POST')return reply({error:'Phương thức không được hỗ trợ.'},405);
  if(path==='/api/my/study/translate-blocks'){
   const body=await request.json(),apiKey=String(body.apiKey||'').trim();if(!validKey(apiKey))throw new Error('Khóa Gemini API không hợp lệ.');
-  const model=requestModel(body,env.GEMINI_PDF_BLOCK_MODEL||modelFor(env,body.mode||'economy'));
+  const mode=requestMode(body.mode),profile=modeProfile(mode),model=requestModel(body,env.GEMINI_PDF_BLOCK_MODEL||modelFor(env,mode));
+  // Measured as the browser cut the batch, before the look-alike ideographs below are unified.
+  if(Array.isArray(body.blocks))checkBatch(body.blocks,profile.layoutBatch);
   // Gemini and the glossary see ordinary ideographs where a PDF wrote look-alike ones (han-text.js); the blocks keep
   // their IDs and the browser keeps its own copy of the sources.
   if(Array.isArray(body.blocks))body.blocks=body.blocks.map(block=>block&&typeof block.source==='string'?{...block,source:unifyHan(block.source)}:block);
   if(body.glossary&&typeof body.glossary==='object'&&!Array.isArray(body.glossary))body.glossary=unifyGlossaryKeys(body.glossary);
-  const result=await translatePdfBlocks(scopedEnv(env,apiKey,model,'minimal'),body);return reply({...result,model:result.model||model});
+  // The mode sets how much Gemini reasons and, when strict, retries a block that still holds Chinese, changed a number or
+  // came back implausibly short.
+  const result=await translatePdfBlocks(scopedEnv(env,apiKey,model,profile.translateThinking),body,{strict:profile.strict});return reply({...result,model:result.model||model});
  }
  if(path==='/api/my/study/extract'){
   const file=(await request.formData()).get('file');if(!file||typeof file==='string'||!file.size||file.size>25*1024*1024)throw new Error('Tệp phải từ 1 byte đến 25 MB.');
@@ -89,18 +111,19 @@ export async function studyRoute(request,env,url,path){
  if(path==='/api/my/study/ocr'){
   const form=await request.formData(),apiKey=String(form.get('apiKey')||'').trim(),file=form.get('image');
   if(!validKey(apiKey))throw new Error('Khóa Gemini API không hợp lệ.');
+  const mode=requestMode(form.get('mode'));
   if(!file||typeof file==='string'||!file.size||file.size>3*1024*1024)throw new Error('Ảnh OCR phải nhỏ hơn 3 MB.');
   const bytes=new Uint8Array(await file.slice(0,12).arrayBuffer()),webp=new TextDecoder().decode(bytes.slice(0,4))==='RIFF'&&new TextDecoder().decode(bytes.slice(8,12))==='WEBP',jpeg=bytes[0]===255&&bytes[1]===216&&bytes[2]===255;
   if(!webp&&!jpeg)throw new Error('Ảnh OCR phải là WebP hoặc JPEG.');
-  const selectedModel=isStudyModel(String(form.get('model')||''))?String(form.get('model')):modelFor(env,'economy');
-  const result=await recognizeDocument(scopedEnv(env,apiKey,selectedModel,'minimal'),file,webp?'image/webp':'image/jpeg');
+  const selectedModel=isStudyModel(String(form.get('model')||''))?String(form.get('model')):modelFor(env,mode);
+  const result=await recognizeDocument(scopedEnv(env,apiKey,selectedModel,modeProfile(mode).ocrThinking),file,webp?'image/webp':'image/jpeg');
   if(typeof result.text!=='string'||!result.text.trim())throw new Error('OCR không nhận được văn bản; hãy kiểm tra trang scan.');
   return reply({text:result.text,warnings:Array.isArray(result.warnings)?result.warnings:[],usage:result.__usage||null,model:result.__model||selectedModel});
  }
  if(path==='/api/my/study/translate'){
   // Text pasted from a PDF may spell Chinese with radicals or compatibility ideographs: the source, its context and the
   // glossary keys are unified first, so terms match and Gemini reads ordinary characters (han-text.js).
-  const body=await request.json(),source=unifyHan(String(body.source||'')),apiKey=String(body.apiKey||'').trim(),mode=Object.hasOwn(MODELS,body.mode)?body.mode:'economy',domain=isSubject(body.domain)?body.domain:'general';
+  const body=await request.json(),source=unifyHan(String(body.source||'')),apiKey=String(body.apiKey||'').trim(),mode=requestMode(body.mode),profile=modeProfile(mode),domain=isSubject(body.domain)?body.domain:'general';
   if(!validKey(apiKey))throw new Error('Khóa Gemini API không hợp lệ.');
   if(!source.trim()||source.length>8000)throw new Error('Mỗi lượt dịch cần từ 1 đến 8.000 ký tự.');
   const context=String(body.context||'').slice(-900),previousSource=unifyHan(String(body.previousSource||'').slice(-350)),previousTranslation=String(body.previousTranslation||'').slice(-500);
@@ -111,12 +134,12 @@ export async function studyRoute(request,env,url,path){
   // ai.js adds the math terms itself (by genre); another subject's terms travel in the glossary it is given.
   const story={genre:subjectOf(domain).label,context,glossary:JSON.stringify({...subjectTerms,...glossary}),previousSource,previousTranslation};
   const selectedModel=requestModel(body,modelFor(env,mode)),qualityModel=body.model?selectedModel:modelFor(env,'quality');
-  // Quality mode keeps a bounded reasoning budget; unbounded default thinking can cost more than the translation itself.
-  // The full retry of a short passage that lost a year or footnote marker gets the same small budget in every mode.
-  const outcome=await translateAndVerify(scopedEnv(env,apiKey,selectedModel,mode==='quality'?'low':'minimal'),source,story,{
-   repairEnv:scopedEnv(env,apiKey,qualityModel,'minimal'),
-   retryEnv:scopedEnv(env,apiKey,qualityModel,'low'),
-   allowRepair:mode!=='quality'
+  // The mode bounds the reasoning of the translation and of a marker repair, and (often a little more) of the full retry
+  // of a short passage that lost a year or footnote marker: unbounded default thinking can cost more than the translation.
+  const outcome=await translateAndVerify(scopedEnv(env,apiKey,selectedModel,profile.translateThinking),source,story,{
+   repairEnv:scopedEnv(env,apiKey,qualityModel,profile.translateThinking),
+   retryEnv:scopedEnv(env,apiKey,qualityModel,profile.retryThinking),
+   allowRepair:profile.allowRepair
   });
   const model=outcome.model||(outcome.repairScope==='full'?qualityModel:selectedModel);
   const review=localTranslationReview(source,outcome.translation);

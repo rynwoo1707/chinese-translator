@@ -34,13 +34,18 @@
   // PDF_LAYOUT_SLOTS: PDF jobs at once for the whole site, the same number as the service's PDF_LAYOUT_JOBS.
   // DAILY_REGISTRATIONS_PER_IP: accounts one network may create a day (0 = no cap). PDF_LAYOUT_VERSION is never set
   // here: npm run deploy passes the hash of this checkout's layout checks.
+  // GEMINI_PREMIUM_MODEL: the model of the "Kỹ nhất" mode (a Flash model; empty = GEMINI_MODEL). ADMIN_TRANSLATION_MODE:
+  // the "Cách dịch" of an admin book job that names none, and the one Xưởng dịch preselects in a browser signed in to
+  // /admin: economy, balanced, quality or premium (empty = premium).
   "vars": {
     "GEMINI_MODEL": "gemini-3.6-flash",
     "GEMINI_PDF_BLOCK_MODEL": "",
     "GEMINI_QUALITY_MODEL": "",
     "GEMINI_ECONOMY_MODEL": "",
     "GEMINI_BALANCED_MODEL": "",
+    "GEMINI_PREMIUM_MODEL": "",
     "GEMINI_THINKING": "",
+    "ADMIN_TRANSLATION_MODE": "",
     "REGISTRATION_MODE": "open",
     "ALLOWED_EMAIL_DOMAINS": "",
     "PDF_LAYOUT_SLOTS": "2",

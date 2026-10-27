@@ -6,6 +6,8 @@ Ngày đo: 2026-10-19. Mã dựng PDF `0bf0cefc9d8de3c5` (`services/pdf-layout/e
 
 **Sau ngày 23/10/2026:** `extract.py` đổi lần thứ ba rồi lần thứ tư trong ngày (mục “Lượt sửa thứ ba” và “Lượt sửa thứ tư” ở cuối). Phần lớn thay đổi chỉ chạm trang có lớp chữ, nhưng thứ tự đọc dưới hai cột (lượt thứ tư thêm quy tắc cho cột dài hơn) và cách quyết định trang nào là scan đổi cả với trang scan, nên các số dưới đây, nhất là thứ tự đọc, **chưa được đo lại** cho bộ tách hiện tại.
 
+**Sau ngày 27/10/2026:** `extract.py` đổi cách tách trang scan và `frontend/math-text.js` vẽ thêm môi trường LaTeX nhiều dòng (mã dựng đổi lần nữa). Phần tách trang được đo lại trước và sau trên bộ scan thể loại, một sách giáo khoa scan và toan-a1 (mục “Đợt 27/10/2026” ở cuối); các bảng dựng PDF ở trên **chưa được đo lại**.
+
 Tài liệu này thay các câu chưa đo như “giữ nguyên 90–95% bố cục” và “tiết kiệm hơn 80% thời gian”. Bố cục không có một con số chung: mỗi chỉ số dưới đây đo một việc, có định nghĩa và có giới hạn.
 
 ## Tóm tắt
@@ -264,3 +266,36 @@ Lượt sửa so `extract.py` của `f5887e4` với bản mới trên 145 trang,
 - **Mực còn trên nền** (bộ đếm điểm mực của lượt kiểm chứng, trên các trang đổi và trang liên quan): không có chữ mới bị mất, bị bỏ hay nằm dưới bản dịch; pinyin được xóa khỏi nền như ký hiệu phụ (trang có pinyin trong dòng: pinyin không còn nằm dưới bản dịch); nhãn tiếng Anh “nucleus” 72 → 72 điểm mực, “cell membrane” 130 → 130, “Source” 257 → 257 (giữ trên nền, là đoạn riêng được dịch, như lượt sửa thứ ba).
 
 Giới hạn: như lượt sửa thứ ba (trang tổng hợp và PDF soạn trong Word, OCR giả lập, chưa chạy trên Linux); các số thời gian đo trên máy dùng chung.
+
+## Đợt 27/10/2026 (bộ tách trang scan)
+
+`extract.py` sửa cách tách trang scan theo lỗi thấy ở trang 11 của một sách giáo khoa Toán scan 96 dpi: chỉ số là chữ cái, hệ phương trình dưới dấu ngoặc nhọn, tiêu đề trên nền màu, dòng ngắn Tesseract đọc sót. Sau đó nó sửa tám lỗi mà vòng rà soát độc lập thứ nhất tìm thấy trên trang 10–36 của chính cuốn đó, rồi bốn lỗi mà vòng thứ hai tìm thấy ở chính các chỗ sửa ấy bằng trang tổng hợp (chi tiết: ONBOARDING mục 8, gạch đầu dòng “Bộ tách trang scan của đợt 27/10/2026”). Test trên trang tổng hợp: `services/pdf-layout/test_scan_quality.py` (45 test).
+
+Cách đo: so với `extract.py` của `8fe3640`, 0 lượt gọi Gemini, OCR thật của Tesseract trên máy Windows dùng chung, chạy tuần tự. Harness là harness tạm, không nằm trong repo. Sách và toan-a1 chỉ có trên máy, nên chỉ đếm số, không giữ chữ.
+
+- **Scan thể loại** (7 trang, harness và định nghĩa của mục “Bộ tách trang 22/10/2026”):
+  - Công thức tìm được 70,9% → 72,7% (vật lý 82,6% → 87,0%); độ chính xác 100% → 100%.
+  - Chữ Hán chưa dịch 0,0% → 0,0% (lịch sử 0,2% → 0,0%); dòng chữ Hán chưa dịch 1 → 0.
+  - Không đổi: đoạn bị tách 9, block gộp đoạn 14, lẫn vai trò 6, chồng nhau 0, hình bị che 0.
+  - Block 131 → 132, ảnh công thức 41 → 42; thời gian 45,6 → 47,6 s.
+- **Sách giáo khoa Toán scan, trang PDF 10–36** (96 dpi, cách thường):
+  - Block 380 → 376; ảnh công thức 325 → 317; ảnh công thức không nhãn 47 → 0; vùng giữ ảnh gốc 133 → 144.
+  - Cảnh báo 27 → 55: cảnh báo dpi thấp ở mọi trang, cộng một cảnh báo dòng ngắn.
+  - Ảnh gửi Gemini 102 → 53; thời gian 127,0 → 153,0 s (4,7 → 5,7 s mỗi trang).
+  - Cách đếm chữ Hán: một bản đồ chữ Hán độc lập với bộ tách (ô mực của bản cũ, cộng OCR chỉ chữ Trung ở 300 và 400 dpi). Mọi chữ đổi chỗ được xem bằng mắt.
+  - Những chữ chuyển vào ảnh công thức hay vùng giữ ảnh gốc đều là nét công thức (⩾, ⩽, <, chữ cái có chỉ số, chữ số, ±, √).
+  - Chữ Hán thật chuyển vào đoạn được dịch: 思考 ở 8 trang, và 设, 则, 得, 那.
+- **Trang 10–12 của sách đó** (cũ / mới cách thường / mới Kỹ nhất):
+  - Block 41/40/40; ảnh công thức 44/31/31, trong đó không nhãn 15/0/0; vùng giữ ảnh gốc 13/16/16.
+  - Tờ OCR 8/7/13 (4,45/4,16/4,88 megapixel); ảnh gửi Gemini 23/7/13.
+  - Thời gian 14,2/15,5/15,5 s.
+- **toan-a1, 8 trang** (150 dpi):
+  - Block 107 → 106; ảnh công thức 77 → 74; không nhãn 1 → 0; vùng giữ ảnh gốc 42 → 45.
+  - Tờ OCR 15 → 16 (Kỹ nhất 37); 10,25 → 10,01 megapixel (Kỹ nhất 13,03).
+  - Thời gian 37,8 → 44,7 s (Kỹ nhất 45,4 s).
+- **3 trang scan thật khác:** block, ảnh công thức và vùng giữ ảnh gốc không đổi (37/23/13); thời gian 16,7 → 18,3 s.
+
+Giới hạn:
+- Chỉ có một cuốn sách thật của nhà xuất bản, và chưa chạy trên Linux.
+- Máy đo dùng chung với các việc khác, nên chỉ nên so từng cặp trước và sau.
+- Trên trang tổng hợp còn vài cấu hình kém hơn bản cũ một chữ Hán nằm trong ảnh công thức (ONBOARDING mục 8).

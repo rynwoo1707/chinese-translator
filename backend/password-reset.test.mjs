@@ -119,8 +119,9 @@ test('A weak password gets the registration message and leaves the link usable',
 
 test('Only an admin creates links; an unknown account gets 404, a Google-only or locked one 409',async t=>{
  const {sqlite,send,lan,an,issue,reset,links}=await environment(t),count=()=>sqlite.prepare('SELECT COUNT(*) AS n FROM reader_password_resets').get().n;
- for(const token of [null,'x'.repeat(64),ADMIN.slice(1)]){const refused=await issue(lan.id,token);assert.equal(refused.status,401);assert.deepEqual(refused.json,{error:'Hãy mở Cài đặt và nhập mã quản trị để tiếp tục.'});}
- assert.equal((await send(`/api/users/${lan.id}/password-reset`,{method:'POST',headers:{Cookie:lan.cookie}})).status,401,'a signed-in student is not an admin');
+ for(const token of [null,'x'.repeat(64),ADMIN.slice(1)]){const refused=await issue(lan.id,token);assert.equal(refused.status,401);assert.deepEqual(refused.json,{error:'Phiên quản trị đã hết hạn. Hãy đăng nhập lại.',code:'admin_signed_out'});}
+ // A signed-in student is not an admin, also with the admin console's header or her session put in the admin cookie.
+ for(const headers of [{Cookie:lan.cookie},{Cookie:lan.cookie,'X-Hoa-Tri-Admin':'1'},{Cookie:`cat_hien_admin=${lan.cookie.split('=')[1]}`,'X-Hoa-Tri-Admin':'1'}])assert.equal((await send(`/api/users/${lan.id}/password-reset`,{method:'POST',headers})).status,401,JSON.stringify(Object.keys(headers)));
  assert.equal((await send(`/api/users/${lan.id}/password-reset`,{method:'POST',headers:{Authorization:`Bearer ${ADMIN}`,Origin:'https://evil.example'}})).status,403);
  assert.equal(count(),0);
  const missing=await issue('no-such-user');assert.equal(missing.status,404);assert.deepEqual(missing.json,{error:'Không tìm thấy tài khoản.'});

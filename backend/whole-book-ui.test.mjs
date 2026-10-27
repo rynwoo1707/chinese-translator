@@ -71,7 +71,7 @@ function fakeHoaTri({blocksPerPage=1,blockChars=0}={}){
   const file=form.get('file'),offset=Number(form.get('pageOffset')),sha=form.get('sourceSha256'),stored=state.sources.get(sha);
   if(!stored)return [404,{error:'Tài khoản chưa lưu tệp gốc này.',code:'source_missing'}];
   const chunk=await PDFDocument.load(new Uint8Array(await file.arrayBuffer())),widths=chunk.getPages().map(page=>page.getWidth());
-  state.chunks.push({offset,pages:form.get('pages'),count:chunk.getPageCount(),widths});
+  state.chunks.push({offset,pages:form.get('pages'),count:chunk.getPageCount(),widths,mode:form.get('mode')});
   const pages=widths.map((width,index)=>{
    const number=offset+index+1,scanned=number===SCANNED;
    const text=k=>`第${number}页第${k+1}段的内容。`.padEnd(blockChars,'内容'),blocks=number===BLANK?[]:Array.from({length:blocksPerPage},(_,k)=>({id:`p${number}-b${k+1}`,text:text(k),source:scanned?`第${number}页（扫描）第${k+1}段`:text(k),box:[40,60+k*48,260,92+k*48],fontSize:12,...(scanned?{image:PNG}:{})}));
@@ -107,13 +107,16 @@ function fakeHoaTri({blocksPerPage=1,blockChars=0}={}){
    if(method==='DELETE'){state.jobs=state.jobs.filter(entry=>entry!==found);return send(res,200,{ok:true});}
    if(method==='GET')return send(res,200,{job:view(found)});
    const input=json(),codes={pending:'.',done:'d',blank:'b',cover:'c',skipped:'s',failed:'f'},chars=[...found.pageStates],now=Date.now(),mine=held(found)&&input.runner===found.runnerId;(state.runners??=new Set()).add(input.runner??null);
+   // state.modeDelay(n): how long the n-th change of Cách dịch takes to arrive (a slow network); state.modeSaves: each
+   // change with the times it was sent and answered.
+   if(input.mode!==undefined){const save={mode:input.mode,sent:Date.now()};(state.modeSaves??=[]).push(save);const wait=state.modeDelay?.(state.modeSaves.length);if(wait)await new Promise(resolve=>setTimeout(resolve,wait));save.answered=Date.now();}
    // As backend/book-jobs.js: another device's run is refused while the job is held (tokens are always counted, once).
-   if(held(found)&&!mine&&['pages','status','pauseReason','model','storyId','glossary'].some(key=>input[key]!==undefined)){state.refused=(state.refused||0)+1;const retryAfter=Math.ceil((found.leaseUntil-now)/1000);return send(res,409,{error:'Quyển này đang được dịch ở một thiết bị khác (hoặc một trình duyệt khác).',code:'job_busy',retryAfter,job:view(found)},{'Retry-After':String(retryAfter)});}
+   if(held(found)&&!mine&&['pages','status','pauseReason','model','storyId','glossary','mode'].some(key=>input[key]!==undefined)){state.refused=(state.refused||0)+1;const retryAfter=Math.ceil((found.leaseUntil-now)/1000);return send(res,409,{error:'Quyển này đang được dịch ở một thiết bị khác (hoặc một trình duyệt khác).',code:'job_busy',retryAfter,job:view(found)},{'Retry-After':String(retryAfter)});}
    // A translated page never goes back to pending or failed.
    for(const [page,name] of Object.entries(input.pages||{})){const code=codes[name];if(chars[page-1]==='d'&&(code==='.'||code==='f'))continue;chars[page-1]=code;}
    found.pageStates=chars.join('');for(const report of input.reports||[])if(!found.counted.includes(report.id)){found.counted.push(report.id);for(const key of Object.keys(found.usage))found.usage[key]+=report.usage?.[key]||0;}
    if(input.status)found.status=input.status;if(input.pauseReason!==undefined)found.pauseReason=input.pauseReason;else if(input.status&&input.status!=='paused')found.pauseReason=null;
-   if(input.storyId!==undefined)found.storyId=input.storyId;if(input.model)found.model=input.model;found.glossary={...found.glossary,...input.glossary};found.updatedAt=new Date().toISOString();
+   if(input.storyId!==undefined)found.storyId=input.storyId;if(input.model)found.model=input.model;if(input.mode)found.mode=input.mode;found.glossary={...found.glossary,...input.glossary};found.updatedAt=new Date().toISOString();
    if(input.runner&&(!held(found)||mine))Object.assign(found,found.status==='running'?{runnerId:input.runner,leaseUntil:now+600000}:{runnerId:null,leaseUntil:0});
    state.patches=(state.patches||0)+1;return send(res,200,{job:view(found)});
   }
@@ -148,7 +151,7 @@ function fakeHoaTri({blocksPerPage=1,blockChars=0}={}){
   }
   if(path==='/api/my/study/translate-blocks'){
    const input=json(),call=++state.translateCalls;assert.equal(input.apiKey,KEY);state.translations.push(input);
-   const hooked=state.translateHook?.(input,call);if(hooked)return send(res,hooked[0],hooked[1]);if(state.translateGate)await state.translateGate;
+   const hooked=await state.translateHook?.(input,call);if(hooked)return send(res,hooked[0],hooked[1]);if(state.translateGate)await state.translateGate;
    state.usage+=867;
    return send(res,200,{blocks:input.blocks.map(block=>({id:block.id,translation:`Bản dịch ${block.id.split('-')[0].replace('p','trang ')}.`})),...(input.partial?{failedBlocks:[]}:{}),context:'Sách thử.',glossary:{...input.glossary,[`术语${call}`]:`thuật ngữ ${call}`},usage:{prompt:600,output:267,thinking:0,total:867,requests:1},warnings:[],model:'gemini-2.5-flash-lite'});
   }
@@ -210,6 +213,8 @@ test('Dịch cả quyển: upload once, chunks of at most 20 pages with their of
   // Chunks: pages 2–21 then 22–26, cut from the original page for page (the widths say which pages), the cover never sent.
   assert.deepEqual(state.chunks.map(({offset,count,pages})=>[offset,count,pages]),[[1,20,'1-20'],[21,5,'1-5']]);
   assert.deepEqual(state.chunks.flatMap(chunk=>chunk.widths),Array.from({length:25},(_,i)=>402+i));
+  // Cách dịch (Tiết kiệm here) goes with the job, every chunk's extraction and every translation.
+  assert.equal(job.mode,'economy');assert.deepEqual(state.chunks.map(chunk=>chunk.mode),['economy','economy']);assert.ok(state.translations.every(input=>input.mode==='economy'));
   assert.equal(job.pageStates,'c'+'d'.repeat(BLANK-2)+'b'+'d'.repeat(TOTAL-BLANK));assert.equal(job.status,'done');assert.equal(job.title,'Sách thử nghiệm');
   // Tokens: the scanned page's reading and every translation; the refused call cost nothing.
   assert.equal(job.usage.total,state.usage);assert.equal(job.usage.total,1500+867*2);assert.equal(job.model,'gemini-2.5-flash-lite');
@@ -280,13 +285,78 @@ test('Dịch cả quyển: a day quota pauses with the reset time; after a reloa
  }finally{await context.close();await fake.close();}
 });
 
+test('Dịch cả quyển: a Cách dịch chosen while the book waits is saved with it; after a reload the chunk begun before goes on in it too, shown in the field',{skip,timeout:240000},async()=>{
+ const fake=fakeHoaTri(),base=await fake.listen(),pdf=await bookPdf();let dayQuota=true;const seen=[];
+ let {context,page,errors}=await openStudy(base);
+ // Each translation call: its first block, the mode it is sent in and what the field shows meanwhile. The key's day quota
+ // stops the first run at its first translation, inside chunk 1.
+ fake.state.translateHook=async input=>{seen.push([input.blocks[0].id,input.mode,await page.inputValue('#mode')]);return dayQuota?[429,{error:'Gemini báo khóa này đã dùng hết hạn mức trong ngày.',code:'quota_day',retryAfter:null}]:null;};
+ try{
+  await pickBook(page,pdf);await page.selectOption('#mode','premium');await page.fill('#content-title','Sách đổi cách dịch');await page.fill('#api-key',KEY);await page.click('#translate');
+  await page.waitForFunction(()=>/hết hạn mức trong ngày/u.test(document.querySelector('#whole-book-status').textContent),null,{timeout:120000});
+  const [job]=fake.state.jobs;assert.equal(job.mode,'premium');assert.equal(job.status,'paused');
+  // The book waits: Tiết kiệm chosen now goes with the job at once, for this device after a reload and for any other.
+  await page.selectOption('#mode','economy');
+  await page.waitForFunction(()=>/^Đã lưu Cách dịch Tiết kiệm cho quyển này/u.test(document.querySelector('#whole-book-status').textContent),null,{timeout:30000});
+  assert.equal(job.mode,'economy');assert.deepEqual(errors,[]);
+  await context.close();({context,page,errors}=await openStudy(base));await page.waitForFunction(()=>document.querySelector('#study-history').open);
+  await page.click('#study-books-list [data-book-resume]');await page.waitForFunction(()=>/Dán khóa Gemini rồi bấm Tiếp tục dịch cả quyển/u.test(document.querySelector('#progress').textContent),null,{timeout:30000});
+  assert.equal(await page.inputValue('#mode'),'economy','the book comes back in the mode saved with it');
+  dayQuota=false;await page.fill('#api-key',KEY);await page.click('#translate');
+  await page.waitForFunction(()=>/Đã dịch xong cả quyển/u.test(document.querySelector('#whole-book-status').textContent),null,{timeout:120000});
+  // Chunk 1 was begun (extracted and read) in Kỹ nhất: what is left of it is translated in Tiết kiệm, as promised, in one
+  // call of that mode's batch rather than two of Kỹ nhất's, and saved in it; chunk 2 is extracted and translated in
+  // Tiết kiệm too. The field shows it throughout.
+  assert.deepEqual(fake.state.chunks.map(chunk=>chunk.mode),['premium','economy']);
+  assert.deepEqual(seen,[['p2-b1','premium','premium'],['p2-b1','economy','economy'],['p22-b1','economy','economy']]);
+  assert.equal([...fake.state.history.values()].find(entry=>entry.row.page_start===2).row.mode,'economy');
+  assert.equal(await page.inputValue('#mode'),'economy');assert.equal(job.mode,'economy');assert.equal(job.status,'done');
+  // A mode the server cannot keep (another device runs the book now) is said to apply only to a run started here.
+  Object.assign(job,{runnerId:'other-device-0000-4000-8000-000000000009',leaseUntil:Date.now()+600000});
+  await page.selectOption('#mode','quality');
+  await page.waitForFunction(()=>/^Chưa lưu được Cách dịch Kỹ hơn cho quyển này: Quyển này đang được dịch ở một thiết bị khác/u.test(document.querySelector('#whole-book-status').textContent),null,{timeout:30000});
+  assert.match(await statusText(page),/Cách dịch này chỉ áp dụng cho lượt dịch bạn bắt đầu ở đây; quyển vẫn giữ Cách dịch Tiết kiệm\.$/u);assert.equal(job.mode,'economy');
+  assert.deepEqual(errors,[]);assert.deepEqual(fake.state.failures,undefined);
+ }finally{await context.close();await fake.close();}
+});
+
+test('Dịch cả quyển: Cách dịch stepped through with the arrow keys while the book waits is saved one change at a time and ends on the last one chosen; Tiếp tục in the same tab goes on in it',{skip,timeout:240000},async()=>{
+ const fake=fakeHoaTri(),base=await fake.listen(),pdf=await bookPdf();let dayQuota=true;const seen=[];
+ const {context,page,errors}=await openStudy(base);
+ fake.state.translateHook=async input=>{seen.push([input.blocks[0].id,input.mode]);return dayQuota?[429,{error:'Gemini báo khóa này đã dùng hết hạn mức trong ngày.',code:'quota_day',retryAfter:null}]:null;};
+ try{
+  await pickBook(page,pdf);await page.selectOption('#mode','economy');await page.fill('#content-title','Sách đổi cách dịch bằng phím');await page.fill('#api-key',KEY);await page.click('#translate');
+  await page.waitForFunction(()=>/hết hạn mức trong ngày/u.test(document.querySelector('#whole-book-status').textContent),null,{timeout:120000});
+  const [job]=fake.state.jobs;assert.equal(job.mode,'economy');
+  // Each arrow key on the closed field is a change (Edge and Chrome on Windows), and the first save is slow to arrive:
+  // the later ones wait for it and send the field as it is by then, so none lands after the student's last choice.
+  fake.state.modeDelay=n=>n===1?1500:0;
+  await page.focus('#mode');for(let step=0;step<3;step++){await page.keyboard.press('ArrowDown');await page.waitForTimeout(150);}
+  assert.equal(await page.inputValue('#mode'),'premium');
+  for(let waited=0;waited<100&&!(fake.state.modeSaves?.length&&fake.state.modeSaves.every(save=>save.answered));waited++)await page.waitForTimeout(100);
+  await page.waitForTimeout(300);const saves=fake.state.modeSaves;
+  assert.ok(saves.every((save,index)=>save.answered&&(!index||save.sent>=saves[index-1].answered)),`one save at a time: ${JSON.stringify(saves)}`);
+  assert.equal(saves.at(-1).mode,'premium');assert.equal(job.mode,'premium');
+  await page.waitForFunction(()=>/^Đã lưu Cách dịch Kỹ nhất cho quyển này/u.test(document.querySelector('#whole-book-status').textContent),null,{timeout:10000});
+  // Tiếp tục in this tab: what is left of chunk 1, begun in Tiết kiệm, is translated in Kỹ nhất (two calls of its batch),
+  // and chunk 2 is extracted and translated in it.
+  dayQuota=false;await page.click('#translate');
+  await page.waitForFunction(()=>/Đã dịch xong cả quyển/u.test(document.querySelector('#whole-book-status').textContent),null,{timeout:120000});
+  assert.deepEqual(fake.state.chunks.map(chunk=>chunk.mode),['economy','premium']);
+  assert.deepEqual(seen,[['p2-b1','economy'],['p2-b1','premium'],['p19-b1','premium'],['p22-b1','premium']]);
+  assert.equal(await page.inputValue('#mode'),'premium');assert.equal(job.mode,'premium');assert.equal(job.status,'done');
+  assert.deepEqual(errors,[]);assert.deepEqual(fake.state.failures,undefined);
+ }finally{await context.close();await fake.close();}
+});
+
 test('Dịch cả quyển: a chosen page range, and "Dừng sau trang hiện tại" stops at a page boundary; Tiếp tục goes on in the same tab',{skip,timeout:180000},async()=>{
  const fake=fakeHoaTri({blocksPerPage:2,blockChars:2600}),base=await fake.listen(),pdf=await bookPdf();let release;fake.state.translateGate=new Promise(resolve=>{release=resolve;});
  const {context,page,errors}=await openStudy(base);
  try{
   await pickBook(page,pdf);await page.fill('#book-pages','2-8');
   assert.match(await page.$eval('#whole-book-note',node=>node.textContent),/bỏ qua 18 trang/u);
-  await page.fill('#content-title','Sách dừng giữa chừng');await page.fill('#api-key',KEY);await page.click('#translate');
+  // Kỹ nhất: its long blocks still go one per call (each is longer than its calls take).
+  await page.selectOption('#mode','premium');await page.fill('#content-title','Sách dừng giữa chừng');await page.fill('#api-key',KEY);await page.click('#translate');
   while(fake.state.translateCalls<1)await new Promise(resolve=>setTimeout(resolve,50));
   // Stop while page 2's first block is with Gemini: its second block is still translated, page 3 is not started.
   await page.click('#stop');fake.state.translateGate=null;release();
@@ -299,6 +369,7 @@ test('Dịch cả quyển: a chosen page range, and "Dừng sau trang hiện t�
   // The same chunk went on: one extraction, one session, every block sent to Gemini exactly once.
   assert.equal(fake.state.chunks.length,1);assert.equal(fake.state.chunks[0].count,7);assert.equal(fake.state.history.size,1);
   const sent=fake.state.translations.flatMap(input=>input.blocks.map(block=>block.id));assert.equal(sent.length,12);assert.equal(new Set(sent).size,12);
+  assert.equal(job.mode,'premium');assert.deepEqual(fake.state.chunks.map(chunk=>chunk.mode),['premium']);assert.ok(fake.state.translations.every(input=>input.mode==='premium'));
   assert.equal(job.pageStates,'c'+'d'.repeat(BLANK-2)+'b'+'d'.repeat(8-BLANK)+'s'.repeat(TOTAL-8));
   assert.equal(await page.$eval('#whole-book-count',node=>node.textContent),'Đã dịch 6/6 trang');
   // The offline dictionary (no Gemini, no /api) looks up the Chinese source of the chunk.

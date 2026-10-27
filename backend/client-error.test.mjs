@@ -13,11 +13,11 @@ const valid={message:'TypeError: Cannot read properties of undefined (reading "m
 
 test('A browser error report is answered 204 and logged as one line, without cookie, account or address',async t=>{
  const lines=logged(t),API_LIMITER=limiter();
- const response=await report(valid,{headers:{Cookie:'cat_hien_session=secret-session-token',Authorization:'Bearer admin-token-value','CF-Connecting-IP':'203.0.113.9','User-Agent':'Mozilla/5.0 (iPhone; CPU iPhone OS 15_8 like Mac OS X)'},env:{API_LIMITER}});
+ const response=await report(valid,{headers:{Cookie:'cat_hien_session=secret-session-token; cat_hien_admin=secret-admin-session','X-Hoa-Tri-Admin':'1',Authorization:'Bearer admin-token-value','CF-Connecting-IP':'203.0.113.9','User-Agent':'Mozilla/5.0 (iPhone; CPU iPhone OS 15_8 like Mac OS X)'},env:{API_LIMITER}});
  assert.equal(response.status,204);assert.equal(await response.text(),'');
  assert.equal(response.headers.get('Cache-Control'),'no-store');assert.equal(response.headers.get('X-Content-Type-Options'),'nosniff');
  assert.equal(lines.length,1);assert.deepEqual(JSON.parse(lines[0]),{event:'client_error',...valid});
- assert.doesNotMatch(lines[0],/secret-session-token|admin-token|203\.0\.113|iPhone|Mozilla/u);
+ assert.doesNotMatch(lines[0],/secret-session-token|secret-admin-session|admin-token|203\.0\.113|iPhone|Mozilla/u);
  assert.deepEqual(API_LIMITER.keys,['client-error:203.0.113.9'],'counted per network on the existing limiter');
  // No session is needed, and none is read.
  assert.equal((await report(valid)).status,204);assert.equal(lines.length,2);

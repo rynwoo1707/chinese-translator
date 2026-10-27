@@ -28,20 +28,21 @@ export function cookieValue(request,name){
 export async function hashToken(value){return [...new Uint8Array(await crypto.subtle.digest('SHA-256',enc.encode(value)))].map(x=>x.toString(16).padStart(2,'0')).join('');}
 const bytesToBase64=bytes=>btoa(String.fromCharCode(...bytes));
 const base64ToBytes=value=>Uint8Array.from(atob(value),c=>c.charCodeAt(0));
-const bytesToBase64Url=bytes=>bytesToBase64(bytes).replace(/\+/gu,'-').replace(/\//gu,'_').replace(/=+$/u,'');
+export const bytesToBase64Url=bytes=>bytesToBase64(bytes).replace(/\+/gu,'-').replace(/\//gu,'_').replace(/=+$/u,'');
 // Deployed Workers reject PBKDF2 above 100,000 iterations (wrangler dev allows more), so new hashes use that maximum and
-// record it; an unprefixed hash is from before this change and was made with 210,000 iterations.
+// record it; an unprefixed hash is from before this change and was made with 210,000 iterations. Admin accounts
+// (admin-auth.js) store and check their passwords with these same functions.
 const PBKDF2_ITERATIONS=100000,LEGACY_PBKDF2_ITERATIONS=210000;
 async function passwordHash(password,salt,iterations=PBKDF2_ITERATIONS){const key=await crypto.subtle.importKey('raw',enc.encode(password),'PBKDF2',false,['deriveBits']);return new Uint8Array(await crypto.subtle.deriveBits({name:'PBKDF2',hash:'SHA-256',salt,iterations},key,256));}
 const storedHash=hash=>`pbkdf2-sha256$${PBKDF2_ITERATIONS}$${bytesToBase64(hash)}`;
 function parseStoredHash(value){const match=/^pbkdf2-sha256\$(\d{1,7})\$(.+)$/.exec(value);return match?{iterations:Number(match[1]),hash:base64ToBytes(match[2])}:{iterations:LEGACY_PBKDF2_ITERATIONS,hash:base64ToBytes(value)};}
-function equalBytes(a,b){if(a.length!==b.length)return false;let difference=0;for(let i=0;i<a.length;i++)difference|=a[i]^b[i];return difference===0;}
-async function passwordMatches(credential,password){const stored=parseStoredHash(String(credential.password_hash));return equalBytes(await passwordHash(password,base64ToBytes(credential.password_salt),stored.iterations),stored.hash);}
+export function equalBytes(a,b){if(a.length!==b.length)return false;let difference=0;for(let i=0;i<a.length;i++)difference|=a[i]^b[i];return difference===0;}
+export async function passwordMatches(credential,password){const stored=parseStoredHash(String(credential.password_hash));return equalBytes(await passwordHash(password,base64ToBytes(credential.password_salt),stored.iterations),stored.hash);}
 // Checked in place of a missing account, so a login answers in the same time whether or not the email has one. Fixed
 // (a Worker may not make random values at startup); the login never counts a match against it.
-const DUMMY_CREDENTIAL={password_hash:storedHash(new Uint8Array(32)),password_salt:bytesToBase64(new Uint8Array(16))};
-// A new stored password: the columns of reader_credentials.
-async function newCredential(password){const salt=crypto.getRandomValues(new Uint8Array(16));return {password_hash:storedHash(await passwordHash(password,salt)),password_salt:bytesToBase64(salt)};}
+export const DUMMY_CREDENTIAL={password_hash:storedHash(new Uint8Array(32)),password_salt:bytesToBase64(new Uint8Array(16))};
+// A new stored password: the columns of reader_credentials (and of admin_users).
+export async function newCredential(password){const salt=crypto.getRandomValues(new Uint8Array(16));return {password_hash:storedHash(await passwordHash(password,salt)),password_salt:bytesToBase64(salt)};}
 function normalizeEmail(value){const email=String(value||'').trim().toLowerCase();if(email.length>320||!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email))throw new Error('Email không hợp lệ.');return email;}
 function validatePassword(value){const password=String(value||'');if(password.length<8||password.length>128)throw new Error('Mật khẩu cần từ 8 đến 128 ký tự.');return password;}
 
@@ -82,14 +83,14 @@ export function passwordProblem(password,{email='',name=''}={}){
 // A new password checked for length and against passwordProblem: the password, or a 400 the browser shows as is.
 function newPassword(value,context){const password=validatePassword(value),problem=passwordProblem(password,context);if(problem)throw new UserError(problem.error,400,problem.code);return password;}
 
-function secure(url){return url.protocol==='https:'?'; Secure':'';}
+export function secure(url){return url.protocol==='https:'?'; Secure':'';}
 function cookie(name,value,maxAge,url){return `${name}=${encodeURIComponent(value)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${maxAge}${secure(url)}`;}
 export const clearSessionCookie=url=>cookie(SESSION_COOKIE,'',0,url);
 function safeReturn(value){return typeof value==='string'&&/^\/[#/?a-zA-Z0-9._=&%-]*$/.test(value)&&!value.startsWith('//')?value:'/#account';}
 const sameOrigin=(request,url)=>{const origin=request.headers.get('Origin');return !origin||origin===url.origin;};
 const refused=()=>json({error:'Nguồn yêu cầu không hợp lệ.',code:'origin'},403);
 // A sign-in answer with its cookies, the session first.
-function signedIn(response,...cookies){for(const line of cookies)response.headers.append('Set-Cookie',line);return response;}
+export function signedIn(response,...cookies){for(const line of cookies)response.headers.append('Set-Cookie',line);return response;}
 // A body that may be empty: {} then.
 async function optionalBody(request){const text=await request.text();return text.trim()?JSON.parse(text):{};}
 
@@ -101,8 +102,9 @@ async function optionalBody(request){const text=await request.text();return text
 // requests can pass the check before the first failure is counted; the per-minute bindings bound it.
 const MINUTE=60*1000,DAY=24*60*MINUTE,FIRST_WAIT=MINUTE,LONGEST_WAIT=60*MINUTE;
 // ACCOUNT: one email from one network, one browser the account signed in from, a signed-in account confirming its
-// password. EMAIL: one email from every network. NETWORK: one network (a school shares one) for every email.
-const ACCOUNT={limit:10,leak:15*MINUTE,scope:'failures'},EMAIL={limit:50,leak:10*MINUTE,scope:'failures'},NETWORK={limit:100,leak:30*1000,scope:'network'};
+// password. EMAIL: one email from every network. NETWORK: one network (a school shares one) for every email. Admin
+// logins (admin-auth.js) count by the same rules, a username standing for the email.
+export const ACCOUNT={limit:10,leak:15*MINUTE,scope:'failures'},EMAIL={limit:50,leak:10*MINUTE,scope:'failures'},NETWORK={limit:100,leak:30*1000,scope:'network'};
 // What is counted (an email, an address) is kept only as an HMAC keyed by the server's ADMIN_TOKEN, which every
 // deployment has (deploy.mjs): someone who reads the database or a backup can neither recover an address by trying all
 // of them nor confirm an email. A new ADMIN_TOKEN only starts the counts afresh. Without one (tests) the key is fixed.
@@ -125,7 +127,7 @@ async function purgeFailures(env,now=Date.now()){
 }
 const purgeDue=env=>typeof env?.DB?.prepare==='function'&&Date.now()-(purgedAt.get(env.DB)??-Infinity)>=PURGE_EVERY;
 // The longest lock among counts as {seconds,scope}, or null.
-async function lockedFor(env,counts,now=Date.now()){
+export async function lockedFor(env,counts,now=Date.now()){
  if(typeof env?.DB?.prepare!=='function'||!counts.length)return null;
  try{
   const keys=await Promise.all(counts.map(([name])=>failureKey(env,name)));
@@ -137,7 +139,7 @@ async function lockedFor(env,counts,now=Date.now()){
 // The failures a count still holds: one leaves it only once a whole `leak` has passed, so ten wrong passwords typed
 // within the leak are ten, whatever time they take (the level itself drains continuously and would read 9.98).
 const heldFailures=level=>Math.ceil(level-1e-9);
-async function countFailure(env,counts,now=Date.now()){
+export async function countFailure(env,counts,now=Date.now()){
  if(typeof env?.DB?.prepare!=='function')return;
  try{
   for(const [name,rule] of counts){
@@ -148,13 +150,13 @@ async function countFailure(env,counts,now=Date.now()){
  }catch(error){failureError(error);}
  await purgeFailures(env,now);
 }
-async function clearFailures(env,names){
+export async function clearFailures(env,names){
  if(typeof env?.DB?.prepare!=='function'||!names.length)return;
  try{const keys=await Promise.all(names.map(name=>failureKey(env,name)));await env.DB.prepare(`DELETE FROM auth_failures WHERE key IN (${placeholders(keys.length)})`).bind(...keys).run();}
  catch(error){failureError(error);}
  await purgeFailures(env);
 }
-const waitText=seconds=>seconds<3600?`${Math.max(1,Math.ceil(seconds/60))} phút`:'1 giờ';
+export const waitText=seconds=>seconds<3600?`${Math.max(1,Math.ceil(seconds/60))} phút`:'1 giờ';
 // The 429 for a lock from lockedFor: scope 'failures' (this account) or 'network' (every account on this network).
 export function failuresLocked({seconds,scope='failures'}){
  const message=scope==='network'
@@ -168,20 +170,23 @@ export function failuresLocked({seconds,scope='failures'}){
 // counting once the password changes. A marked browser's wrong passwords are counted on their own (ACCOUNT), so wrong
 // passwords typed elsewhere (on the same school network or anywhere) never lock a student out of her usual browser.
 const DEVICE_ENTRY=/^[A-Za-z0-9_-]{22}\.[A-Za-z0-9_-]{43}$/u;
-async function deviceTag(credential,email,id){const key=await crypto.subtle.importKey('raw',enc.encode(`${credential.password_hash}|${credential.password_salt}`),{name:'HMAC',hash:'SHA-256'},false,['sign']);return bytesToBase64Url(new Uint8Array(await crypto.subtle.sign('HMAC',key,enc.encode(`device|${email}|${id}`))));}
-const deviceEntries=request=>cookieValue(request,DEVICE_COOKIE).split('~').filter(entry=>DEVICE_ENTRY.test(entry)).slice(-5);
+// Whose mark: a student's, or an admin's (admin-auth.js), which has its own cookie sent only to /api/admin/. The label is
+// part of what the HMAC signs, so a mark of one kind never stands for the other.
+const READER_DEVICE={cookie:DEVICE_COOKIE,path:'/api/auth/',label:'device'};
+async function deviceTag(credential,email,id,label){const key=await crypto.subtle.importKey('raw',enc.encode(`${credential.password_hash}|${credential.password_salt}`),{name:'HMAC',hash:'SHA-256'},false,['sign']);return bytesToBase64Url(new Uint8Array(await crypto.subtle.sign('HMAC',key,enc.encode(`${label}|${email}|${id}`))));}
+const deviceEntries=(request,kind)=>cookieValue(request,kind.cookie).split('~').filter(entry=>DEVICE_ENTRY.test(entry)).slice(-5);
 // The id of this browser's mark for the account, or null.
-async function knownDevice(request,email,credential){
+export async function knownDevice(request,email,credential,kind=READER_DEVICE){
  let found=null;
  // Every entry is checked, so the time does not tell which one matched.
- for(const entry of deviceEntries(request)){const [id,tag]=entry.split('.');if(equalBytes(enc.encode(tag),enc.encode(await deviceTag(credential,email,id)))&&!found)found=id;}
+ for(const entry of deviceEntries(request,kind)){const [id,tag]=entry.split('.');if(equalBytes(enc.encode(tag),enc.encode(await deviceTag(credential,email,id,kind.label)))&&!found)found=id;}
  return found;
 }
 // The cookie with this account's mark (a new one unless id names the one it had) and up to four marks of other accounts.
-async function deviceCookie(request,email,credential,url,id=null){
- const mark=id||bytesToBase64Url(crypto.getRandomValues(new Uint8Array(16))),entries=deviceEntries(request).filter(entry=>!entry.startsWith(`${mark}.`)).slice(-4);
- entries.push(`${mark}.${await deviceTag(credential,email,mark)}`);
- return `${DEVICE_COOKIE}=${entries.join('~')}; Path=/api/auth/; HttpOnly; SameSite=Strict; Max-Age=${DEVICE_MAX_AGE}${secure(url)}`;
+export async function deviceCookie(request,email,credential,url,id=null,kind=READER_DEVICE){
+ const mark=id||bytesToBase64Url(crypto.getRandomValues(new Uint8Array(16))),entries=deviceEntries(request,kind).filter(entry=>!entry.startsWith(`${mark}.`)).slice(-4);
+ entries.push(`${mark}.${await deviceTag(credential,email,mark,kind.label)}`);
+ return `${kind.cookie}=${entries.join('~')}; Path=${kind.path}; HttpOnly; SameSite=Strict; Max-Age=${DEVICE_MAX_AGE}${secure(url)}`;
 }
 
 // REGISTRATION_MODE: open (default), closed, or domain (only ALLOWED_EMAIL_DOMAINS, comma separated, subdomains

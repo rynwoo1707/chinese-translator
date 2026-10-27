@@ -33,9 +33,9 @@ class MemoryDB{
   // The room guard of a new item inserts nothing while the item fits (study-history-limits.test.mjs tests it on SQLite).
   if(query.includes("'history_full'"))return;
   if(query.startsWith('INSERT INTO study_sessions')){
-   const [id,user_id,title,filename,domain,subject,mode,status,state_key,source_preview,translation_preview,translated_parts,total_parts,source_characters,translation_characters,storyId,library_chapter_id,page_start,page_end,source_total_pages,source_sha256]=args,previous=this.sessions.get(id),now=new Date().toISOString();
+   const [id,user_id,title,filename,domain,subject,mode,engine,status,state_key,source_preview,translation_preview,translated_parts,total_parts,source_characters,translation_characters,storyId,library_chapter_id,page_start,page_end,source_total_pages,source_sha256]=args,previous=this.sessions.get(id),now=new Date().toISOString();
    const library_story_id=previous?.library_chapter_id&&previous.library_chapter_id===library_chapter_id?previous.library_story_id:storyId;
-   this.sessions.set(id,{id,user_id,title,filename,domain,subject,mode,status,state_key,source_preview,translation_preview,translated_parts,total_parts,source_characters,translation_characters,library_story_id,library_chapter_id,page_start,page_end,source_total_pages,source_sha256,created_at:previous?.created_at||now,updated_at:now});return;
+   this.sessions.set(id,{id,user_id,title,filename,domain,subject,mode,engine,status,state_key,source_preview,translation_preview,translated_parts,total_parts,source_characters,translation_characters,library_story_id,library_chapter_id,page_start,page_end,source_total_pages,source_sha256,created_at:previous?.created_at||now,updated_at:now});return;
   }
   if(query.startsWith('INSERT INTO stories')){const [id,title,author,genre,source_url,owner_user_id,glossary]=args;this.stories.set(id,{id,title,author,genre,source_url,owner_user_id,visibility:'private',glossary});return;}
   if(query.startsWith('INSERT INTO chapters')){const [id,story_id,title,content,text_key,mime,position]=args;this.chapters.set(id,{id,story_id,title,content,text_key,mime,position});return;}

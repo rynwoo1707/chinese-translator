@@ -37,16 +37,22 @@ export const TEXTBOOK_GLOSSARY=Object.freeze({
  '练习':'bài tập','习题':'bài tập','例题':'ví dụ','定理':'định lý','定义':'định nghĩa','证明':'chứng minh','思考':'suy nghĩ','探究':'khám phá','归纳':'quy nạp','小结':'tổng kết','复习':'ôn tập','注意':'lưu ý','结论':'kết luận','推论':'hệ quả','性质':'tính chất','公式':'công thức','章节':'chương','附录':'phụ lục'
 });
 // Inside $…$ a backslash only starts an escape, so the alternatives never overlap and a stray "$" cannot backtrack
-// exponentially over a long row of TeX commands.
-const MATH_EXPRESSION=/\\begin\{([a-zA-Z*]+)\}[\s\S]*?\\end\{\1\}|\\\[[\s\S]*?\\\]|\\\([\s\S]*?\\\)|\$\$[\s\S]*?\$\$|\$(?!\$)(?:\\.|[^$\n\\])+\$/gu;
+// exponentially over a long row of TeX commands. A bare environment takes the \left…\right pair around it
+// (\left\{\begin{cases}…\end{cases}\right.): left outside, the model could translate or drop one fence of the pair.
+// Groups: 1 \left fence, 2 the environment, 3 its name, 4 \right fence.
+const MATH_EXPRESSION=/(\\left\s*(?:\\[a-zA-Z]+|\\[{}|]|[()[\]|.\/<>])\s*)?(\\begin\{([a-zA-Z*]+)\}[\s\S]*?\\end\{\3\})(\s*\\right\s*(?:\\[a-zA-Z]+|\\[{}|]|[()[\]|.\/<>]))?|\\\[[\s\S]*?\\\]|\\\([\s\S]*?\\\)|\$\$[\s\S]*?\$\$|\$(?!\$)(?:\\.|[^$\n\\])+\$/gu;
 export function protectMathExpressions(value){
- const formulas=[];
- const source=normalizeVectorMath(value||'').replace(MATH_EXPRESSION,formula=>{const token=`@@MATH_${String(formulas.length+1).padStart(4,'0')}@@`;formulas.push({token,formula});return token;});
+ const formulas=[],shield=formula=>{const token=`@@MATH_${String(formulas.length+1).padStart(4,'0')}@@`;formulas.push({token,formula});return token;};
+ // A fence whose partner is further away (\left|A-\lambda\begin{matrix}…\end{matrix}\right|) stays text beside it: a token
+ // holding one fence of a pair would show the model an unpaired one, which it might "fix" by adding or dropping a fence.
+ const source=normalizeVectorMath(value||'').replace(MATH_EXPRESSION,(formula,left,environment,name,right)=>!left===!right?shield(formula):(left||'')+shield(environment)+(right||''));
  return {source,formulas};
 }
+// Each formula goes back through a function, so the $ of TeX is never read as a replacement pattern ($$ halved to $, $&
+// or $' pasting text in).
 export function restoreMathExpressions(value,formulas){
  let text=String(value||'');
- for(const {token,formula} of formulas){const count=text.split(token).length-1;if(count!==1)throw new Error(`Mô hình không bảo toàn công thức ${token}. Phần dịch đã dừng để tránh làm sai ký hiệu.`);text=text.replace(token,formula);}
+ for(const {token,formula} of formulas){const count=text.split(token).length-1;if(count!==1)throw new Error(`Mô hình không bảo toàn công thức ${token}. Phần dịch đã dừng để tránh làm sai ký hiệu.`);text=text.replace(token,()=>formula);}
  if(/@@MATH_\d{4}@@/u.test(text))throw new Error('Bản dịch chứa mã công thức không hợp lệ.');
  return text;
 }
@@ -96,16 +102,21 @@ function quotaError({code,retryAfter,resetAt}){
 // browser gets 503 with a wait and may try again (a whole-book run backs off and retries by itself before pausing).
 const UNAVAILABLE_WAIT=30;
 const unavailable=(message,retryAfter=UNAVAILABLE_WAIT)=>new UserError(message,503,'gemini_unavailable',{retryAfter});
-// GEMINI_THINKING: 'minimal' (no reasoning), 'low' (small bounded budget) or unset (model default, which is
-// unbounded dynamic thinking on 2.5 Flash and high on Gemini 3 — the largest hidden token cost). Models are matched by
-// family, so a dated, -preview or -001 id of the same family gets the same bound.
-const THINKING_BUDGET={minimal:0,low:1024};
-const BUDGET_FAMILY=/^gemini-2\.5-flash(?:-lite)?(?:-|$)/u,LEVEL_FAMILY=/^gemini-3(?:[.-]|$)/u;
+// GEMINI_THINKING: 'minimal' (no reasoning), 'low', 'medium' or 'high' (bounded budgets, each larger than the last) or
+// unset/'default' (model default, which is unbounded dynamic thinking on 2.5 Flash and high on Gemini 3 — the largest
+// hidden token cost). Models are matched by family, so a dated, -preview or -001 id of the same family gets the same bound.
+const THINKING_BUDGET={minimal:0,low:1024,medium:4096,high:12288};
+const BUDGET_FAMILY=/^gemini-2\.5-flash(?:-lite)?(?:-|$)/u,LEVEL_FAMILY=/^gemini-3(?:[.-]|$)/u,PRO=/-pro(?:-|$)/u;
 export function thinkingConfigFor(model,level){
  if(!Object.hasOwn(THINKING_BUDGET,level))return null;
  if(BUDGET_FAMILY.test(model))return {thinkingBudget:THINKING_BUDGET[level]};
- return LEVEL_FAMILY.test(model)?{thinkingLevel:level}:null;
+ if(!LEVEL_FAMILY.test(model))return null;
+ // Gemini 3 Pro (only the admin pipeline may be set to it) takes low and high: a level under high asks it for low.
+ return {thinkingLevel:PRO.test(model)&&level!=='high'?'low':level};
 }
+// Thinking tokens count against maxOutputTokens: a call that reasons more needs this much more room for its answer.
+const THINKING_HEADROOM={low:2048,medium:8192,high:16384};
+export const thinkingHeadroom=level=>Object.hasOwn(THINKING_HEADROOM,level)?THINKING_HEADROOM[level]:0;
 // Google recommends the default temperature (1.0) for Gemini 3; lower values can cause looping, which
 // shows up as repeated text and truncated, token-hungry responses. Older models keep a low temperature.
 const temperatureFor=model=>model.startsWith('gemini-3')?{}:{temperature:0.1};
@@ -148,7 +159,9 @@ export function translationAnswer(result,formulas=[]){
  const glossaryUpdates=rawGlossary&&typeof rawGlossary==='object'&&!Array.isArray(rawGlossary)?Object.fromEntries(Object.entries(rawGlossary).filter(([key,value])=>key&&key.length<=100&&!UNSAFE_KEYS.has(key)&&typeof value==='string'&&value.trim()&&value.length<=100).slice(0,30).map(([key,value])=>[key,normalizeVietnameseText(value.trim())])):{};
  return {translation,contextUpdate,glossaryUpdates};
 }
-export async function generate(env,parts,instruction,json=true,{schema,maxOutputTokens=32768}={}){
+// maxOutputTokens: a caller's own cap, which must already allow for the thinking it asks (thinkingHeadroom); the default
+// cap grows with the level by itself.
+export async function generate(env,parts,instruction,json=true,{schema,maxOutputTokens}={}){
  if(!env.GEMINI_API_KEY)throw new Error('Chưa cấu hình GEMINI_API_KEY trên máy chủ. Tài liệu vẫn được giữ để dịch sau.');
  let model=env.GEMINI_MODEL||'gemini-2.5-flash';const rejectedModels=new Set();
  const responseSchema=instruction===OCR_INSTRUCTION?{type:'OBJECT',properties:{text:{type:'STRING'},warnings:{type:'ARRAY',items:{type:'STRING'}}},required:['text','warnings']}:instruction===MARKER_REPAIR_INSTRUCTION?MARKER_REPAIR_SCHEMA:undefined;
@@ -156,9 +169,9 @@ export async function generate(env,parts,instruction,json=true,{schema,maxOutput
  // Every answered attempt is billed, a malformed answer retried here included: __usage and a failure's usage count them all.
  const spent=emptyUsage(),fail=error=>spentOn(error,spent);
  for(let attempt=0;attempt<3;attempt++){
-  const thinkingConfig=thinkingConfigFor(model,env.GEMINI_THINKING);
+  const thinkingConfig=thinkingConfigFor(model,env.GEMINI_THINKING),outputCap=maxOutputTokens??(32768+(thinkingConfig?thinkingHeadroom(env.GEMINI_THINKING):0));
   let response;
-  try{response=await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`,{method:'POST',headers:{'Content-Type':'application/json','x-goog-api-key':env.GEMINI_API_KEY},body:JSON.stringify({systemInstruction:{parts:[{text:instruction}]},contents:[{role:'user',parts}],generationConfig:{...temperatureFor(model),maxOutputTokens,...(thinkingConfig?{thinkingConfig}:{}),...(json?{responseMimeType:'application/json',...(responseSchema?{responseSchema}:{}),...(responseJsonSchema?{responseJsonSchema}:{})}:{})}}),signal:AbortSignal.timeout(240000)});}
+  try{response=await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`,{method:'POST',headers:{'Content-Type':'application/json','x-goog-api-key':env.GEMINI_API_KEY},body:JSON.stringify({systemInstruction:{parts:[{text:instruction}]},contents:[{role:'user',parts}],generationConfig:{...temperatureFor(model),maxOutputTokens:outputCap,...(thinkingConfig?{thinkingConfig}:{}),...(json?{responseMimeType:'application/json',...(responseSchema?{responseSchema}:{}),...(responseJsonSchema?{responseJsonSchema}:{})}:{})}}),signal:AbortSignal.timeout(240000)});}
   catch(error){if(attempt<2){await new Promise(resolve=>setTimeout(resolve,1000*2**attempt));continue;}throw fail(unavailable(`Không kết nối ổn định tới Gemini sau 3 lần thử (${error?.cause?.code||error?.name||'network error'}). Tiến độ đã được giữ; hãy tiếp tục lại sau.`));}
   if(response.status===429){
    // A daily quota never clears within a request; a per-minute one is waited out here only when that is short.

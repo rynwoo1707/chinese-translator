@@ -146,6 +146,27 @@ test('A whole-book run needs the stored original, checks every field and records
  ctx.sqlite.prepare("UPDATE book_jobs SET status='done' WHERE id=?").run(job.id);assert.equal((await ctx.json(base,'POST',jobBody(sha))).status,201);
 });
 
+test('A whole-book run may take any "Cách dịch", Kỹ nhất included, and keeps it as it is; a run stored with another reads back unchanged; the student may change it while no other device runs the book',async t=>{
+ const ctx=await environment(t),base='/api/my/study/book-jobs';
+ for(const mode of ['economy','balanced','quality','premium']){
+  const bytes=pdfBytes(`book ${mode}`),sha=await hex(bytes);await upload(ctx,bytes,sha);
+  const created=await ctx.json(base,'POST',jobBody(sha,{mode}));assert.equal(created.status,201,mode);assert.equal(created.body.job.mode,mode);
+  assert.equal(ctx.sqlite.prepare('SELECT mode FROM book_jobs WHERE id=?').get(created.body.job.id).mode,mode);
+ }
+ const bytes=pdfBytes('unknown mode'),sha=await hex(bytes);await upload(ctx,bytes,sha);
+ for(const mode of [undefined,null,'','turbo','Premium','__proto__',3])assert.equal((await ctx.json(base,'POST',jobBody(sha,{mode}))).body.code,'bad_mode',String(mode));
+ // A row an older build wrote is listed as it was stored.
+ const now=new Date().toISOString(),old=`${base}/00000000-0000-4000-8000-0000000000aa`;ctx.sqlite.prepare("INSERT INTO book_jobs(id,user_id,source_sha256,title,total_pages,page_states,chunk_size,domain,mode,created_at,updated_at) VALUES(?,?,?,'Cũ',3,'...',10,'general','faithful',?,?)").run('00000000-0000-4000-8000-0000000000aa',lan.id,sha,now,now);
+ assert.equal((await ctx.send(old)).body.job.mode,'faithful');
+ // The student changes the book's Cách dịch while no run holds it (Xưởng dịch saves it so); only a mode it knows.
+ for(const mode of [null,'','turbo','Premium',3]){const refused=await ctx.json(old,'PATCH',{mode});assert.equal(refused.status,400,String(mode));assert.equal(refused.body.code,'bad_mode');}
+ assert.equal(ctx.sqlite.prepare('SELECT mode FROM book_jobs WHERE id=?').get('00000000-0000-4000-8000-0000000000aa').mode,'faithful');
+ const changed=await ctx.json(old,'PATCH',{mode:'premium'});assert.equal(changed.status,200);assert.equal(changed.body.job.mode,'premium');assert.equal((await ctx.send(old)).body.job.mode,'premium');
+ // Another device's run holding the job keeps its mode: the change waits like any other.
+ const phone='phone-0000-4000-8000-000000000002';assert.equal((await ctx.json(old,'PATCH',{runner:phone,status:'running'})).status,200);
+ const busy=await ctx.json(old,'PATCH',{mode:'economy'});assert.equal(busy.status,409);assert.equal(busy.body.code,'job_busy');assert.equal(busy.body.job.mode,'premium');
+});
+
 test('Progress reports merge: translated pages stay translated, tokens add up, terms merge, and concurrent reports all count',async t=>{
  const ctx=await environment(t),bytes=pdfBytes('progress'),sha=await hex(bytes);await upload(ctx,bytes,sha);
  const {job}=(await ctx.json('/api/my/study/book-jobs','POST',jobBody(sha))).body,path=`/api/my/study/book-jobs/${job.id}`;

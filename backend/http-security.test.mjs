@@ -33,14 +33,14 @@ test('Every Set-Cookie line survives the security headers',async()=>{
 
 test('A declared body over the route limit is refused with 413 before anything reads it',async()=>{
  let pulled=0;const stream=()=>new ReadableStream({pull(controller){pulled++;controller.enqueue(new Uint8Array(1024));}});
- for(const [path,size] of [['/api/requests',26*MB+1],['/api/my/study/history',32*MB+1],['/api/my/study/ocr',4*MB+1],['/api/stories/s/cover',6*MB+1],['/api/auth/register',64*1024+1],['/api/my/study/translate',8*MB+1]]){
+ for(const [path,size] of [['/api/requests',26*MB+1],['/api/my/study/history',32*MB+1],['/api/my/study/ocr',4*MB+1],['/api/stories/s/cover',6*MB+1],['/api/auth/register',64*1024+1],['/api/admin/login',64*1024+1],['/api/my/study/translate',8*MB+1]]){
   const request=new Request(origin+path,{method:'POST',headers:{'Content-Length':String(size),Cookie:'cat_hien_session=token',Origin:origin},body:stream(),duplex:'half'});
   const response=await worker.fetch(request,{DB:untouchable},{});
   assert.equal(response.status,413,path);const body=await response.json();assert.equal(body.code,'too_large');assert.match(body.error,/quá lớn: tối đa \d+ (MB|KB)/u);expectSecure(response);
   assert.equal(request.bodyUsed,false,path);
  }
- assert.equal(pulled<=6,true,'the refused bodies were not read');
- assert.deepEqual([bodyLimit('/api/my/study/pdf-layout/extract'),bodyLimit('/api/jobs'),bodyLimit('/api/jobs/j/pdf-page'),bodyLimit('/api/my/study/books/b/cover'),bodyLimit('/api/me'),bodyLimit('/api/stories/s/chapters')],[26*MB,26*MB,4*MB,6*MB,64*1024,26*MB]);
+ assert.equal(pulled<=7,true,'the refused bodies were not read');
+ assert.deepEqual([bodyLimit('/api/my/study/pdf-layout/extract'),bodyLimit('/api/jobs'),bodyLimit('/api/jobs/j/pdf-page'),bodyLimit('/api/my/study/books/b/cover'),bodyLimit('/api/me'),bodyLimit('/api/stories/s/chapters'),bodyLimit('/api/admin/setup'),bodyLimit('/api/admin/admins')],[26*MB,26*MB,4*MB,6*MB,64*1024,26*MB,64*1024,64*1024]);
 });
 
 test('A body sent without a length is counted while it is read and stops at the limit',async()=>{
@@ -59,8 +59,9 @@ test('A body sent without a length is counted while it is read and stops at the 
 
 test('Requests that change data from another site are refused before routing',async()=>{
  const form=new FormData();form.set('title','x');form.set('source_url','https://example.test/');
- for(const [path,method,body] of [['/api/requests','POST',form],['/api/me','DELETE','{"confirm":"XÓA"}'],['/api/auth/logout','POST',null],['/api/my/study/history/x','DELETE',null],['/api/stories','POST','{}']]){
-  const response=await call(path,{method,headers:{Origin:'https://evil.example',Cookie:'cat_hien_session=token',Authorization:`Bearer ${ADMIN}`},body},{DB:untouchable,ADMIN_TOKEN:ADMIN});
+ // The admin session cookie and the console's header ride along: neither makes another site's request pass.
+ for(const [path,method,body] of [['/api/requests','POST',form],['/api/me','DELETE','{"confirm":"XÓA"}'],['/api/auth/logout','POST',null],['/api/my/study/history/x','DELETE',null],['/api/stories','POST','{}'],['/api/admin/login','POST','{}'],['/api/admin/logout','POST',null],['/api/admin/setup','POST','{}'],['/api/admin/password','POST','{}'],['/api/admin/admins','POST','{}'],['/api/admin/admins/x','DELETE',null]]){
+  const response=await call(path,{method,headers:{Origin:'https://evil.example',Cookie:'cat_hien_session=token; cat_hien_admin=admin-session','X-Hoa-Tri-Admin':'1',Authorization:`Bearer ${ADMIN}`},body},{DB:untouchable,ADMIN_TOKEN:ADMIN});
   assert.equal(response.status,403,`${method} ${path}`);assert.equal((await response.json()).error,'Nguồn yêu cầu không hợp lệ.');expectSecure(response);
  }
  // Reads stay open to links from anywhere; a request without Origin (curl, scripts) is not a browser attack.
@@ -76,7 +77,8 @@ test('An ADMIN_TOKEN shorter than 32 characters opens nothing except on this mac
  assert.equal((await worker.fetch(new Request(origin+'/api/jobs',{headers:{Authorization:'Bearer short-admin-token'}}),{ADMIN_TOKEN:'short-admin-token',DB:untouchable},{})).status,401);
  // wrangler dev keeps working with an older, shorter local token; setup generates 64 hex characters.
  for(const local of ['http://127.0.0.1:8787','http://localhost:8787'])assert.equal((await status(local,'short-admin-token','short-admin-token')).authenticated,true,local);
- assert.equal((await status(origin,ADMIN,ADMIN)).authenticated,true);
+ // Command-line tools sign in with the token itself (Bearer); people use an admin account (admin-auth.test.mjs).
+ const tool=await status(origin,ADMIN,ADMIN);assert.deepEqual([tool.authenticated,tool.via,tool.admin],[true,'token',{username:null,name:'ADMIN_TOKEN'}]);
  assert.deepEqual(await status(origin,ADMIN.slice(1)+'0',ADMIN),{authenticated:false});
  assert.deepEqual(await status(origin,ADMIN,undefined),{authenticated:false});
 });

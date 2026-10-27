@@ -67,3 +67,48 @@ test('a rejected PDF block is retried alone instead of discarding the whole batc
  assert.deepEqual(result.blocks.map(b=>b.translation),['Xin chào.','Năm 2024.','Xin chào.']);
  assert.equal(result.usage.requests,2);assert.equal(result.usage.total,30);
 });
+
+test('a bare environment is shielded together with the \\left…\\right fences around it and comes back byte for byte',async t=>{
+ const {protectMathExpressions,restoreMathExpressions}=await import('./ai.js');
+ const system=String.raw`\left\{\begin{cases} S_{n}=a_{1}+a_{2}+\cdots+a_{n}, \\ S_{n-1}=a_{1}+a_{2}+\cdots+a_{n-1} \quad (n\geq 2) \end{cases}\right.`;
+ for(const formula of [system,String.raw`\left( \begin{matrix} 1 & 2 \\ 3 & 4 \end{matrix} \right)`,String.raw`\left.\begin{array}{l} x=1 \\ y=2 \end{array}\right\}`,String.raw`\left\lbrace
+\begin{aligned} a&=b \\ c&=d \end{aligned}
+\right.`,String.raw`\left|\begin{vmatrix} a & b \\ c & d \end{vmatrix}\right|`,String.raw`\left\|\begin{matrix} x \end{matrix}\right\|`,String.raw`\begin{cases} 1, & x>0 \\[2pt] 0, & x\leq 0 \end{cases}`]){
+  const shielded=protectMathExpressions(`由${formula}得，`);
+  assert.deepEqual(shielded,{source:'由@@MATH_0001@@得，',formulas:[{token:'@@MATH_0001@@',formula}]},formula);
+  assert.equal(restoreMathExpressions('Từ @@MATH_0001@@ suy ra,',shielded.formulas),`Từ ${formula} suy ra,`);
+ }
+ // Fences around no environment stay text, and delimited math is shielded as before (fences included).
+ assert.deepEqual(protectMathExpressions(String.raw`函数 \left( x \right) 与 \begin{cases} 1 \\ 0 \end{cases} 不同`).formulas.map(f=>f.formula),[String.raw`\begin{cases} 1 \\ 0 \end{cases}`]);
+ assert.deepEqual(protectMathExpressions(String.raw`\[\left\{\begin{cases} x>0 \\ y<0 \end{cases}\right.\] 和 \(a_n\)`).formulas.map(f=>f.formula),[String.raw`\[\left\{\begin{cases} x>0 \\ y<0 \end{cases}\right.\]`,String.raw`\(a_n\)`]);
+ // Unclosed environments behind fences cost no more than before: nothing to shield, found at once.
+ const hostile=String.raw`\left(\begin{a} `.repeat(700),started=performance.now();
+ assert.equal(protectMathExpressions(hostile).formulas.length,0);assert.ok(performance.now()-started<2000);
+ // Gemini reads one token for the whole system, never a fence it could translate or drop.
+ let payload;t.mock.method(globalThis,'fetch',async(url,options)=>{payload=JSON.parse(JSON.parse(options.body).contents[0].parts[0].text);return reply(translation('Từ @@MATH_0001@@ suy ra điều cần chứng minh.'));});
+ const result=await translate({GEMINI_API_KEY:'k'},`由${system}可证。`,{genre:'Toán học · STEM',glossary:'{}'});
+ assert.equal(payload.source,'由@@MATH_0001@@可证。');assert.equal(result.translation,`Từ ${system} suy ra điều cần chứng minh.`);
+});
+
+test('a \\left…\\right pair that holds more than the environment stays text as a pair: a token never takes one fence of it',async t=>{
+ const {protectMathExpressions,restoreMathExpressions}=await import('./ai.js');
+ const fences=text=>[(text.match(/\\left(?![a-zA-Z])/gu)||[]).length,(text.match(/\\right(?![a-zA-Z])/gu)||[]).length];
+ const det=String.raw`\det\left|A-\lambda\begin{matrix}1&0\\0&1\end{matrix}\right|=0`;
+ for(const [input,source,formulas] of [
+  [det,String.raw`\det\left|A-\lambda@@MATH_0001@@\right|=0`,[String.raw`\begin{matrix}1&0\\0&1\end{matrix}`]],
+  [String.raw`\left(\begin{matrix}1\\2\end{matrix}+x\right)`,String.raw`\left(@@MATH_0001@@+x\right)`,[String.raw`\begin{matrix}1\\2\end{matrix}`]],
+  [String.raw`\left( \begin{matrix}1\\2\end{matrix} + \begin{matrix}3\\4\end{matrix} \right)`,String.raw`\left( @@MATH_0001@@ + @@MATH_0002@@ \right)`,[String.raw`\begin{matrix}1\\2\end{matrix}`,String.raw`\begin{matrix}3\\4\end{matrix}`]],
+  // The inner pair hugs its environment and is shielded with it; the outer pair stays text.
+  [String.raw`\left[\left(\begin{matrix}a\end{matrix}\right)+b\right]`,String.raw`\left[@@MATH_0001@@+b\right]`,[String.raw`\left(\begin{matrix}a\end{matrix}\right)`]],
+ ]){
+  const shielded=protectMathExpressions(input);
+  assert.equal(shielded.source,source,input);assert.deepEqual(shielded.formulas.map(f=>f.formula),formulas,input);
+  for(const text of [shielded.source,...formulas]){const [left,right]=fences(text);assert.equal(left,right,text);}
+  assert.equal(restoreMathExpressions(shielded.source,shielded.formulas),input);
+ }
+ // Gemini reads both fences of the pair, so it has no unpaired fence to "fix".
+ let payload;t.mock.method(globalThis,'fetch',async(url,options)=>{payload=JSON.parse(JSON.parse(options.body).contents[0].parts[0].text);return reply(translation(String.raw`Nghiệm của phương trình đặc trưng \det\left|A-\lambda@@MATH_0001@@\right|=0.`));});
+ const result=await translate({GEMINI_API_KEY:'k'},`特征方程 ${det} 的根。`,{genre:'Toán học · STEM',glossary:'{}'});
+ assert.equal(payload.source,String.raw`特征方程 \det\left|A-\lambda@@MATH_0001@@\right|=0 的根。`);
+ assert.equal(result.translation,`Nghiệm của phương trình đặc trưng ${det}.`);
+});

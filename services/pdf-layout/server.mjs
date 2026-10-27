@@ -33,6 +33,10 @@ async function readBody(req,limit){
  return Buffer.concat(chunks);
 }
 const UNREADABLE='Dịch vụ PDF nhận được dữ liệu hỏng hoặc bị cắt giữa chừng. Hãy thử lại; nếu lỗi lặp lại, hãy báo quản trị viên.';
+// How finely a scan's OCR sheets are cut (extract.py payload quality): X-PDF-Quality: fine (the "Kỹ nhất" mode) asks for
+// smaller sheets and crops at more pixels per point; anything else, or no header (an older Worker), is standard. A JSON
+// request without the header keeps its own quality field, read the same way.
+export const extractQuality=value=>typeof value==='string'&&value.trim().toLowerCase()==='fine'?'fine':'standard';
 // The request as the job takes it: a raw PDF with its page range in X-PDF-Pages (URI-encoded), or a JSON object.
 // X-PDF-All-Pages: 1 (a refresh) asks for every page or none: the job may then use its whole time limit (engine.mjs).
 async function readPayload(req){
@@ -86,8 +90,10 @@ export function serviceHandler({token,jobs=jobLimit(),operations={pythonOperatio
   const controller=new AbortController();res.on('close',()=>{if(!res.writableFinished)controller.abort();});
   try{
    const payload=await readPayload(req);
-   if(req.url==='/extract'){const result=await operations.pythonOperation(payload,{signal:controller.signal,allPages:req.headers['x-pdf-all-pages']==='1'});validateLayoutDocument(result.document);json(result);}
-   else json(await operations.renderDocument(payload.document,payload.translations,{title:payload.title,signal:controller.signal,deadlineMs:RENDER_DEADLINE_MS}));
+   if(req.url==='/extract'){const result=await operations.pythonOperation({...payload,quality:extractQuality(req.headers['x-pdf-quality']??payload.quality)},{signal:controller.signal,allPages:req.headers['x-pdf-all-pages']==='1'});validateLayoutDocument(result.document);json(result);}
+   // layoutVersion: the renderer that drew this PDF, so a Worker on another one (an image not yet rebuilt after a deploy)
+   // can refuse to keep it.
+   else json({...await operations.renderDocument(payload.document,payload.translations,{title:payload.title,signal:controller.signal,deadlineMs:RENDER_DEADLINE_MS}),layoutVersion:version?.layout??null});
   }catch(error){
    if(controller.signal.aborted){log(`[pdf-layout] ${req.url} stopped: the caller left before the answer`);return;}
    log(`[pdf-layout] ${req.url} ${logged(error)}`);const answer=failureAnswer(error);json(answer.body,answer.status);

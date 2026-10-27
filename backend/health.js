@@ -5,7 +5,7 @@
 // code's hash). A deep answer is 503 when the service is set up but not usable, so an uptime monitor can watch it. Each
 // Worker instance asks the service at most once per DEEP_TTL_MS, whoever polls.
 import {json,logEvent} from './http.js';
-import {serviceUrl} from './pdf-layout.js';
+import {serviceUrl,expectedLayout} from './pdf-layout.js';
 
 const DEEP_TTL_MS=30000,DEEP_TIMEOUT_MS=5000;
 let deepCache=null;
@@ -15,7 +15,7 @@ async function pdfService(env,now=Date.now()){
  if(!url)return {status:'off'};
  const source=url.href;if(deepCache?.source===source&&deepCache.expires>now)return deepCache.state;
  url.pathname=url.pathname.replace(/\/$/u,'')+'/health';
- const expected=/^[a-f\d]{8,64}$/u.test(String(env.PDF_LAYOUT_VERSION||'').trim())?String(env.PDF_LAYOUT_VERSION).trim():null,started=Date.now();let state;
+ const expected=expectedLayout(env),started=Date.now();let state;
  try{
   const response=await fetch(url,{headers:{Authorization:`Bearer ${env.PDF_LAYOUT_SERVICE_TOKEN}`},signal:AbortSignal.timeout(DEEP_TIMEOUT_MS)}),body=await response.json().catch(()=>null),ms=Date.now()-started;
   if(response.status===401)state={status:'unauthorized',ms};

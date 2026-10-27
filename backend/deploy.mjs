@@ -17,11 +17,15 @@ import {fileURLToPath,pathToFileURL} from 'node:url';
 import {parseArgs} from 'node:util';
 import {checkPaddleModels,RESTORE_HINT} from './paddle-assets.mjs';
 import {buildVersion,layoutVersion} from '../services/pdf-layout/version.mjs';
+import {MODES,isMode,ADMIN_DEFAULT_MODE} from '../frontend/translation-modes.js';
 
 export const ROOT=fileURLToPath(new URL('../',import.meta.url));
 const NPX=process.platform==='win32'?'npx.cmd':'npx';
 const UUID=/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu;
-// Worker settings that must stay secrets: the repo is public, and the PDF service URL names the server.
+// Worker settings that must stay secrets: the repo is public, and the PDF service URL names the server. ADMIN_TOKEN is
+// typed on /admin only once, to create the first admin account (and again to reset a forgotten admin password); it is
+// also the key of the Gemini key saved in Settings and of the wrong-password counts, and the command-line tools' Bearer
+// credential. People sign in to /admin with their own username and password.
 export const SECRET_NAMES=['ADMIN_TOKEN','PDF_LAYOUT_SERVICE_URL','PDF_LAYOUT_SERVICE_TOKEN','GEMINI_API_KEY','GOOGLE_CLIENT_ID','GOOGLE_CLIENT_SECRET'];
 const SECRET_LIKE=/(TOKEN|SECRET|PASSWORD|API_KEY|PRIVATE_KEY|CREDENTIALS?)$/iu;
 const KEY_LIKE=/AIza[0-9A-Za-z_-]{35}|^[0-9a-f]{32,}$/iu;
@@ -30,9 +34,12 @@ export const PLACEHOLDER='[[CHƯA ĐIỀN';
 export const VENDOR_FILES=['frontend/vendor/pdf.mjs','frontend/vendor/pdf.worker.mjs','frontend/vendor/pdf-lib.esm.min.js','frontend/vendor/tesseract.esm.min.js','frontend/vendor/paddle/worker.js','frontend/vendor/paddle/models/det.tar','frontend/vendor/paddle/models/rec.tar'];
 // The worker treats an unknown mode, or "domain" without domains, as closed (backend/reader-auth.js).
 const REGISTRATION_MODES=['open','closed','domain'];
+// The values of GEMINI_THINKING the worker honours (backend/worker.js); it ignores any other one.
+const THINKING_LEVELS=['minimal','low','medium','high','default'];
 // wrangler secret list on a Worker that was never deployed (wrangler's own message, or the API error code).
 const WORKER_MISSING=/Worker "[^"\r\n]+"[^\r\n]* not found\.|\[code: 10007\]/u;
-const TOKEN_TOO_SHORT=`ADMIN_TOKEN của production ngắn hơn 32 ký tự nên trang quản trị đang khóa: đặt lại bằng ${NPX} wrangler secret put ADMIN_TOKEN (nên dùng 64 ký tự hex).`;
+const TOKEN_TOO_SHORT=`ADMIN_TOKEN của production ngắn hơn 32 ký tự nên máy chủ không nhận nó: không tạo hay đặt lại được tài khoản quản trị ở /admin, công cụ dòng lệnh cũng không vào được. Đặt lại bằng ${NPX} wrangler secret put ADMIN_TOKEN (nên dùng 64 ký tự hex); đổi ADMIN_TOKEN thì phải nhập lại khóa Gemini đã lưu trong Cài đặt.`;
+const SETUP_REQUIRED='Chưa có tài khoản quản trị: mở /admin và tạo tài khoản bằng ADMIN_TOKEN.';
 const USAGE=`Cách dùng:
   npm run deploy:check                         kiểm tra mọi thứ, không thay đổi gì trên Cloudflare
   npm run deploy                               kiểm tra, áp migration D1 (hỏi trước), deploy, kiểm tra bản mới
@@ -42,7 +49,7 @@ Tùy chọn: --yes (không hỏi trước khi áp migration), --skip-tests, --al
   --allow-unpushed (commit chưa có trên nhánh GitHub mà liên kết "Mã nguồn" trỏ tới; chỉ để thử kín),
   --allow-no-dictionary (deploy không có dữ liệu "Tra chữ Hán"), --allow-stale (D1 có migration lạ),
   --url <https://…> (địa chỉ để kiểm tra sau deploy, ví dụ tên miền riêng).
-Kiểm tra /api/status sau deploy: đặt biến môi trường HOATRI_ADMIN_TOKEN (giá trị ADMIN_TOKEN của production).`;
+Kiểm tra /api/status bằng ADMIN_TOKEN sau deploy: đặt biến môi trường HOATRI_ADMIN_TOKEN (giá trị ADMIN_TOKEN của production).`;
 
 // JSONC as wrangler reads it: // and /* */ comments and trailing commas, never inside strings.
 export function parseJsonc(text){
@@ -84,6 +91,14 @@ export function configProblems(cfg){
  const mode=String(cfg?.vars?.REGISTRATION_MODE??'open').trim().toLowerCase(),domains=String(cfg?.vars?.ALLOWED_EMAIL_DOMAINS||'').trim();
  if(!REGISTRATION_MODES.includes(mode))warnings.push(`REGISTRATION_MODE "${cfg.vars.REGISTRATION_MODE}" không hợp lệ (open, closed hoặc domain): máy chủ sẽ coi là closed, không ai tạo được tài khoản mới.`);
  else if(mode==='domain'&&!domains)warnings.push('REGISTRATION_MODE là "domain" nhưng ALLOWED_EMAIL_DOMAINS trống: không ai tạo được tài khoản mới.');
+ // The admin jobs' default "Cách dịch" (backend/worker.js adminMode): empty means the built-in default, and any other value
+ // that is no mode is ignored the same way.
+ const translationMode=String(cfg?.vars?.ADMIN_TRANSLATION_MODE??'').trim();
+ if(translationMode&&!isMode(translationMode))warnings.push(`ADMIN_TRANSLATION_MODE "${cfg.vars.ADMIN_TRANSLATION_MODE}" không hợp lệ (${MODES.join(', ')} hoặc để trống): máy chủ sẽ dùng ${ADMIN_DEFAULT_MODE} cho bản dịch của quản trị viên.`);
+ // GEMINI_THINKING sets the thinking of every step of the admin jobs; a value that is no level is ignored, and each job
+ // then thinks as its "Cách dịch" says.
+ const thinking=String(cfg?.vars?.GEMINI_THINKING??'').trim();
+ if(thinking&&!THINKING_LEVELS.includes(thinking))warnings.push(`GEMINI_THINKING "${cfg.vars.GEMINI_THINKING}" không hợp lệ (${THINKING_LEVELS.join(', ')} hoặc để trống): máy chủ sẽ bỏ qua giá trị này, mỗi bản dịch của quản trị viên suy luận theo Cách dịch của nó.`);
  return {errors,warnings};
 }
 
@@ -347,13 +362,15 @@ export async function postDeployChecks(base,{fetch=globalThis.fetch,sha=null,adm
  const mode={open:'ai cũng tạo được tài khoản',closed:'đang đóng',domain:`chỉ email thuộc ${(registration?.domains||[]).join(', ')}`}[registration?.mode];
  if(me.status===200&&typeof me.json?.authenticated==='boolean')ok(`/api/me trả lời${mode?`; đăng ký: ${mode}`:''}.`);
  else bad(`/api/me trả ${me.status||me.error}.`);
- // Without a token /api/status still says whether ADMIN_TOKEN is too short to unlock /admin outside localhost.
+ // Without a token /api/status still says whether ADMIN_TOKEN is too short to be used outside localhost, and whether
+ // /admin is waiting for its first account (made there with ADMIN_TOKEN).
  const open=await get('/api/status'),tooShort=Boolean(open.json?.adminTokenTooShort);
  if(open.status!==200||typeof open.json?.authenticated!=='boolean')bad(`/api/status trả ${open.status||open.error}.`);
  else if(tooShort)bad(TOKEN_TOO_SHORT);
+ if(open.json?.adminSetupRequired===true)warn(SETUP_REQUIRED);
  if(adminToken&&!tooShort){
   const status=await get('/api/status',{headers:{Authorization:`Bearer ${adminToken}`}});
-  if(status.status===200&&status.json?.authenticated===true)ok(`/api/status: mã quản trị đúng, model ${status.json.model||'?'}.`);
+  if(status.status===200&&status.json?.authenticated===true)ok(`/api/status: ADMIN_TOKEN đúng, model ${status.json.model||'?'}${status.json.translationMode?`, Cách dịch mặc định của quản trị viên: ${status.json.translationMode}`:''}.`);
   else if(status.json?.adminTokenTooShort)bad(TOKEN_TOO_SHORT);
   else bad('/api/status không nhận HOATRI_ADMIN_TOKEN: secret ADMIN_TOKEN trên Worker khác giá trị này.');
  }
@@ -394,7 +411,7 @@ function afterDeployText(base,{previous,bookmark}){
   '\nKiểm tra bằng tay (không tốn token Gemini):',
   `  - ${base||'<URL Worker>'}/#account: tạo một tài khoản thử, đăng xuất rồi đăng nhập lại.`,
   `  - ${base||'<URL Worker>'}/study: dòng dịch vụ PDF ghi "Dịch từng đoạn ngay tại chỗ; giữ hình gốc, công thức và vị trí chữ."`,
-  `  - ${base||'<URL Worker>'}/admin: đăng nhập bằng ADMIN_TOKEN, mở "Cài đặt".`,
+  `  - ${base||'<URL Worker>'}/admin: đăng nhập bằng tên đăng nhập và mật khẩu quản trị (lần đầu: tạo tài khoản bằng ADMIN_TOKEN), mở "Cài đặt".`,
   `  - Xem lỗi trực tiếp: ${NPX} wrangler tail`,
   `  - Giám sát (một lần): trỏ dịch vụ theo dõi uptime vào ${base||'<URL Worker>'}/api/health?deep=1 (trả 503 khi D1 hoặc dịch vụ PDF lỗi); xem deploy/pdf-layout/README.md mục A.8.`,
   'Nếu cần quay lại:',
@@ -464,7 +481,7 @@ export async function main({argv=process.argv.slice(2),env=process.env,root=ROOT
  else return stop(`Không đọc được secret của Worker: ${lastLines(output(listed))}`);
  if(firstDeploy){
   caution(`Worker "${cfg.name}" chưa có trên Cloudflare: đây là lần deploy đầu, URL sẽ là https://${cfg.name}.<subdomain>.workers.dev. Muốn tên khác (ví dụ "hoa-tri") thì đổi "name" trong wrangler.jsonc ngay bây giờ: đổi sau là đổi URL và phải đặt lại secret.`);
-  if(!opts.secretsFile)return stop('Lần deploy đầu cần --secrets-file <tệp TÊN=giá trị nằm ngoài repo> có ít nhất ADMIN_TOKEN, để Worker không lúc nào chạy mà thiếu mã quản trị.');
+  if(!opts.secretsFile)return stop('Lần deploy đầu cần --secrets-file <tệp TÊN=giá trị nằm ngoài repo> có ít nhất ADMIN_TOKEN, để Worker không lúc nào chạy mà thiếu ADMIN_TOKEN (mã tạo tài khoản quản trị đầu tiên và khóa mã hóa của máy chủ).');
  }
  const secrets=[...new Set([...remoteSecrets,...fileSecrets])].sort(),clash=collisions(varNames,remoteSecrets),needed=secretProblems(secrets);
  needed.warnings.forEach(caution);

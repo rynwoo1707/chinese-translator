@@ -10,6 +10,7 @@ import {errorResponse} from './http.js';
 import {holdLease,keepRenewed} from './pdf-slots.js';
 import {classifyError} from '../frontend/whole-book.js';
 import {overflowMessage} from '../services/pdf-layout/engine.mjs';
+import {MODES,modeProfile} from '../frontend/translation-modes.js';
 
 const base='/api/my/study/pdf-layout',origin='https://example.test';
 const reader={id:'student-1',name:'Lan'},other={id:'student-2'};
@@ -301,6 +302,33 @@ test('PDF extraction records the uploaded file hash so ranges of one textbook ca
  assert.equal(response.status,201);assert.equal(result.document.sourceSha256,fromBrowser);assert.equal(await stored(result.assetId),fromBrowser);
 });
 
+test('An extraction asks for fine OCR sheets when its mode cuts them finer, a refresh asks for what the stored copy has, and the manifest keeps what was made',async t=>{
+ const {env,FILES}=environment(),asked=[];
+ // As a service that knows the header: it records the sheets it made (an older one ignores the header and records nothing).
+ t.mock.method(globalThis,'fetch',async(url,options)=>{asked.push(options.headers);await new Response(options.body).arrayBuffer();const made=document();made.sheetQuality=options.headers['X-PDF-Quality']==='fine'?'fine':'standard';return Response.json({document:made,originalPdfBase64:btoa(pdf)});});
+ const form=(fields={})=>{const data=new FormData();data.set('file',new File([pdf],'lesson.pdf',{type:'application/pdf'}));data.set('pages','4');for(const [key,value] of Object.entries(fields))data.set(key,value);return data;};
+ const extract=async fields=>{const response=await pdfLayoutRoute(new Request(origin+base+'/extract',{method:'POST',body:form(fields)}),env,base+'/extract',reader);assert.equal(response.status,201);return response.json();};
+ const kept=async id=>JSON.parse(await (await FILES.get(`study/${reader.id}/pdf-layout/${id}/manifest.json`)).text()).sheetQuality;
+ // Kỹ nhất cuts them finer (translation-modes.js sheets); no mode or an unknown one is economy.
+ assert.equal(modeProfile('premium').sheets,'fine');assert.equal(modeProfile('economy').sheets,'standard');
+ for(const mode of [...MODES,undefined,'turbo']){
+  const quality=modeProfile(mode).sheets==='fine'?'fine':undefined,result=await extract(mode?{mode}:{});assert.equal(asked.at(-1)['X-PDF-Quality'],quality,String(mode));assert.equal(asked.at(-1)['X-PDF-Pages'],'4');
+  assert.equal(result.document.sheetQuality,quality?'fine':'standard');assert.equal(await kept(result.assetId),result.document.sheetQuality,String(mode));
+ }
+ // A whole-book chunk carries its mode the same way.
+ const sha='e'.repeat(64);await FILES.put(`study/${reader.id}/sources/${sha}.pdf`,pdf,{customMetadata:{pages:'40',filename:'book.pdf'}});
+ await extract({sourceSha256:sha,pageOffset:'10',pages:'1',mode:'premium'});assert.equal(asked.at(-1)['X-PDF-Quality'],'fine');
+ await extract({sourceSha256:sha,pageOffset:'10',pages:'1'});assert.equal(asked.at(-1)['X-PDF-Quality'],undefined);
+ // A refresh makes the sheets the stored copy has, unless it names a mode.
+ const prior=document();prior.sheetQuality='fine';await FILES.put(assetKey(reader,'manifest.json'),JSON.stringify(prior));await FILES.put(assetKey(reader,'original.pdf'),new TextEncoder().encode(pdf));
+ for(const [mode,quality] of [[undefined,'fine'],['economy',undefined],['premium','fine'],['turbo','fine']]){
+  const response=await pdfLayoutRoute(jsonRequest(base+'/refresh',{assetId,forceClone:true,...(mode?{mode}:{})}),env,base+'/refresh',reader);
+  assert.equal(response.status,201,String(mode));assert.equal(asked.at(-1)['X-PDF-Quality'],quality,String(mode));assert.equal(asked.at(-1)['X-PDF-All-Pages'],'1');
+ }
+ delete prior.sheetQuality;await FILES.put(assetKey(reader,'manifest.json'),JSON.stringify(prior));
+ assert.equal((await pdfLayoutRoute(jsonRequest(base+'/refresh',{assetId,forceClone:true}),env,base+'/refresh',reader)).status,201);assert.equal(asked.at(-1)['X-PDF-Quality'],undefined,'an older copy has standard sheets');
+});
+
 // The same routes over a real SQLite database (every migration), for the per-account lease and the daily caps.
 class D1Statement{
  constructor(database,sql){this.statement=database.prepare(sql);this.args=[];}
@@ -351,6 +379,28 @@ test('Exporting a Vietnamese PDF has a daily cap per account, counted only for e
  const capped=await render(env),body=await capped.json();assert.equal(capped.status,429);assert.equal(calls,2);
  assert.equal(body.error,'Bạn đã dùng hết 2 lượt xuất PDF tiếng Việt hôm nay. Hạn mức được đặt lại lúc 0:00 (giờ Việt Nam).');assert.ok(body.retryAfter>0);
  assert.equal(count(sqlite,`pdf-render:${reader.id}`),3);assert.equal(sqlite.prepare('SELECT COUNT(*) AS n FROM service_leases').get().n,0);
+});
+
+test('A PDF drawn by a service on other layout code than the Worker (an image not rebuilt after a deploy) is not kept and costs no daily export',async t=>{
+ const {sqlite,env}=sqliteEnvironment(t,{PDF_LAYOUT_VERSION:' 0123abcd\n'}),row=await seed(env);let drawn,calls=0;const logged=[];
+ sqlite.prepare('INSERT INTO study_sessions(id,user_id,title,state_key,status,library_story_id,library_chapter_id) VALUES(?,?,?,?,?,?,?)').run(row.id,reader.id,row.title,row.state_key,'complete','private-story','private-chapter');
+ t.mock.method(globalThis,'fetch',async()=>{calls++;return Response.json({pdfBase64:btoa('%PDF-1.7\nVietnamese'),report:[],...(drawn===undefined?{}:{layoutVersion:drawn})});});
+ t.mock.method(console,'error',line=>{try{logged.push(JSON.parse(line));}catch{logged.push(line);}});
+ const translated=assetKey(reader,'translated.pdf'),exported=async()=>(await (await env.FILES.get(row.state_key)).json()).pdfLayout.exported;
+ // An image from before this check names no layout; one on older or newer code names another.
+ for(drawn of [undefined,null,'89abcdef','0123ABCD']){
+  const answer=await render(env);assert.equal(answer.status,503,String(drawn));
+  assert.deepEqual(await answer.json(),{error:'Dịch vụ PDF chưa được cập nhật cùng phiên bản với trang web, nên PDF vừa dựng chưa được lưu và lượt xuất này không bị tính. Hãy thử xuất lại sau ít phút.',code:'pdf_service_outdated'});
+  assert.equal(await env.FILES.get(translated),null,'no PDF stored');assert.equal(await exported(),undefined,'the session is not marked exported');
+  assert.deepEqual(logged.at(-1),{event:'pdf_service_outdated',expected:'0123abcd',drawn:typeof drawn==='string'?drawn:null});
+ }
+ assert.equal(calls,4);assert.equal(count(sqlite,`pdf-render:${reader.id}`),0,'every refused export was given back');
+ assert.equal(sqlite.prepare('SELECT file_key FROM chapters WHERE id=?').get('private-chapter').file_key,null,'the chapter links no PDF');
+ drawn='0123abcd';const kept=await render(env);assert.equal(kept.status,200);
+ assert.ok(await env.FILES.get(translated));assert.equal(await exported(),true);assert.equal(count(sqlite,`pdf-render:${reader.id}`),1);
+ // Without PDF_LAYOUT_VERSION (a local run) nothing is compared, as /api/health?deep=1 compares nothing then.
+ drawn=undefined;delete env.PDF_LAYOUT_VERSION;assert.equal((await render(env)).status,200);
+ assert.equal(sqlite.prepare('SELECT COUNT(*) AS n FROM service_leases').get().n,0,'every lease is given back');
 });
 
 test('OCR results for an account deleted during the Gemini call are not kept, and the tokens spent are still reported',async t=>{

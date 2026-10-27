@@ -5,6 +5,7 @@
 // pdf.js and pdf-lib load only when used; everything else here also runs under node --test.
 import {openPdf} from './cover-detect.js';
 import {keyRefused} from './gemini-key.js';
+import {DEFAULT_MODE,isMode,modeProfile} from './translation-modes.js';
 
 export const PAGE_STATES=Object.freeze({pending:'.',done:'d',blank:'b',cover:'c',skipped:'s',failed:'f'});
 const NAMES=Object.fromEntries(Object.entries(PAGE_STATES).map(([name,char])=>[char,name]));
@@ -82,12 +83,18 @@ export function progressNote(states){
 // math page of docs/math-pdf-test-report.md. A scanned page adds Gemini's reading of its OCR sheets: 2,078–5,209 prompt
 // tokens per page over eight genres (countTokens, tmp/pdf-layout/final-report) plus up to ~800 output tokens.
 export const PAGE_TOKENS=Object.freeze({text:Object.freeze([900,2100]),scan:Object.freeze([3000,8000])});
+// Those costs are Tiết kiệm's. Another "Cách dịch" spends more (more thinking, smaller calls, finer OCR sheets, readings
+// read again): its profile's estimate (translation-modes.js) scales them.
+export function pageTokens(mode=DEFAULT_MODE){
+ const factor=modeProfile(mode).estimate,scale=range=>range.map(tokens=>Math.round(tokens*factor));
+ return {text:scale(PAGE_TOKENS.text),scan:scale(PAGE_TOKENS.scan)};
+}
 // kinds[i] is 'text', 'scan' or missing (not surveyed yet); only pages still pending count.
-export function estimateTokens(states,kinds=[]){
- const result={text:0,scan:0,unknown:0,low:0,high:0};
+export function estimateTokens(states,kinds=[],mode=DEFAULT_MODE){
+ const result={text:0,scan:0,unknown:0,low:0,high:0},costs=pageTokens(mode);
  for(let page=1;page<=String(states||'').length;page++){if(stateAt(states,page)!=='pending')continue;const kind=kinds[page-1];result[kind==='text'||kind==='scan'?kind:'unknown']++;}
- result.low=result.text*PAGE_TOKENS.text[0]+result.scan*PAGE_TOKENS.scan[0]+result.unknown*PAGE_TOKENS.text[0];
- result.high=result.text*PAGE_TOKENS.text[1]+(result.scan+result.unknown)*PAGE_TOKENS.scan[1];
+ result.low=result.text*costs.text[0]+result.scan*costs.scan[0]+result.unknown*costs.text[0];
+ result.high=result.text*costs.text[1]+(result.scan+result.unknown)*costs.scan[1];
  return result;
 }
 // Once pages are done, the book's own average says more than the generic range.
@@ -145,6 +152,9 @@ export function classifyError(error,step=''){
  // This account's own other PDF call (another tab or device) holds its place: waited out like a limit, asking too.
  if(code==='pdf_busy')return {reason:'pdf_account',wait:Math.min(300,Math.max(5,retryAfter??30)),retries:20,capacity:true};
  if(code==='pdf_unavailable')return {reason:'network',backoff:true,retries:BACKOFF.length,...(retryAfter!==null?{wait:Math.min(300,retryAfter)}:{})};
+ // A PDF drawn on other layout code than this site's (the service's image not rebuilt yet after a deploy) is thrown
+ // away: drawn again before the rebuild it would be thrown away again, so the run pauses at once with the server's words.
+ if(code==='pdf_service_outdated')return {reason:'error'};
  // Out of time, memory or room in one job: the chunk is tried again with half the pages, and later chunks keep the size
  // that worked (heavy). A crash is handled like a page the service refuses: halving finds that page.
  if(HEAVY_PDF.has(code))return {reason:'too_large',heavy:true};
@@ -293,9 +303,11 @@ export async function cutChunk(PDFDocument,source,pages){
  for(const page of await out.copyPages(source,pages.map(number=>number-1)))out.addPage(page);
  return out.save({useObjectStreams:true});
 }
-export function extractForm(bytes,pages,job){
+// mode: the run's "Cách dịch" (the job's own by default); the Worker passes it on to the PDF service, where Kỹ nhất cuts
+// scanned pages into finer OCR sheets.
+export function extractForm(bytes,pages,job,mode=job?.mode){
  const form=new FormData();form.set('file',new Blob([bytes],{type:'application/pdf'}),`trang-${pages[0]}-${pages.at(-1)}.pdf`);
- form.set('pages',`1-${pages.length}`);form.set('sourceSha256',job.sourceSha256);form.set('pageOffset',String(pages[0]-1));
+ form.set('pages',`1-${pages.length}`);form.set('sourceSha256',job.sourceSha256);form.set('pageOffset',String(pages[0]-1));if(isMode(mode))form.set('mode',mode);
  return form;
 }
 // SHA-256 names the stored original. crypto.subtle is missing on plain-HTTP origins (a phone on the LAN), so a small
@@ -421,18 +433,21 @@ const STUDY_MODEL=/^gemini-\d+(?:\.\d+)?-flash(?:-lite)?(?:-(?:preview(?:-[\d-]+
 export class BookPause extends Error{constructor(reason,message=''){super(message||reason);this.name='BookPause';this.reason=reason;}}
 const emptyUsage=()=>({prompt:0,output:0,thinking:0,total:0,requests:0});
 // One run over the pending pages of a job. steps (study.js) translate one chunk the way a hand-picked range is:
-//  open(job,chunk) -> {document}|null  continue the saved session covering chunk.start, if any;
-//  start(extractResult,job,{sessionId}) make the new chunk the open session and save it under sessionId, the same id
-//                                      for every retry of that save, so a retried save never leaves a second session;
+//  open(job,chunk,{mode}) -> {document}|null  continue the saved session covering chunk.start, if any, what is left of
+//                                      it in the run's Cách dịch (mode), whichever it was begun in;
+//  start(extractResult,job,{sessionId,mode}) make the new chunk the open session, in the Cách dịch it was extracted for
+//                                      (mode), and save it under sessionId, the same id for every retry of that save, so
+//                                      a retried save never leaves a second session;
 //  translate({shouldStop,renew}) -> {complete,model}  OCR and translate what is left, stopping at a page boundary;
 //                                      renew() after each request keeps the job held through a long chunk;
 //  finish(job) -> {storyId,glossary,warning}    save the finished part and export its Vietnamese PDF.
 // source.cut(pages) returns a chunk's bytes. Every chunk ends with one PATCH: page states, tokens, model, book, glossary.
 // The run holds the job under `runner` (one id per browser): the server refuses another device's run meanwhile. Its
 // tokens go out as reports with an id each; `reports` keeps those the server did not confirm, for the next PATCH.
-export function createBookRun({api,steps,source,ui={},sleep=countdown,shouldStop=()=>false,maxPages=CHUNK_PAGES,maxBytes=CHUNK_MAX_BYTES,runner=newId(),reports=sharedReports,renewEvery=RENEW_SECONDS*1000,now=()=>Date.now(),random=Math.random}){
+// mode: the "Cách dịch" the chunks are extracted, read and translated in (the job's own when missing).
+export function createBookRun({api,steps,source,ui={},sleep=countdown,shouldStop=()=>false,maxPages=CHUNK_PAGES,maxBytes=CHUNK_MAX_BYTES,runner=newId(),reports=sharedReports,renewEvery=RENEW_SECONDS*1000,now=()=>Date.now(),random=Math.random,mode=null}){
  let job=null,usage=emptyUsage(),fit=maxPages,probe=maxPages,claimed=false,renewed=0;
- const notify=()=>ui.job?.(job,usage);
+ const notify=()=>ui.job?.(job,usage),runMode=()=>isMode(mode)?mode:job.mode;
  const owes=()=>USAGE_KEYS.some(key=>usage[key])||reports.load(job?.id).length>0;
  // Whether the PDF service has a free place for this account, asked while a busy service is waited out (classifyError's
  // capacity): GET pdf-layout/capacity takes no place and counts toward no daily cap. null when it cannot say (an older
@@ -491,7 +506,7 @@ export function createBookRun({api,steps,source,ui={},sleep=countdown,shouldStop
     return fail(pages[0],`Trang ${pages[0]} nặng ${(bytes.byteLength/1048576).toFixed(1).replace('.',',')} MB, vượt giới hạn một lượt của dịch vụ PDF; trang này giữ nguyên bản gốc.`);
    }
    let result;
-   try{result=await retrying('extract',()=>api('pdf-layout/extract',{method:'POST',body:extractForm(bytes,pages,job)}));}
+   try{result=await retrying('extract',()=>api('pdf-layout/extract',{method:'POST',body:extractForm(bytes,pages,job,runMode())}));}
    catch(error){
     const kind=classifyError(error,'extract'),{reason}=kind;
     if(reason==='no_blocks'){
@@ -519,12 +534,12 @@ export function createBookRun({api,steps,source,ui={},sleep=countdown,shouldStop
     if(shouldStop())throw new BookPause('stopped');
     const chunk=nextChunk(job.pageStates,Math.min(maxPages,fit,probe));if(!chunk)break;
     ui.chunk?.(chunk);await renew();
-    let document=(await retrying('open',()=>steps.open(job,chunk)))?.document;
+    let document=(await retrying('open',()=>steps.open(job,chunk,{mode:runMode()})))?.document;
     if(!document){
      const result=await extract(chunk);if(!result)continue;
      // One session id for this chunk, however often its first save is tried, and the one open() asks for next time.
      const sessionId=await chunkSessionId(job.id,chunk.start);document=result.document;await renew();
-     try{await retrying('save',()=>steps.start(result,job,{sessionId}));}
+     try{await retrying('save',()=>steps.start(result,job,{sessionId,mode:runMode()}));}
      catch(error){
       // More blocks than one save takes (pages full of table cells): the chunk is extracted again, half as long.
       if(classifyError(error,'save').reason!=='too_many_parts')throw error;

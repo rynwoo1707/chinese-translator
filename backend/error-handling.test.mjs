@@ -3,19 +3,27 @@ import assert from 'node:assert/strict';
 import worker from './worker.js';
 import {UserError,errorResponse} from './http.js';
 
-const origin='https://hoa-tri.example',COOKIE='cat_hien_session=cookie-value-never-logged',BODY_MARKER='nội dung riêng của học sinh';
+const origin='https://hoa-tri.example',COOKIE='cat_hien_session=cookie-value-never-logged; cat_hien_admin=admin-cookie-never-logged',BODY_MARKER='nội dung riêng của học sinh';
 const failingDatabase=error=>({prepare(){throw error;}});
 const capture=t=>{const lines=[];t.mock.method(console,'error',line=>lines.push(line));return lines;};
 
 test('An internal error answers 500 with a reference code and logs one line without headers or body',async t=>{
  const lines=capture(t),form=new FormData();form.set('title',BODY_MARKER);form.set('source_url','https://example.test/');
- const request=new Request(origin+'/api/requests',{method:'POST',headers:{Cookie:COOKIE,Authorization:'Bearer admin-token-never-logged','cf-ray':'8f00aa11bb22cc33-HKG'},body:form});
+ const request=new Request(origin+'/api/requests',{method:'POST',headers:{Cookie:COOKIE,'X-Hoa-Tri-Admin':'1',Authorization:'Bearer admin-token-never-logged','cf-ray':'8f00aa11bb22cc33-HKG'},body:form});
  const response=await worker.fetch(request,{DB:failingDatabase(new TypeError("Cannot read properties of undefined (reading 'first')"))},{});
  assert.equal(response.status,500);const body=await response.json();
  assert.equal(body.code,'internal');assert.equal(body.ray,'8f00aa11bb22cc33-HKG');assert.match(body.error,/Máy chủ gặp lỗi ngoài dự kiến.*8f00aa11bb22cc33-HKG/u);assert.doesNotMatch(body.error,/properties|undefined/u);
  assert.equal(lines.length,1);const logged=JSON.parse(lines[0]);
  assert.deepEqual(Object.keys(logged).sort(),['event','message','method','name','ray','route']);assert.deepEqual([logged.event,logged.method,logged.route,logged.name,logged.ray],['api_error','POST','/api/requests','TypeError','8f00aa11bb22cc33-HKG']);
- for(const secret of ['cookie-value-never-logged','admin-token-never-logged',BODY_MARKER])assert.ok(!lines[0].includes(secret),secret);
+ for(const secret of ['cookie-value-never-logged','admin-cookie-never-logged','admin-token-never-logged',BODY_MARKER])assert.ok(!lines[0].includes(secret),secret);
+});
+
+test('A database that fails while an admin cookie is checked signs nobody in, and its log line names no cookie',async t=>{
+ const lines=capture(t),response=await worker.fetch(new Request(origin+'/api/jobs',{headers:{Cookie:COOKIE,'X-Hoa-Tri-Admin':'1'}}),{ADMIN_TOKEN:'e'.repeat(64),DB:failingDatabase(new Error('D1_ERROR: storage unavailable'))},{});
+ assert.equal(response.status,401);assert.deepEqual(await response.json(),{error:'Phiên quản trị đã hết hạn. Hãy đăng nhập lại.',code:'admin_signed_out'});
+ assert.equal(lines.length,1);const logged=JSON.parse(lines[0]);
+ assert.deepEqual(logged,{event:'admin_session_error',name:'Error',message:'D1_ERROR: storage unavailable'});
+ for(const secret of ['cookie-value-never-logged','admin-cookie-never-logged'])assert.ok(!lines[0].includes(secret),secret);
 });
 
 test('Database errors never reach the browser; a missing migration is named as such',async t=>{

@@ -75,6 +75,10 @@ test('Failed jobs answer 422 with their kind of failure; /health reports the loa
  const failed=await extract(origin);assert.equal(failed.status,422);assert.deepEqual(await failed.json(),{error:'Tách PDF vượt thời gian cho phép. Hãy chọn ít trang hơn cho mỗi lượt.',code:'timeout'});
  assert.equal((await fetch(origin+'/health')).status,401);
  assert.deepEqual(await (await fetch(origin+'/health',{headers:auth})).json(),{ok:true,engine:'pymupdf-puppeteer',busy:false,active:0,jobs:2,version:{layout:'1234abcd',service:'5678ef00'},font:'LiberationSerif-Regular.ttf'});
+ // An export says which renderer drew it, so a Worker on another one can refuse to keep the PDF (a build without the
+ // hashes says null).
+ const rendered=await fetch(origin+'/render',{method:'POST',headers:{...auth,'Content-Type':'application/json'},body:JSON.stringify({document:{version:1,pages:[page()]},translations:[],title:'Bài 1'})});
+ assert.deepEqual(await rendered.json(),{pdfBase64:'JVBERi0=',report:[],layoutVersion:'1234abcd'});
  // Chinese and Vietnamese travel as \u escapes, so the text stays one byte per character in V8 on both sides.
  const echo=await listen(t,serviceHandler({token:TOKEN,operations:{...failing,pythonOperation:async()=>extracted()},version:null,log:()=>{}}).handler);
  const text=await (await extract(echo)).text();assert.doesNotMatch(text,/[^\x00-\x7f]/u);assert.equal(JSON.parse(text).document.pages[0].blocks[0].source,'空间向量。');

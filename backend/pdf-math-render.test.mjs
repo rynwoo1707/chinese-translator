@@ -29,8 +29,11 @@ test('vector commands and mathematical scripts are preserved inside a complete f
 });
 test('unsupported complex math, uncertain symbols and plain point names are never inferred as vectors',()=>{
  assert.equal(renderMathText('AB OA OB OC □ [□]'), 'AB OA OB OC □ [□]');
- // Fractions are supported now (old OCR wrote them); a command the renderer does not know keeps the whole formula verbatim.
- for(const unknown of [String.raw`\(\mathcal{AB}\)`,String.raw`\(\vec{a}\bmod 3\)`,String.raw`\(\begin{cases}x\end{cases}\)`])assert.equal(renderMathText(unknown),unknown);
+ // A command the renderer does not know keeps the whole formula verbatim (math-env.test.mjs: or only its cell).
+ for(const unknown of [String.raw`\(\mathcalx{AB}\)`,String.raw`\(\vec{a}\bmodx 3\)`,String.raw`\(\frac{1}{\foo}\)`])assert.equal(renderMathText(unknown),unknown);
+ // \mathcal, \bmod and environments, once verbatim here, are drawn now.
+ assert.equal(renderMathText(String.raw`\(\mathcal{AB}\)`),'<span class="math-inline">𝒜ℬ</span>');assert.match(renderMathText(String.raw`\(\vec{a}\bmod 3\)`),/<span class="math-mathrm">mod<\/span> 3/u);
+ assert.match(renderMathText(String.raw`\(\begin{cases}x\end{cases}\)`),/class="math-env math-env-cases"[\s\S]*class="math-cell-l">x</u);
  assert.equal(renderMathText(String.raw`\vec{AB`),String.raw`\vec{AB`);
  const hostile=String.raw`\(\vec{<img src=x onerror=alert(1)>}\)`;assert.doesNotMatch(renderMathText(hostile),/<img|onerror="/u);assert.match(renderMathText(hostile),/&lt;img/u);
  const deep='\\vec{'+('{'.repeat(100))+'a'+('}'.repeat(100))+'}';assert.doesNotThrow(()=>renderMathText(deep));assert.equal(renderMathText(deep),deep);

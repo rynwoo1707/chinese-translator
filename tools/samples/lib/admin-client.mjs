@@ -1,4 +1,5 @@
-// The Hoa Trí admin HTTP API as the /admin page uses it (Bearer ADMIN_TOKEN). The token goes to the target origin and
+// The Hoa Trí admin HTTP API, called with ADMIN_TOKEN as a Bearer token: the credential of command-line tools (people
+// sign in to the /admin page with an admin account and its password instead). The token goes to the target origin and
 // nowhere else: no redirect is followed, and it is never printed or written to a file.
 import {isPaidHost} from './guard.mjs';
 

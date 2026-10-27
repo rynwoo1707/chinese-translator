@@ -65,6 +65,14 @@ test('The job list leaves the text and warnings to the job\'s own route, and pol
  assert.equal((await call('/api/jobs/nope')).status,404);
 });
 
+test('Job rows carry the job\'s Cách dịch and reasoning tokens, so the console shows them without opening the job',async t=>{
+ const {sqlite,call}=setup(t);seed(sqlite,{jobs:2,students:0});
+ sqlite.prepare("UPDATE jobs SET mode='quality',thinking_tokens=321 WHERE id='job-1'").run();
+ const rows=await (await call('/api/jobs')).json();
+ assert.deepEqual(rows.map(row=>[row.id,row.mode,row.thinking_tokens]),[['job-1','quality',321],['job-0',null,0]]);
+ assert.deepEqual((await (await call('/api/jobs?ids=job-1')).json()).map(row=>row.mode),['quality']);
+});
+
 test('An admin edit keeps D1 rows small: long text goes to storage, and a glossary is capped',async t=>{
  const {sqlite,env,call}=setup(t);seed(sqlite,{students:0});
  sqlite.prepare("INSERT INTO jobs(id,story_id,filename,status,source,translation) VALUES('j1','lib-0','bai.txt','uploaded','短文','')").run();

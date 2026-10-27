@@ -42,6 +42,10 @@ test('Privacy page states what the code really stores',()=>{
  for(const name of ['SESSION_COOKIE','STATE_COOKIE','RETURN_COOKIE','DEVICE_COOKIE'])assert.ok(privacy.includes(new RegExp(`const ${name}='([^']+)'`,'u').exec(auth)[1]),name);
  assert.match(auth,/cookie\(STATE_COOKIE,state,600,url\)/u);assert.match(privacy,/tự hết hạn sau 10 phút/u);
  assert.match(auth,/SHA-?256|hashToken/u);assert.match(privacy,/chỉ lưu mã băm SHA-256 của cookie/u);
+ // The admin's session (admin-auth.js): a session cookie, gone when the browser closes, and a session the server ends
+ // after SESSION_SECONDS, or IDLE_MS unused.
+ const admin=read('backend/admin-auth.js'),hours=Number(/SESSION_SECONDS=(\d+)\*60\*60/u.exec(admin)[1]),idle=Number(/IDLE_MS=(\d+)\*60\*60\*1000/u.exec(admin)[1]);
+ assert.match(privacy,new RegExp(`cookie cat_hien_admin [^.]*giữ phiên đăng nhập trang quản trị\\. Đây là cookie phiên: trình duyệt xóa nó khi đóng lại[^.]*sau tối đa ${hours} giờ, hoặc sớm hơn nếu ${idle} giờ không dùng\\.`,'u'));
  const preview=Number(/PREVIEW=(\d+)/u.exec(history)[1]);assert.match(privacy,new RegExp(`${preview.toLocaleString('vi-VN')} ký tự đầu`,'u'));
  const chapter=Number(/content=state\.translation\.slice\(0,(\d+)\)/u.exec(history)[1]);assert.match(privacy,new RegExp(`${chapter.toLocaleString('vi-VN')} ký tự đầu của mỗi phần`,'u'));
  // Every key the pages keep in localStorage or sessionStorage is named, and nothing named is gone from the code. study.js

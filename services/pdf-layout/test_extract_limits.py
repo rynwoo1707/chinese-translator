@@ -115,7 +115,7 @@ class ScanFailures(unittest.TestCase):
         extract._checked_languages.clear()
 
     def failing(self, error):
-        def scan_layout(page, number):
+        def scan_layout(page, number, fine=False):
             raise error
         extract.scan_layout = scan_layout
 

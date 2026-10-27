@@ -281,8 +281,9 @@ export function fitTextBoxes(root,{minFont=5.5,floorRatio=.85,lastRatio=.6,consi
   const box=el.getBoundingClientRect(),k=el.offsetHeight>0?box.height/el.offsetHeight:1,range=doc.createRange();range.selectNodeContents(el);let bottom=box.top,right=box.left,top=Infinity;
   for(const r of range.getClientRects())if(r.width>0||r.height>0){bottom=Math.max(bottom,r.bottom);top=Math.min(top,r.top);}
   // Pre-wrap spaces hang past the edge in text rects (also inside inline spans), so width is checked on the
-  // pieces that cannot wrap: images, glued formula+punctuation, fractions, roots and over-marks.
-  for(const child of el.querySelectorAll('img,.pdf-nobr,.math-frac,.math-sqrt,.math-vector,.math-over')){const r=child.getBoundingClientRect();if(r.width>0)right=Math.max(right,r.right);}
+  // pieces that cannot wrap: images, glued formula+punctuation, fractions, roots, over-marks, 2-D environments (a
+  // cases system, a matrix: math-text.js math-env) and stacks (limits, \overset, labelled arrows: math-stack).
+  for(const child of el.querySelectorAll('img,.pdf-nobr,.math-frac,.math-sqrt,.math-vector,.math-over,.math-env,.math-stack')){const r=child.getBoundingClientRect();if(r.width>0)right=Math.max(right,r.right);}
   return {box,k,bottom,right,top:Number.isFinite(top)?top:box.top};
  };
  // slack: how far the last line's glyphs may hang below the box (in em); .06em is the font's content area.
@@ -347,14 +348,18 @@ export function fitTextBoxes(root,{minFont=5.5,floorRatio=.85,lastRatio=.6,consi
  }
  return report;
 }
-export function blockBatches(blocks,maxCharacters=5000){
+// The blocks of each translation call: at most maxCharacters of source and maxBlocks blocks, or a mode's layoutBatch
+// ({chars,blocks}, translation-modes.js) given in their place. The defaults are Tiết kiệm's; the server takes at most 48.
+export function blockBatches(blocks,maxCharacters=5000,maxBlocks=48){
+ const limits=maxCharacters&&typeof maxCharacters==='object'?maxCharacters:{chars:maxCharacters,blocks:maxBlocks},chars=limits.chars>0?limits.chars:5000,most=Math.min(48,limits.blocks>=1?Math.floor(limits.blocks):48);
  const batches=[];let current=[],length=0;
- for(const b of blocks){if(current.length&&(length+b.source.length>maxCharacters||current.length>=48)){batches.push(current);current=[];length=0;}current.push(b);length+=b.source.length;}
+ for(const b of blocks){if(current.length&&(length+b.source.length>chars||current.length>=most)){batches.push(current);current=[];length=0;}current.push(b);length+=b.source.length;}
  if(current.length)batches.push(current);return batches;
 }
 // Block IDs of each OCR call. A block packed into a sheet goes with every block of that sheet (the image is sent once);
-// blocks of older manifests carry their own paragraph image. The two kinds never share a call.
-export function ocrImageBatches(blocks,maxBytes=OCR_LIMITS.bytes,sheets=[]){
+// blocks of older manifests carry their own paragraph image. The two kinds never share a call. limits: a mode's ocrBatch
+// ({images,blocks}, translation-modes.js), never above OCR_LIMITS; one sheet with more blocks than that is still one call.
+export function ocrImageBatches(blocks,maxBytes=OCR_LIMITS.bytes,sheets=[],limits={}){
  // Labeled formulas are marked inside the paragraph image, so only unlabeled formula crops are uploaded.
  const formulas=b=>(b.inlines||[]).reduce((sum,i)=>sum+(/^@\d{1,3}$/u.test(i.label||'')?0:String(i.image||'').length),0),stored=new Map(sheets.map(s=>[s.id,s])),items=[],seen=new Set();
  for(const block of blocks){
@@ -363,10 +368,11 @@ export function ocrImageBatches(blocks,maxBytes=OCR_LIMITS.bytes,sheets=[]){
   if(seen.has(sheet.id))continue;seen.add(sheet.id);const ids=sheet.strips.map(s=>s.blockId);
   items.push({sheet:true,ids,size:String(sheet.image||'').length+blocks.filter(b=>ids.includes(b.id)).reduce((sum,b)=>sum+formulas(b),0)});
  }
+ const images=Math.min(OCR_LIMITS.images,limits?.images>=1?Math.floor(limits.images):OCR_LIMITS.images),room=Math.min(OCR_LIMITS.sheetBlocks,limits?.blocks>=1?Math.floor(limits.blocks):OCR_LIMITS.sheetBlocks);
  const batches=[];let current=[],bytes=0;
  for(const item of items){
   if(item.size>maxBytes)throw new Error('Ảnh đoạn văn quá lớn; hãy tách đoạn trước khi đọc lại.');
-  const full=current.length>=OCR_LIMITS.images||item.sheet&&current.reduce((n,i)=>n+i.ids.length,0)+item.ids.length>OCR_LIMITS.sheetBlocks;
+  const full=current.length>=images||current.reduce((n,i)=>n+i.ids.length,0)+item.ids.length>room;
   if(current.length&&(full||current[0].sheet!==item.sheet||bytes+item.size>maxBytes)){batches.push(current.flatMap(i=>i.ids));current=[];bytes=0;}
   current.push(item);bytes+=item.size;
  }

@@ -7,9 +7,22 @@ import {readJsonShape} from './json-shape.js';
 import * as account from './account.js';
 
 import {SUBJECT_LABELS as DOMAINS} from './subject-glossaries.js';
+import {DEFAULT_MODE,isMode} from '../frontend/translation-modes.js';
 // study_sessions.domain still has the CHECK of migration 0011; newer subjects live in the subject column (0017).
 const CHECKED_DOMAINS=new Set(['general','math','history']);
-const MODES=new Set(['economy','balanced','quality']);
+// study_sessions.mode has that CHECK too: a newer mode ("Kỹ nhất", premium) is stored there as quality, and as itself in
+// the engine column (0026). Rows saved before 0026 have no engine, and a version from before it (after a rollback) saves
+// mode alone, leaving engine as it was: so engine counts only while mode still holds the value saved beside it.
+const CHECKED_MODES=new Set(['economy','balanced','quality']);
+const legacyMode=mode=>CHECKED_MODES.has(mode)?mode:'quality';
+const storedMode=(mode,engine)=>isMode(engine)&&legacyMode(engine)===mode?engine:mode;
+// A save without a mode (a page from before modes existed) is economy; a mode this server does not know is refused
+// rather than stored as another one.
+function historyMode(value){
+ if(value===undefined||value===null||value==='')return DEFAULT_MODE;
+ if(!isMode(value))throw new UserError('Cách dịch không hợp lệ. Hãy tải lại trang rồi thử lại.',400,'bad_mode');
+ return value;
+}
 const MAX_SOURCE=2_000_000,MAX_TRANSLATION=3_000_000,PREVIEW=1200;
 // The parts of one session: a PDF range has one per block, and one extraction may hold up to 3,000 blocks
 // (frontend/pdf-box-layout.js); a text session has far fewer.
@@ -365,16 +378,18 @@ export async function studyHistoryRoute(request,env,path,reader){
  if(request.method==='GET'&&!id){
   const before=new URL(request.url).searchParams.get('before'),after=before===null?null:readCursor(before);
   if(before!==null&&!after)return reply({error:'Vị trí trang Lịch sử dịch không hợp lệ. Hãy tải lại trang rồi thử lại.',code:'history_invalid'},400);
-  const rows=(await env.DB.prepare(`SELECT id,title,filename,COALESCE(subject,domain) AS domain,mode,status,translated_parts,total_parts,source_characters,translation_characters,library_story_id,library_chapter_id,page_start,page_end,source_total_pages,source_sha256,created_at,updated_at,revision
+  const rows=(await env.DB.prepare(`SELECT id,title,filename,COALESCE(subject,domain) AS domain,mode,engine,status,translated_parts,total_parts,source_characters,translation_characters,library_story_id,library_chapter_id,page_start,page_end,source_total_pages,source_sha256,created_at,updated_at,revision
    FROM study_sessions WHERE user_id=?1${after?' AND updated_at<=?2 AND (updated_at<?2 OR id<?3)':''} ORDER BY updated_at DESC,id DESC LIMIT ${HISTORY_PAGE+1}`).bind(reader.id,...(after?[after.updatedAt,after.id]:[])).all()).results;
-  const response=reply(rows.slice(0,HISTORY_PAGE));
+  const response=reply(rows.slice(0,HISTORY_PAGE).map(({engine,...row})=>({...row,mode:storedMode(row.mode,engine)})));
   if(rows.length>HISTORY_PAGE)response.headers.set('X-Next-Before',pageCursor(rows[HISTORY_PAGE-1]));
   return response;
  }
  if(request.method==='GET'&&id){
   const row=await existingSession(env,id,reader.id);if(!row)return reply({error:'Không tìm thấy lịch sử dịch.'},404);
   const stored=await env.FILES.get(row.state_key);if(!stored)return reply({error:'Nội dung lịch sử không còn tồn tại.'},410);
-  return reply({...row,domain:row.subject||row.domain,state:await stored.json()});
+  // The page restores engine before mode (frontend/study.js): one that no longer counts is answered as none.
+  const mode=storedMode(row.mode,row.engine);
+  return reply({...row,domain:row.subject||row.domain,mode,engine:mode===row.engine?mode:null,state:await stored.json()});
  }
  if(request.method==='DELETE'){
   if(!id)return reply({error:'Hãy chọn bản dịch cần xóa.'},400);
@@ -405,7 +420,7 @@ export async function studyHistoryRoute(request,env,path,reader){
   if(!Number.isInteger(body.revision)||body.revision<0)return reply({error:'Phiên bản lịch sử không hợp lệ.',code:'history_invalid'},400);
   if(existing&&body.revision!==(Number(existing.revision)||0))return reply({error:CONFLICT,code:'history_conflict',revision:Number(existing.revision)||0,updatedAt:existing.updated_at},409);
  }
- const sessionId=id||named||crypto.randomUUID(),filename=cleanFilename(body.filename),title=cleanTitle(body.title,filename),domain=Object.hasOwn(DOMAINS,body.domain)?body.domain:'general',checkedDomain=CHECKED_DOMAINS.has(domain)?domain:'general',mode=MODES.has(body.mode)?body.mode:'economy',state=normalizeState(body.state||{});
+ const sessionId=id||named||crypto.randomUUID(),filename=cleanFilename(body.filename),title=cleanTitle(body.title,filename),domain=Object.hasOwn(DOMAINS,body.domain)?body.domain:'general',checkedDomain=CHECKED_DOMAINS.has(domain)?domain:'general',mode=historyMode(body.mode),checkedMode=legacyMode(mode),state=normalizeState(body.state||{});
  // Of two parts translating the same page, the whole-book PDF uses the newer translation, so that time is kept apart
  // from renames and moves. A PDF range compares with its saved state; any other save counts as a change.
  let range=bodyRange(body.pageRange),sameTranslation=false;
@@ -417,7 +432,8 @@ export async function studyHistoryRoute(request,env,path,reader){
   const manifest=await storedShape(asset,MANIFEST_SHAPE),blocks=manifest.pages.flatMap(p=>p.blocks);range=manifestRange(manifest);
   if(blocks.length!==state.parts.length||blocks.some((b,i)=>b.source!==state.parts[i]))throw new Error('Lịch sử block không khớp PDF gốc.');
   validateBlockTranslations(blocks,state.translationParts.map((translation,i)=>({id:blocks[i].id,translation})).filter(b=>b.translation.trim()),{complete:state.complete});
-  state.translation=blocks.map((b,i)=>{let value=state.translationParts[i];for(const inline of b.inlines||[])value=value.replace(inline.token,inline.text);return value;}).filter(Boolean).join('\n\n');
+  // Through a function, so a $ in a formula's machine text is kept as written ($' would paste the rest of the block in).
+  state.translation=blocks.map((b,i)=>{let value=state.translationParts[i];for(const inline of b.inlines||[])value=value.replace(inline.token,()=>inline.text);return value;}).filter(Boolean).join('\n\n');
   if(existing){const priorObject=await env.FILES.get(existing.state_key),prior=priorObject?await storedShape(priorObject,PRIOR_STATE_SHAPE):null;sameTranslation=prior?.pdfLayout?.assetId===state.pdfLayout.assetId&&JSON.stringify(prior.translationParts)===JSON.stringify(state.translationParts);if(sameTranslation&&prior.pdfLayout.exported){state.pdfLayout.exported=true;state.pdfLayout.renderVersion=Number(prior.pdfLayout.renderVersion)||0;}}
  }
  const pages={start:range?.start??existing?.page_start??null,end:range?.end??existing?.page_end??null,total:range?.total??existing?.source_total_pages??null,sha256:range?.sha256||validSha(body.sha256)||existing?.source_sha256||null,list:range?(range.pages?JSON.stringify(range.pages):null):existing?.source_pages??null};
@@ -470,8 +486,8 @@ export async function studyHistoryRoute(request,env,path,reader){
  }
  // The session references its book and chapter, so it is written after them in the transaction. A concurrent move changes
  // only the book of an existing chapter; keeping the stored book then avoids pointing back at a deleted story.
- statements.push(env.DB.prepare(`INSERT INTO study_sessions(id,user_id,title,filename,domain,subject,mode,status,state_key,source_preview,translation_preview,translated_parts,total_parts,source_characters,translation_characters,library_story_id,library_chapter_id,page_start,page_end,source_total_pages,source_sha256,source_pages,pdf_asset_id,translated_at,stored_bytes,revision)
-  VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,CASE WHEN ? THEN NULL ELSE CURRENT_TIMESTAMP END,?,1) ON CONFLICT(id) DO UPDATE SET revision=study_sessions.revision+1,stored_bytes=excluded.stored_bytes,translated_at=COALESCE(excluded.translated_at,study_sessions.translated_at,CURRENT_TIMESTAMP), title=excluded.title,filename=excluded.filename,domain=excluded.domain,subject=excluded.subject,mode=excluded.mode,status=excluded.status,state_key=excluded.state_key,source_preview=excluded.source_preview,translation_preview=excluded.translation_preview,translated_parts=excluded.translated_parts,total_parts=excluded.total_parts,source_characters=excluded.source_characters,translation_characters=excluded.translation_characters,library_story_id=CASE WHEN study_sessions.library_chapter_id IS NOT NULL AND study_sessions.library_chapter_id=excluded.library_chapter_id THEN study_sessions.library_story_id ELSE excluded.library_story_id END,library_chapter_id=excluded.library_chapter_id,page_start=excluded.page_start,page_end=excluded.page_end,source_total_pages=excluded.source_total_pages,source_sha256=excluded.source_sha256,source_pages=excluded.source_pages,pdf_asset_id=excluded.pdf_asset_id,updated_at=CURRENT_TIMESTAMP WHERE user_id=excluded.user_id`).bind(sessionId,reader.id,title,filename,checkedDomain,domain,mode,status,key,state.source.slice(0,PREVIEW),state.translation.slice(0,PREVIEW),state.done,state.parts.length,state.source.length,state.translation.length,libraryStoryId,chapterId,pages.start,pages.end,pages.total,pages.sha256,pages.list,state.pdfLayout?.assetId||null,sameTranslation?1:0,storedBytes));
+ statements.push(env.DB.prepare(`INSERT INTO study_sessions(id,user_id,title,filename,domain,subject,mode,engine,status,state_key,source_preview,translation_preview,translated_parts,total_parts,source_characters,translation_characters,library_story_id,library_chapter_id,page_start,page_end,source_total_pages,source_sha256,source_pages,pdf_asset_id,translated_at,stored_bytes,revision)
+  VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,CASE WHEN ? THEN NULL ELSE CURRENT_TIMESTAMP END,?,1) ON CONFLICT(id) DO UPDATE SET revision=study_sessions.revision+1,stored_bytes=excluded.stored_bytes,translated_at=COALESCE(excluded.translated_at,study_sessions.translated_at,CURRENT_TIMESTAMP), title=excluded.title,filename=excluded.filename,domain=excluded.domain,subject=excluded.subject,mode=excluded.mode,engine=excluded.engine,status=excluded.status,state_key=excluded.state_key,source_preview=excluded.source_preview,translation_preview=excluded.translation_preview,translated_parts=excluded.translated_parts,total_parts=excluded.total_parts,source_characters=excluded.source_characters,translation_characters=excluded.translation_characters,library_story_id=CASE WHEN study_sessions.library_chapter_id IS NOT NULL AND study_sessions.library_chapter_id=excluded.library_chapter_id THEN study_sessions.library_story_id ELSE excluded.library_story_id END,library_chapter_id=excluded.library_chapter_id,page_start=excluded.page_start,page_end=excluded.page_end,source_total_pages=excluded.source_total_pages,source_sha256=excluded.source_sha256,source_pages=excluded.source_pages,pdf_asset_id=excluded.pdf_asset_id,updated_at=CURRENT_TIMESTAMP WHERE user_id=excluded.user_id`).bind(sessionId,reader.id,title,filename,checkedDomain,domain,checkedMode,mode,status,key,state.source.slice(0,PREVIEW),state.translation.slice(0,PREVIEW),state.done,state.parts.length,state.source.length,state.translation.length,libraryStoryId,chapterId,pages.start,pages.end,pages.total,pages.sha256,pages.list,state.pdfLayout?.assetId||null,sameTranslation?1:0,storedBytes));
  const guard=existing?null:roomGuard(env,reader.id,sessionId,storedBytes);if(guard)statements.unshift(guard);
  const written=[key,...(state.complete?[translatedKey]:[])];
  await env.FILES.put(key,stateJson,{httpMetadata:{contentType:'application/json; charset=utf-8'}});

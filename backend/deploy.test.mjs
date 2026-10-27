@@ -120,6 +120,12 @@ test('Config: refuses a local database id, secret-like vars and a secrets block;
  assert.match(configProblems(config({vars:{REGISTRATION_MODE:'opne'}})).warnings.join(),/REGISTRATION_MODE "opne" không hợp lệ.*closed/u);
  assert.match(configProblems(config({vars:{REGISTRATION_MODE:'domain',ALLOWED_EMAIL_DOMAINS:' '}})).warnings.join(),/ALLOWED_EMAIL_DOMAINS trống/u);
  for(const vars of [{REGISTRATION_MODE:' Closed '},{REGISTRATION_MODE:'domain',ALLOWED_EMAIL_DOMAINS:'truong.edu.vn'},{}])assert.deepEqual(configProblems(config({vars})).warnings,[],JSON.stringify(vars));
+ // The admin jobs' default "Cách dịch": empty or a known mode; any other value is ignored by the Worker, so say so.
+ assert.match(configProblems(config({vars:{ADMIN_TRANSLATION_MODE:'chuyen-sau'}})).warnings.join(),/^ADMIN_TRANSLATION_MODE "chuyen-sau" không hợp lệ \(economy, balanced, quality, premium hoặc để trống\): máy chủ sẽ dùng premium/u);
+ for(const value of ['','premium',' economy ','quality'])assert.deepEqual(configProblems(config({vars:{ADMIN_TRANSLATION_MODE:value}})).warnings,[],value);
+ // GEMINI_THINKING: empty or a level; the Worker ignores anything else (each job thinks as its mode says), so say so.
+ for(const value of ['Medium','hgih','max','medium-high'])assert.match(configProblems(config({vars:{GEMINI_THINKING:value}})).warnings.join(),new RegExp(`^GEMINI_THINKING "${value}" không hợp lệ \\(minimal, low, medium, high, default hoặc để trống\\): máy chủ sẽ bỏ qua giá trị này`,'u'),value);
+ for(const value of ['','minimal','low',' medium ','high','default'])assert.deepEqual(configProblems(config({vars:{GEMINI_THINKING:value}})).warnings,[],value);
 });
 
 test('Secrets: ADMIN_TOKEN is required, the PDF and Google pairs come together, vars and secrets never share a name',()=>{
@@ -241,8 +247,14 @@ test('Post-deploy checks: a too-short ADMIN_TOKEN is named even without a token,
  for(const adminToken of ['',ADMIN]){
   const results=await postDeployChecks(base,{fetch:fakeSite({routes:{'/api/status':short}}).fetch,adminToken,sleep});
   const errors=results.filter(r=>r.level==='error').map(r=>r.text);
-  assert.deepEqual(errors,[`ADMIN_TOKEN của production ngắn hơn 32 ký tự nên trang quản trị đang khóa: đặt lại bằng ${process.platform==='win32'?'npx.cmd':'npx'} wrangler secret put ADMIN_TOKEN (nên dùng 64 ký tự hex).`],adminToken?'with a token':'without a token');
+  assert.deepEqual(errors,[`ADMIN_TOKEN của production ngắn hơn 32 ký tự nên máy chủ không nhận nó: không tạo hay đặt lại được tài khoản quản trị ở /admin, công cụ dòng lệnh cũng không vào được. Đặt lại bằng ${process.platform==='win32'?'npx.cmd':'npx'} wrangler secret put ADMIN_TOKEN (nên dùng 64 ký tự hex); đổi ADMIN_TOKEN thì phải nhập lại khóa Gemini đã lưu trong Cài đặt.`],adminToken?'with a token':'without a token');
  }
+ // A site still waiting for its first admin account says so, with what to do; ADMIN_TOKEN still opens it for tools.
+ const status=({headers})=>Response.json(headers.get('authorization')===`Bearer ${ADMIN}`?{authenticated:true,model:'gemini-3.6-flash',translationMode:'premium'}:{authenticated:false,adminSetupRequired:true});
+ const waiting=await postDeployChecks(base,{fetch:fakeSite({routes:{'/api/status':status}}).fetch,adminToken:ADMIN,sleep});
+ assert.deepEqual(waiting.filter(r=>r.level!=='ok').map(r=>[r.level,r.text]),[['warn','Chưa có tài khoản quản trị: mở /admin và tạo tài khoản bằng ADMIN_TOKEN.']]);
+ assert.equal(waiting.find(r=>r.text.startsWith('/api/status')).text,'/api/status: ADMIN_TOKEN đúng, model gemini-3.6-flash, Cách dịch mặc định của quản trị viên: premium.');
+ assert.deepEqual((await postDeployChecks(base,{fetch:fakeSite().fetch,sleep})).filter(r=>r.level!=='ok'),[],'once an account exists the line goes');
  const octet=()=>new Response(null,{headers:{'content-type':'application/octet-stream'}}),html=()=>new Response('<!doctype html>',{headers:{'content-type':'text/html; charset=utf-8'}});
  const tar=await postDeployChecks(base,{fetch:fakeSite({routes:{'/vendor/paddle/models/det.tar':octet}}).fetch,sleep});
  assert.deepEqual(tar.filter(r=>r.level!=='ok'),[],'any non-HTML type is a real file');
@@ -436,7 +448,8 @@ test('A full deploy: tests with paid APIs blocked, migrations, tagged deploy, li
  assert.match(tests.options.env.NODE_OPTIONS,/^--import=file:\/\/.*backend\/test-support\/no-paid-api\.mjs$/u);
  const deployed=run.cloud.calls.at(-1).args.slice(1);
  assert.deepEqual(deployed.slice(0,6),['deploy','--strict','--tag',SHA,'--message',`main@${SHA}`]);assert.equal(deployed[6],'--secrets-file');assert.equal(basename(deployed[7]),basename(file));
- assert.ok(run.site.requests.some(r=>r.pathname==='/api/health'));assert.match(run.text,/OK {2}\/api\/status: mã quản trị đúng/u);
+ assert.ok(run.site.requests.some(r=>r.pathname==='/api/health'));assert.match(run.text,/OK {2}\/api\/status: ADMIN_TOKEN đúng/u);
+ assert.match(run.text,/\/admin: đăng nhập bằng tên đăng nhập và mật khẩu quản trị \(lần đầu: tạo tài khoản bằng ADMIN_TOKEN\)/u,'the manual checklist names the admin accounts');
  assert.match(run.text,new RegExp(`wrangler rollback ${PREVIOUS}`,'u'));assert.match(run.text,new RegExp(`time-travel restore DB --bookmark=${BOOKMARK}`,'u'));
  noSecretIn(run.text);
  const failed=await deploy(project(),['--yes','--skip-tests'],{cloud:fakeCloudflare({'wrangler d1 migrations apply':{code:1,stderr:'✘ [ERROR] Migration 0002_more.sql failed'}})});

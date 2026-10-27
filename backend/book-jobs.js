@@ -6,13 +6,16 @@ import {isStudyModel} from './gemini-models.js';
 import {normalizeVietnameseText} from './vietnamese-text.js';
 import {isSubject} from './subject-glossaries.js';
 import {ownedBook,sourceKey,sourceInUse,removeKeys} from './study-history.js';
+// The modes of "Cách dịch" (book_jobs.mode has no CHECK, so a run stores its mode as it is, premium included). The
+// student may change a job's mode while no other device's run holds it (PATCH mode).
+import {isMode} from '../frontend/translation-modes.js';
 
 const base='/api/my/study/book-jobs';
 const reply=(data,status=200,headers={})=>Response.json(data,{status,headers:{'Cache-Control':'no-store','X-Content-Type-Options':'nosniff',...headers}});
 const SHA=/^[a-f\d]{64}$/u,UUID=/^[a-f\d-]{36}$/iu,CONTROL=/[\u0000-\u001f\u007f]/u;
 // One character per page of the original; requests may also name the states in words.
 const STATES={pending:'.',done:'d',blank:'b',cover:'c',skipped:'s',failed:'f'},CODES=new Set(Object.values(STATES));
-const STATUSES=new Set(['ready','running','paused','done']),MODES=new Set(['economy','balanced','quality']);
+const STATUSES=new Set(['ready','running','paused','done']);
 export const MAX_BOOK_PAGES=10000;
 // A chunk is one layout extraction, which takes at most 20 pages. The glossary goes with every chunk's request, so it is
 // bounded in terms and bytes; an encyclopedia stops learning new terms rather than growing every request.
@@ -131,7 +134,7 @@ async function createJob(request,env,reader){
  if(!within(totalPages,1,MAX_BOOK_PAGES))throw bad(`Số trang phải từ 1 đến ${MAX_BOOK_PAGES}.`,'bad_pages');
  if(!within(chunkSize,1,MAX_CHUNK))throw bad(`Mỗi phần dịch có từ 1 đến ${MAX_CHUNK} trang.`,'bad_chunk');
  if(!isSubject(body.domain))throw bad('Lĩnh vực không hợp lệ.','bad_domain');
- if(!MODES.has(body.mode))throw bad('Chế độ dịch không hợp lệ.','bad_mode');
+ if(!isMode(body.mode))throw bad('Chế độ dịch không hợp lệ.','bad_mode');
  if(cover!==null&&!within(cover,0,totalPages))throw bad('Trang bìa không thuộc tệp gốc.','bad_cover');
  const filename=cleanFilename(body.filename),entries=glossaryEntries(body.glossary)||[];
  const book=body.storyId===undefined?{id:null}:await bookOf(env,reader,body.storyId);if(!book)return missingBook();
@@ -157,10 +160,11 @@ async function updateJob(request,env,reader,id){
  const has=key=>body[key]!==undefined;
  if(has('status')&&!STATUSES.has(body.status))throw bad('Trạng thái lượt dịch không hợp lệ.','bad_status');
  if(has('model')&&body.model!==null&&!isStudyModel(body.model))throw bad('Model Gemini không hợp lệ.','bad_model');
+ if(has('mode')&&!isMode(body.mode))throw bad('Chế độ dịch không hợp lệ.','bad_mode');
  const reason=has('pauseReason')?cleanReason(body.pauseReason):undefined,usage=usageToAdd(body.addUsage),reports=usageReports(body.reports),runner=runnerOf(body.runner),entries=glossaryEntries(body.glossary);
  const book=has('storyId')?await bookOf(env,reader,body.storyId):undefined;if(book===null)return missingBook();
  // Tokens are counted whoever reports them; every other change belongs to the run holding the job (runner), if any.
- const changes=['pages','status','pauseReason','model','storyId','glossary'].some(has);
+ const changes=['pages','status','pauseReason','model','storyId','glossary','mode'].some(has);
  if(!changes&&!usage&&!reports&&runner===undefined)throw bad('Không có thay đổi nào cho lượt dịch.','no_change');
  // Two tabs may report at once: each update applies to the version it read and is retried on a newer one, so page
  // states, token counts and terms from both are kept.
@@ -178,8 +182,8 @@ async function updateJob(request,env,reader,id){
   const kept=fresh.length?JSON.stringify([...counted,...fresh.map(report=>report.id)].slice(-KEPT_REPORTS)):row.usage_reports;
   // A reporting run takes or renews the lease while the job runs and lets it go when it pauses or finishes.
   const [runnerId,leaseUntil]=runner!==undefined&&(!held||mine)?status==='running'?[runner,now+LEASE_MS]:[null,0]:[row.runner_id,row.lease_until];
-  const updated=await env.DB.prepare(`UPDATE book_jobs SET page_states=?,status=?,pause_reason=?,model=?,story_id=?,glossary=?,prompt_tokens=prompt_tokens+?,output_tokens=output_tokens+?,thinking_tokens=thinking_tokens+?,total_tokens=total_tokens+?,ai_requests=ai_requests+?,usage_reports=?,runner_id=?,lease_until=?,version=version+1,updated_at=?
-   WHERE id=? AND user_id=? AND version=? RETURNING *`).bind(pages,status,pauseReason,has('model')?body.model:row.model,book?book.id:row.story_id,glossary,...add,kept,runnerId,leaseUntil,new Date(now).toISOString(),id,reader.id,row.version).first();
+  const updated=await env.DB.prepare(`UPDATE book_jobs SET page_states=?,status=?,pause_reason=?,model=?,story_id=?,glossary=?,mode=?,prompt_tokens=prompt_tokens+?,output_tokens=output_tokens+?,thinking_tokens=thinking_tokens+?,total_tokens=total_tokens+?,ai_requests=ai_requests+?,usage_reports=?,runner_id=?,lease_until=?,version=version+1,updated_at=?
+   WHERE id=? AND user_id=? AND version=? RETURNING *`).bind(pages,status,pauseReason,has('model')?body.model:row.model,book?book.id:row.story_id,glossary,has('mode')?body.mode:row.mode,...add,kept,runnerId,leaseUntil,new Date(now).toISOString(),id,reader.id,row.version).first();
   if(updated)return reply({job:jobFromRow(updated,now)});
  }
  return reply({error:'Lượt dịch vừa được cập nhật ở nơi khác. Hãy tải lại trang rồi thử lại.',code:'conflict'},409);

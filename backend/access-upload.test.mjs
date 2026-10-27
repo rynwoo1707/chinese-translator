@@ -11,13 +11,17 @@ import {termMatcher,highlightTerms,bindTermPopover} from '../frontend/reader-ter
 import {footerHtml} from '../frontend/site-footer.js';
 import {isSample,sampleBadge,sampleCardNote,sampleReaderNotice,SAMPLE_LABEL} from '../frontend/library-samples.js';
 import {bilingualSource} from '../frontend/bilingual-reader.js';
+import {modeProfile} from '../frontend/translation-modes.js';
 
 test('Readers cannot access management APIs or private configuration',async()=>{
  const env={ADMIN_TOKEN:'test-admin-token-0123456789abcdef',GEMINI_API_KEY:'private-key',DB:{prepare(){throw new Error('Private database accessed');}}};
- for(const [path,method] of [['/stories','GET'],['/stories','POST'],['/users','GET'],['/user-library','GET'],['/jobs','GET'],['/jobs','POST'],['/jobs/test/run','POST'],['/jobs/test/publish','POST'],['/jobs/test/file','GET'],['/requests','GET'],['/requests/test','PATCH'],['/stories/test','PATCH'],['/stories/test/cover','POST'],['/stories/test/cover','DELETE'],['/settings/gemini-key','PUT'],['/settings/gemini-key','DELETE']]){
+ for(const [path,method] of [['/stories','GET'],['/stories','POST'],['/users','GET'],['/user-library','GET'],['/jobs','GET'],['/jobs','POST'],['/jobs/test/run','POST'],['/jobs/test/publish','POST'],['/jobs/test/file','GET'],['/requests','GET'],['/requests/test','PATCH'],['/stories/test','PATCH'],['/stories/test/cover','POST'],['/stories/test/cover','DELETE'],['/settings/gemini-key','PUT'],['/settings/gemini-key','DELETE'],['/admin/admins','GET'],['/admin/admins','POST'],['/admin/admins/test','DELETE'],['/admin/password','POST'],['/admin/session','GET']]){
   const response=await worker.fetch(new Request('https://test/api'+path,{method}),env,{});
   assert.equal(response.status,401,`${method} ${path}`);
+  // The console sends the admin back to its login form on this answer, keeping what she typed.
+  assert.deepEqual(await response.json(),{error:'Phiên quản trị đã hết hạn. Hãy đăng nhập lại.',code:'admin_signed_out'},`${method} ${path}`);
  }
+ // Signed out, and the database cannot say whether an admin exists: no setup prompt.
  const status=await worker.fetch(new Request('https://test/api/status'),env,{});
  assert.deepEqual(await status.json(),{authenticated:false});
 });
@@ -236,6 +240,34 @@ test('A configured GEMINI_QUALITY_MODEL is used only for the repair retry, never
  const models=[];t.mock.method(globalThis,'fetch',async(endpoint)=>{models.push(endpoint);const translation=models.length===1?'Bản dịch thiếu dẫn chứng.':'Bản dịch có dẫn chứng [12].';return Response.json({usageMetadata:{promptTokenCount:10,candidatesTokenCount:8,totalTokenCount:18},candidates:[{finishReason:'STOP',content:{parts:[{text:JSON.stringify({translation,contextUpdate:'',glossaryUpdates:{}})}]}}]});});
  for(let n=0;n<10&&job.status!=='review';n++)await processJob(job.id,env);
  assert.equal(models.length,2);assert.match(models[0],/gemini-2\.5-flash/);assert.match(models[1],/gemini-3\.0-pro/);assert.equal(job.status,'review');assert.match(job.translation,/\[12\]/);
+});
+
+test('Admin jobs keep the "Cách dịch" chosen for them, on upload, on accepting a request and on starting; an unknown one is refused',async t=>{
+ const {sqliteEnvironment,signedIn}=await import('./test-support/sqlite-d1.mjs'),ADMIN='b4'.repeat(32),origin='https://hoa-tri.example';
+ const {sqlite,env}=sqliteEnvironment(t,{vars:{ADMIN_TOKEN:ADMIN,GEMINI_API_KEY:'test',GEMINI_MODEL:'gemini-3.6-flash'}}),reader=await signedIn(sqlite);
+ const call=(path,{headers={},...init}={})=>worker.fetch(new Request(origin+'/api'+path,{...init,headers:{Authorization:`Bearer ${ADMIN}`,Origin:origin,...headers}}),env,{});
+ const post=(path,body)=>call(path,{method:'POST',...(body===undefined?{}:{body:typeof body==='string'?body:JSON.stringify(body),headers:{'Content-Type':'application/json'}})});
+ const modeOf=id=>sqlite.prepare('SELECT mode FROM jobs WHERE id=?').get(id).mode,jobs=()=>sqlite.prepare('SELECT COUNT(*) AS n FROM jobs').get().n;
+ sqlite.prepare("INSERT INTO stories(id,title,genre) VALUES('s1','Sách','Giáo dục')").run();
+ const upload=mode=>{const form=new FormData();form.set('story_id','s1');form.set('text','你好世界。');if(mode!==undefined)form.set('mode',mode);return call('/jobs',{method:'POST',body:form});};
+ const chosen=await upload('quality');assert.equal(chosen.status,201);const quality=(await chosen.json()).id;assert.equal(modeOf(quality),'quality');
+ const refused=await upload('turbo');assert.equal(refused.status,400);assert.deepEqual(await refused.json(),{error:'Cách dịch không hợp lệ.',code:'bad_mode'});assert.equal(jobs(),1,'nothing was stored for it');
+ const plain=(await (await upload('')).json()).id;assert.equal(modeOf(plain),null,'none chosen: the server default applies once it starts');
+ // Starting: the job's mode, or the one sent now, sets the thinking; the mode used and the reasoning tokens are kept.
+ const thinking=[];t.mock.method(globalThis,'fetch',async(url,options)=>{thinking.push(JSON.parse(options.body).generationConfig.thinkingConfig);return Response.json({usageMetadata:{promptTokenCount:10,candidatesTokenCount:5,thoughtsTokenCount:3,totalTokenCount:18},candidates:[{finishReason:'STOP',content:{parts:[{text:JSON.stringify({translation:'Xin chào thế giới.',contextUpdate:'',glossaryUpdates:{}})}]}}]});});
+ const kept=await (await post(`/jobs/${quality}/run`)).json();assert.equal(kept.mode,'quality');assert.deepEqual(thinking.pop(),{thinkingLevel:modeProfile('quality').translateThinking});
+ const started=await (await post(`/jobs/${plain}/run`)).json();assert.deepEqual([started.mode,started.thinking_tokens],['premium',3]);assert.deepEqual(thinking.pop(),{thinkingLevel:modeProfile('premium').translateThinking});
+ const other=(await (await upload()).json()).id,bad=await post(`/jobs/${other}/run`,{mode:'turbo'});
+ assert.equal(bad.status,400);assert.equal((await bad.json()).code,'bad_mode');assert.equal(sqlite.prepare('SELECT lease_until FROM jobs WHERE id=?').get(other).lease_until,0,'a refused start holds nothing');assert.equal(thinking.length,0);
+ assert.equal((await post(`/jobs/${other}/run`,'{"mode":')).status,400);assert.equal(modeOf(other),null);
+ const switched=await (await post(`/jobs/${other}/run`,{mode:'economy'})).json();assert.equal(switched.mode,'economy');assert.deepEqual(thinking.pop(),{thinkingLevel:modeProfile('economy').translateThinking});
+ assert.equal((await (await call(`/jobs/${other}`)).json()).mode,'economy','the job\'s detail names it');
+ // Accepting a request: with a mode, or (an older console) with no body at all.
+ for(const [id,file] of [['r1','第一章 你好。'],['r2','第二章 再见。']]){sqlite.prepare("INSERT INTO requests(id,title,user_id,visibility,file_key,filename,mime) VALUES(?,'Yêu cầu',?,'private',?,'bai.txt','text/plain')").run(id,reader.id,`requests/${id}/original`);await env.FILES.put(`requests/${id}/original`,file);}
+ assert.equal((await post('/requests/r1/accept',{mode:'pro'})).status,400);assert.equal(sqlite.prepare("SELECT status FROM requests WHERE id='r1'").get().status,'pending');
+ const accepted=await post('/requests/r1/accept',{mode:'balanced'});assert.equal(accepted.status,201);assert.equal(modeOf((await accepted.json()).job_id),'balanced');
+ const older=await post('/requests/r2/accept');assert.equal(older.status,201);assert.equal(modeOf((await older.json()).job_id),null);
+ assert.equal((await acceptReaderRequest('r2',env,{mode:'premium'})).alreadyAccepted,true,'an accepted request keeps its job as it was');
 });
 
 

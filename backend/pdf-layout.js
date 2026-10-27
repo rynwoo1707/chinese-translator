@@ -5,12 +5,13 @@ import {isStudyModel} from './gemini-models.js';
 import {fileDisposition} from './download-filename.js';
 import {keepSource,sourceKey} from './study-books.js';
 import {storedSource} from './book-jobs.js';
-import {UserError,logEvent,bodyLimit} from './http.js';
+import {UserError,logEvent,bodyLimit,errorResponse} from './http.js';
 import {Buffer} from 'node:buffer';
 import {rateLimit,dailyMax,vietnamDay} from './rate-limit.js';
 import {keepWritten} from './account.js';
 import {holdLease,takeSlot,keepRenewed,leaseUse,slotCount} from './pdf-slots.js';
 import {asciiJsonBytes} from '../services/pdf-layout/ascii-json.mjs';
+import {isMode,modeProfile} from '../frontend/translation-modes.js';
 
 const base='/api/my/study/pdf-layout';
 const reply=(body,status=200)=>Response.json(body,{status,headers:{'Cache-Control':'no-store'}});
@@ -30,6 +31,8 @@ export function serviceUrl(env){
  if(!env.PDF_LAYOUT_SERVICE_URL||!env.PDF_LAYOUT_SERVICE_TOKEN)return null;
  const url=new URL(env.PDF_LAYOUT_SERVICE_URL);if(url.protocol!=='https:'&&!(url.protocol==='http:'&&['127.0.0.1','localhost','pdf-layout'].includes(url.hostname)))throw new Error('Dịch vụ PDF cần HTTPS.');return url;
 }
+// The hash of the layout code this Worker checks pages with (npm run deploy sets PDF_LAYOUT_VERSION), or null when unset.
+export const expectedLayout=env=>{const value=String(env?.PDF_LAYOUT_VERSION||'').trim();return /^[a-f\d]{8,64}$/u.test(value)?value:null;};
 // Older service builds returned MuPDF/Tesseract's whole stderr as the error, with the real cause at the very end.
 const SERVICE_NOISE=/Warning: Parameter not found: \S+|Error opening data file [^\n]*?\.traineddata|Please make sure the TESSDATA_PREFIX environment variable is set to your "tessdata" directory\.|Failed loading language '[^'\n]*'|Image too small to scale!! \([^)\n]*\)|Line cannot be recognized!!|Tesseract couldn't load any languages!|Could not initiali[sz]e tesseract\.?/giu;
 // limit: 400 characters, more for an overflow answer, whose list of blocks the service already keeps short.
@@ -69,11 +72,13 @@ const SERVICE_DOWN='Dịch vụ PDF đang tạm ngừng. Hãy thử lại sau í
 const LOCAL_REFUSED='Dịch vụ PDF trên máy này không nhận yêu cầu của trang web: PDF_LAYOUT_SERVICE_TOKEN hoặc PDF_LAYOUT_SERVICE_URL trong .dev.vars khác với dịch vụ đang chạy. Hãy tắt Hoa Trí rồi chạy lại npm start.';
 // body: an object sent as JSON, or a stream (stream: a JSON body built from stored bytes); file: a PDF streamed as is.
 // allPages: the pages are wanted all or not at all (a refresh), so the service lets the job use its whole time limit.
-async function service(env,operation,body,{file,pages,stream,allPages=false}={}){
+// quality 'fine' (a mode whose profile has sheets:'fine'): the service cuts scanned pages into smaller OCR sheets and
+// sharper crops (manifest sheetQuality); an older service ignores the header and makes standard ones.
+async function service(env,operation,body,{file,pages,stream,allPages=false,quality}={}){
  const url=serviceUrl(env);if(!url)throw new Error('Chưa cấu hình dịch vụ PDF giữ bố cục.');url.pathname=url.pathname.replace(/\/$/u,'')+'/'+operation;
  // The developer command only helps on the machine running the service; elsewhere students just need to wait.
  let response;
- try{response=await fetch(url,{method:operation==='font'?'GET':'POST',headers:{'Content-Type':file?'application/pdf':'application/json',Authorization:`Bearer ${env.PDF_LAYOUT_SERVICE_TOKEN}`,...(file?{'X-PDF-Pages':encodeURIComponent(pages||''),...(allPages?{'X-PDF-All-Pages':'1'}:{})}:{})},...(operation==='font'?{}:{body:file?file.stream():stream||JSON.stringify(body)}),signal:AbortSignal.timeout(280000),...(file||stream?{duplex:'half'}:{})});}
+ try{response=await fetch(url,{method:operation==='font'?'GET':'POST',headers:{'Content-Type':file?'application/pdf':'application/json',Authorization:`Bearer ${env.PDF_LAYOUT_SERVICE_TOKEN}`,...(file?{'X-PDF-Pages':encodeURIComponent(pages||''),...(allPages?{'X-PDF-All-Pages':'1'}:{}),...(quality==='fine'?{'X-PDF-Quality':'fine'}:{})}:{})},...(operation==='font'?{}:{body:file?file.stream():stream||JSON.stringify(body)}),signal:AbortSignal.timeout(280000),...(file||stream?{duplex:'half'}:{})});}
  catch(error){
   if(['TimeoutError','AbortError'].includes(error?.name))throw new UserError(operation==='render'?'Dịch vụ PDF xuất quá lâu. Hãy thử xuất lại sau ít phút.':'Dịch vụ PDF xử lý quá lâu. Hãy chọn ít trang hơn cho mỗi lượt.',413,'pdf_timeout');
   throw unavailable(localService(env)?'Không kết nối được dịch vụ PDF giữ bố cục trên máy này. Hãy xem các dòng [PDF] trong cửa sổ đang chạy Hoa Trí (npm start) rồi thử lại.':SERVICE_DOWN);
@@ -225,6 +230,9 @@ async function keepExtraction(env,reader,id,document,original,{filename,also=[]}
  await env.FILES.put(written.at(-1),original,{httpMetadata:{contentType:'application/pdf'},customMetadata:{filename}});
  return await keepWritten(env,reader.id,written)||replyWith({assetId:id,originalUrl:`${base}/assets/${id}/original`},'document',bytes,201);
 }
+// The OCR sheets an extraction asks for: the request's "Cách dịch" (form field mode; none or an unknown one is economy)
+// decides. The manifest records what the service made (sheetQuality), and a refresh asks for that again.
+const sheetQuality=mode=>modeProfile(mode).sheets;
 // A chunk the browser cut from an original stored for a whole-book run (sourceSha256), starting after page pageOffset.
 // The manifest numbers pages, block IDs and warnings as pages of the original and names that file, so the part joins its
 // book like a range of the whole file. The chunk itself is not kept: the original already is. Runs inside withLeases.
@@ -239,7 +247,7 @@ async function extractChunk(env,reader,form,file){
  if(offset+last>source.pages)throw new UserError(`Trang ${offset+last} vượt quá ${source.pages} trang của tệp gốc.`,400,'bad_pages');
  return counted(env,extractionCap(env,reader),async()=>{
   const shift=text=>offset?shiftPageNumbers(text,offset):text;
-  let result;try{result=await service(env,'extract',null,{file,pages});}catch(error){if(error?.constructor===Error||error instanceof UserError)error.message=shift(error.message);throw error;}
+  let result;try{result=await service(env,'extract',null,{file,pages,quality:sheetQuality(form.get('mode'))});}catch(error){if(error?.constructor===Error||error instanceof UserError)error.message=shift(error.message);throw error;}
   const document=validateLayoutDocument(result.document),id=crypto.randomUUID();
   for(const page of document.pages)renumberPage(page,offset+page.number);
   // Pages with nothing to translate are answered with their numbers, so a run can mark exactly those pages blank (the
@@ -251,15 +259,21 @@ async function extractChunk(env,reader,form,file){
   return keepExtraction(env,reader,id,document,original,{filename:source.filename||file.name});
  });
 }
-// The blocks an OCR call reads and the stored sheets they sit on, checked against the manifest.
-function ocrSelection(document,blockIds){
- if(!Array.isArray(blockIds)||!blockIds.length||blockIds.length>OCR_LIMITS.sheetBlocks||new Set(blockIds).size!==blockIds.length)throw new Error('Danh sách đoạn đọc ảnh không hợp lệ.');
+// The blocks an OCR call reads and the stored sheets they sit on, checked against the manifest. most: the blocks one call
+// may name (a re-read: the mode's ocrBatch.blocks).
+function ocrSelection(document,blockIds,most=OCR_LIMITS.sheetBlocks){
+ if(!Array.isArray(blockIds)||!blockIds.length||blockIds.length>Math.min(most,OCR_LIMITS.sheetBlocks)||new Set(blockIds).size!==blockIds.length)throw new Error('Danh sách đoạn đọc ảnh không hợp lệ.');
  const pages=document.pages.filter(p=>p.ocr),all=pages.flatMap(p=>p.blocks),blocks=blockIds.map(id=>all.find(b=>b.id===id));if(blocks.some(b=>!b))throw new Error('Đoạn OCR không thuộc PDF đã chọn.');
  // Blocks packed into stored sheets are read a whole sheet at a time: the request names every block of each sheet it
  // touches and nothing else. Older manifests (no sheets) keep one image per block, at most 6 per call.
  const stored=new Map(pages.flatMap(p=>p.ocrSheets||[]).map(s=>[s.id,s])),sheets=[...new Set(blocks.map(b=>b.ocrSheet).filter(Boolean))].map(id=>stored.get(id));
  if(sheets.length?sheets.some(s=>!s)||blocks.some(b=>!b.ocrSheet)||sheets.reduce((n,s)=>n+s.strips.length,0)!==blocks.length||sheets.some(s=>s.strips.some(strip=>!blockIds.includes(strip.blockId))):blocks.length>OCR_LIMITS.images)throw new Error('Danh sách đoạn đọc ảnh không hợp lệ.');
  return {blocks,sheets};
+}
+// The blocks a re-read was asked for (rereadIds), each once, among those the call names.
+function rereadSelection(ids,blockIds){
+ if(!Array.isArray(ids)||!ids.length||new Set(ids).size!==ids.length||ids.some(id=>!blockIds.includes(id)))throw new Error('Danh sách đoạn đọc ảnh không hợp lệ.');
+ return ids;
 }
 // Page numbers as the page range field takes them: [12,13,14,37] → "12-14, 37" (extract.py page_ranges).
 const pageList=numbers=>numbers.reduce((parts,n,i)=>{if(i&&n===numbers[i-1]+1)parts.at(-1)[1]=n;else parts.push([n,n]);return parts;},[]).map(([a,b])=>a===b?String(a):`${a}-${b}`).join(', ');
@@ -275,6 +289,7 @@ const refreshTooHeavy=(pages,code)=>Object.assign(new UserError(`Chưa cập nh�
 const madeFrom=state=>JSON.stringify([state?.pdfLayout?.assetId??null,state?.complete===true,state?.parts??null,state?.translationParts??null]);
 const parsedState=text=>{try{return JSON.parse(text);}catch{return null;}};
 const EXPORT_CONFLICT='Bản dịch này vừa được lưu từ một tab hoặc thiết bị khác trong lúc xuất PDF, nên PDF vừa dựng không khớp bản mới nhất và chưa được lưu. Hãy mở lại bản dịch từ Lịch sử dịch rồi bấm Xuất PDF tiếng Việt.';
+const SERVICE_OUTDATED='Dịch vụ PDF chưa được cập nhật cùng phiên bản với trang web, nên PDF vừa dựng chưa được lưu và lượt xuất này không bị tính. Hãy thử xuất lại sau ít phút.';
 const stat=(env,key)=>env.FILES.head?env.FILES.head(key):env.FILES.get(key);
 // Writes key only over the stored object whose etag was read (R2 onlyIf; storage without etags writes as before): false
 // when another write landed in between.
@@ -282,10 +297,11 @@ async function putIfUnchanged(env,key,value,etag,options){
  try{return await env.FILES.put(key,value,{...options,...(etag?{onlyIf:{etagMatches:etag}}:{})})!==null;}
  catch(error){if(/precondition/iu.test(String(error?.message||'')))return false;throw error;}
 }
-// The slim answer of /ocr-blocks: the requested blocks as stored after the reading (the fields applyOcrReadings sets).
+// The slim answer of /ocr-blocks: the requested blocks as stored after the reading (the fields applyOcrReadings sets,
+// but not ocrHint, the machine text only the server reads again).
 export function ocrBlockFields(document,blockIds){
  const wanted=new Set(blockIds),fields=[];
- for(const page of document.pages)for(const b of page.blocks)if(wanted.has(b.id))fields.push({id:b.id,source:b.source,text:b.text,ocrCorrected:b.ocrCorrected===true,...(typeof b.ocrKept==='string'?{ocrKept:b.ocrKept}:{}),...(b.kind!==undefined?{kind:b.kind}:{}),...(b.bold!==undefined?{bold:b.bold}:{})});
+ for(const page of document.pages)for(const b of page.blocks)if(wanted.has(b.id))fields.push({id:b.id,source:b.source,text:b.text,ocrCorrected:b.ocrCorrected===true,...(typeof b.ocrKept==='string'?{ocrKept:b.ocrKept}:{}),...(typeof b.ocrDoubt==='string'?{ocrDoubt:b.ocrDoubt}:{}),...(Number.isInteger(b.ocrRereads)&&b.ocrRereads>0?{ocrRereads:b.ocrRereads}:{}),...(b.kind!==undefined?{kind:b.kind}:{}),...(b.bold!==undefined?{bold:b.bold}:{})});
  return fields;
 }
 export async function pdfLayoutRoute(request,env,path,reader){
@@ -310,7 +326,7 @@ export async function pdfLayoutRoute(request,env,path,reader){
    // Groups ranges of one uploaded file into a book and names the stored original, so the Worker hashes the bytes
    // itself instead of trusting the browser's value.
    const sha256=await sha256Hex(file);
-   let result=await service(env,'extract',null,{file,pages:String(form.get('pages')||'')});
+   let result=await service(env,'extract',null,{file,pages:String(form.get('pages')||''),quality:sheetQuality(form.get('mode'))});
    const document=validateLayoutDocument(result.document),id=crypto.randomUUID();
    if(!document.pages.some(p=>p.blocks.length))throw new Error('Không tìm thấy block tiếng Trung cần dịch trong các trang đã chọn.');
    const original=decodeBytes(result.originalPdfBase64);result=null;
@@ -323,17 +339,17 @@ export async function pdfLayoutRoute(request,env,path,reader){
    return keepExtraction(env,reader,id,document,original,{filename:file.name,also:[sourceKey(reader.id,sha256)]});
   });
  });
- if(path===base+'/refresh'&&request.method==='POST')return withLeases(env,reader,()=>readWithin(request,path,body=>body.json()),async({assetId,forceClone})=>{
+ if(path===base+'/refresh'&&request.method==='POST')return withLeases(env,reader,()=>readWithin(request,path,body=>body.json()),async({assetId,forceClone,mode})=>{
   const prior=await storedDocument(env,reader,assetId);if(!prior)return reply({error:'Không tìm thấy PDF trong tài khoản.'},404);
   if(prior.extractionVersion>=2&&!forceClone)return reply({assetId,document:prior,originalUrl:`${base}/assets/${assetId}/original`});
   const original=await env.FILES.get(assetKey(reader,assetId,'original.pdf'));if(!original)return reply({error:'Không còn PDF gốc để cập nhật bố cục.'},410);
   // Only what the new manifest takes from the old one is kept while the service works; the stored PDF goes to the
-  // service as a stream.
-  const priorPages=prior.pages.map(page=>page.number),{totalPages,sourceSha256}=prior,filename=original.customMetadata?.filename||'nguyen-tac.pdf';
+  // service as a stream. Its sheets are as fine as the stored ones, unless the request names a mode.
+  const priorPages=prior.pages.map(page=>page.number),{totalPages,sourceSha256}=prior,filename=original.customMetadata?.filename||'nguyen-tac.pdf',quality=isMode(mode)?sheetQuality(mode):prior.sheetQuality;
   return counted(env,extractionCap(env,reader),async()=>{
    // All pages or none (allPages): the service gives the job its whole time limit instead of stopping early with the
    // pages done so far, which could not replace the stored range.
-   let result;try{result=await service(env,'extract',null,{file:{stream:()=>original.body},pages:`1-${priorPages.length}`,allPages:true});}
+   let result;try{result=await service(env,'extract',null,{file:{stream:()=>original.body},pages:`1-${priorPages.length}`,allPages:true,quality});}
    catch(error){throw HEAVY_CODES.has(error?.code)?refreshTooHeavy(priorPages,error.code):error;}
    if(result.document?.pages?.length<priorPages.length)throw refreshTooHeavy(priorPages,'pdf_too_large');
    if(result.document?.pages?.length!==priorPages.length)throw new Error('Không khớp số trang khi cập nhật bố cục.');
@@ -345,22 +361,35 @@ export async function pdfLayoutRoute(request,env,path,reader){
   });
  });
  if(path===base+'/ocr-blocks'&&request.method==='POST'){
-  const body=await request.json();let document=await storedDocument(env,reader,body.assetId);if(!document)return reply({error:'Không tìm thấy PDF trong tài khoản.'},404);
+  // mode: the session's "Cách dịch" (none or an unknown one is economy). reread: its second, more careful look at blocks
+  // kept with their machine text or read doubtfully, which a mode without one refuses.
+  const body=await request.json(),profile=modeProfile(body.mode),reread=body.reread===true;
+  if(reread&&!profile.reread)throw new UserError('Cách dịch này không đọc lại các đoạn chữ trong ảnh. Hãy tải lại trang rồi thử lại.',400,'bad_mode');
+  let document=await storedDocument(env,reader,body.assetId);if(!document)return reply({error:'Không tìm thấy PDF trong tài khoản.'},404);
   const apiKey=String(body.apiKey||'').trim();if(apiKey.length<20||apiKey.length>500||/[\r\n\0]/u.test(apiKey)||!isStudyModel(body.model))throw new Error('Khóa hoặc model Gemini OCR không hợp lệ.');
   // During the Gemini call only the blocks and sheets it reads are held, not the whole manifest; the manifest is read
   // again for the update, which then also keeps a reading another tab stored meanwhile.
-  const {blocks,sheets}=ocrSelection(document,body.blockIds);document=null;
-  const result=await recognizePdfBlocks({GEMINI_API_KEY:apiKey,GEMINI_MODEL:body.model,GEMINI_THINKING:'minimal',GEMINI_MODEL_RECOVERY:true,GEMINI_PREFERRED_MODEL:env.GEMINI_MODEL||body.model},blocks,sheets);
+  const {blocks,sheets}=ocrSelection(document,body.blockIds,reread?profile.ocrBatch.blocks:undefined);document=null;
+  // rereadIds: the blocks the browser chose to read again; the others of their sheets come along (a sheet is read whole)
+  // and neither count a re-read nor are named in the warnings. Without it (an older page) every block named counts.
+  const chosen=reread&&body.rereadIds!==undefined?rereadSelection(body.rereadIds,body.blockIds):null;
+  // The mode sets how much Gemini reasons; one that reads doubtful blocks again names them in the warnings only after that.
+  const result=await recognizePdfBlocks({GEMINI_API_KEY:apiKey,GEMINI_MODEL:body.model,GEMINI_THINKING:reread?profile.reread.thinking:profile.ocrThinking,GEMINI_MODEL_RECOVERY:true,GEMINI_PREFERRED_MODEL:env.GEMINI_MODEL||body.model},blocks,sheets,{noteDoubts:reread||!profile.reread?.doubt,noted:chosen});
   const key=assetKey(reader,body.assetId,'manifest.json');document=await storedDocument(env,reader,body.assetId);
   // Removed meanwhile (the session or the account was deleted): the tokens Gemini billed are still reported.
   if(!document)return await keepWritten(env,reader.id,[],{usage:result.usage})||reply({error:'Không tìm thấy PDF trong tài khoản.',usage:result.usage},404);
-  // slim: only what changed (the browser applies it to its own copy) instead of the whole manifest with its images.
+  // slim: only what changed (the browser applies it to its own copy) instead of the whole manifest with its images; a
+  // call stopped part-way (result.stop) answers slim whatever was asked, with only the blocks it decided.
   // Both answers are made before storing, so nothing but the bytes is held while storage writes them.
-  applyOcrReadings(document,result);let bytes=manifestBytes(document);
-  const slim=body.slim===true?{blocks:ocrBlockFields(document,body.blockIds),ocrCorrectedVersion:document.ocrCorrectedVersion,ocrWarnings:document.ocrWarnings}:null;document=null;
+  applyOcrReadings(document,result,{reread,chosen});let bytes=manifestBytes(document);
+  const slim=body.slim===true||result.stop?{blocks:ocrBlockFields(document,result.stop?result.blocks.map(b=>b.id):body.blockIds),ocrCorrectedVersion:document.ocrCorrectedVersion,ocrWarnings:document.ocrWarnings}:null;document=null;
   await putManifest(env,key,bytes);if(slim)bytes=null;
   const deleted=await keepWritten(env,reader.id,[key],{usage:result.usage});if(deleted)return deleted;
   const answer={usage:result.usage,warnings:result.warnings,model:result.model};
+  // Stopped part-way (a quota, Gemini overloaded…): the answer is that error as every route gives it, carrying the blocks
+  // read before it and stored, what was spent and the IDs still to read (pending); the browser keeps those blocks, so a
+  // try again (by hand, or a whole-book run's own) asks only for the rest.
+  if(result.stop){const failed=errorResponse(result.stop,{request,path});return Response.json({...await failed.json(),...slim,...answer,pending:result.pending},{status:failed.status,headers:failed.headers});}
   return slim?reply({...slim,...answer}):replyWith(answer,'document',bytes);
  }
  if(path===base+'/render'&&request.method==='POST')return withLeases(env,reader,()=>readWithin(request,path,body=>body.json()),async({assetId,historyId})=>{
@@ -377,6 +406,11 @@ export async function pdfLayoutRoute(request,env,path,reader){
    const title=String(row.title||'Bản dịch Hoa Trí');let result;
    try{result=await service(env,'render',null,{stream:jsonStream({translations,title},'document',stored.body)});}
    catch(error){if(error?.code==='pdf_overflow')return reply({error:error.message,code:error.code,blocks:error.blocks||[]},422);throw error;}
+   // A service on other layout code than this Worker (its image not rebuilt yet after a deploy, or rolled back alone)
+   // draws formulas by rules these pages were not checked with, often as raw TeX: its PDF is not kept and the day's
+   // export is given back. An image older than this check names no layout and is refused too.
+   const expected=expectedLayout(env);
+   if(expected&&result.layoutVersion!==expected){logEvent('pdf_service_outdated',{expected,drawn:typeof result.layoutVersion==='string'?result.layoutVersion.slice(0,64):null});return refused(reply({error:SERVICE_OUTDATED,code:'pdf_service_outdated'},503));}
    const pdf=decodeBytes(result.pdfBase64),report=result.report;result=null;if(new TextDecoder().decode(pdf.subarray(0,5))!=='%PDF-')throw new Error('Engine không trả PDF hợp lệ.');
    // The export took seconds to minutes, and another tab or device may have saved this session meanwhile. The PDF is kept
    // only while the session, as stored now, still holds what it was made from (madeFrom) in the same chapter; a save of

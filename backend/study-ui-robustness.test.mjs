@@ -4,6 +4,7 @@ import {readFile} from 'node:fs/promises';
 import {createRequire} from 'node:module';
 import {fileURLToPath} from 'node:url';
 import {extname,join,normalize} from 'node:path';
+import {MODES,modeLabel,modeProfile} from '../frontend/translation-modes.js';
 
 // Xưởng dịch in Microsoft Edge, for what a student does to a session after it started: changing Cách dịch or Lĩnh vực,
 // a key Gemini refuses or not, saves the server refuses, PDFs that cannot be opened, the phone layout of books, the
@@ -384,25 +385,30 @@ test('The key help gives Google\'s 18+ rule and the free-tier data note with the
  }finally{await context.close();}
 });
 
-test('"Cách dịch" is left out of a kept-layout session when it changes nothing there, and shown where each mode has its own model',{skip,timeout:60000},async()=>{
- const api=config=>(path,method)=>{
-  if(path==='/api/my/study/config')return config;
+// Every mode now changes a kept-layout run too (thinking, call sizes, OCR sheets, readings read again), so the field is
+// shown there and in "Dịch cả quyển" whatever models the server gives the modes (it was hidden when they shared one).
+test('"Cách dịch" is shown in every kind of run (text, a kept-layout session, Dịch cả quyển), with its four modes',{skip,timeout:90000},async()=>{
+ const {PDFDocument}=require('@cantoo/pdf-lib'),pdf=await PDFDocument.create();pdf.addPage([400,560]);const bytes=Buffer.from(await pdf.save());
+ const {context,page,errors,requests}=await openStudy({api:(path,method)=>{
   if(path==='/api/my/study/history'&&method==='GET')return [LAYOUT_ITEM,textItem()];
   if(path===`/api/my/study/history/${LAYOUT_ITEM.id}`)return {...LAYOUT_ITEM,state:{source:'第一段的内容。',parts:['第一段的内容。'],translationParts:['Nội dung đoạn một.'],done:1,context:'',glossary:{},manualGlossary:{},pdfLayout:{assetId:ASSET}}};
   if(path===`/api/my/study/history/${TEXT_ID}`)return {...textItem(),state:textState()};
   if(path===`/api/my/study/pdf-layout/assets/${ASSET}/manifest`)return MANIFEST;
   if(path==='/api/my/study/pdf-layout/font')return {css:''};
- };
- const shown=page=>page.evaluate(()=>!document.querySelector('#mode-field').hidden&&getComputedStyle(document.querySelector('#mode-field')).display!=='none');
- for(const [config,layoutShown] of [[SAME_MODEL,false],[{economy:'gemini-a',balanced:'gemini-b',quality:'gemini-c',pdf:'gemini-a'},true],[{economy:'gemini-a',balanced:'gemini-b',quality:'gemini-c',pdf:'gemini-pdf'},false]]){
-  const {context,page,errors}=await openStudy({api:api(config)});
-  try{
-   await historyLoaded(page);assert.equal(await shown(page),true,'text: always');
-   await openHistoryItem(page,LAYOUT_ITEM.id);await page.waitForFunction(()=>!document.querySelector('#translate').disabled&&document.querySelector('#part-count').textContent==='1 đoạn');
-   assert.equal(await shown(page),layoutShown,JSON.stringify(config));
-   await openHistoryItem(page,TEXT_ID);await waitProgress(page,RESTORED);assert.equal(await shown(page),true);
-   assert.deepEqual(errors,[]);
-  }finally{await context.close();}
- }
+ }});
+ const shown=()=>page.evaluate(()=>{const field=document.querySelector('#mode-field'),hint=document.querySelector('#mode-hint');return !field.hidden&&getComputedStyle(field).display!=='none'&&getComputedStyle(hint).display!=='none'&&hint.getBoundingClientRect().height>0;});
+ try{
+  await historyLoaded(page);assert.equal(await shown(),true,'text');
+  assert.deepEqual(await page.$$eval('#mode option',options=>options.map(option=>[option.value,option.textContent])),MODES.map(id=>[id,modeLabel(id)]));
+  await openHistoryItem(page,LAYOUT_ITEM.id);await page.waitForFunction(()=>!document.querySelector('#translate').disabled&&document.querySelector('#part-count').textContent==='1 đoạn');
+  assert.equal(await shown(),true,'a kept-layout session');assert.equal(await page.textContent('#mode-hint'),modeProfile('economy').hint);
+  await openHistoryItem(page,TEXT_ID);await waitProgress(page,RESTORED);assert.equal(await shown(),true);
+  await page.waitForFunction(()=>document.querySelector('#pdf-layout-enabled').checked);
+  await page.setInputFiles('#source-file',{name:'sach.pdf',mimeType:'application/pdf',buffer:bytes});await page.waitForSelector('#book-mode:not([hidden])',{timeout:30000});
+  await page.click('#book-mode label:has(input[value="book"])');await page.waitForSelector('#whole-book:not([hidden])');
+  assert.equal(await shown(),true,'Dịch cả quyển');
+  // Nothing asks the server which models the modes use any more to decide it.
+  assert.equal(requests.includes('GET /api/my/study/config'),false);assert.deepEqual(errors,[]);
+ }finally{await context.close();}
 });
 });

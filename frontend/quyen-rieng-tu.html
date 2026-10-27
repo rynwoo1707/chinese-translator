@@ -87,6 +87,8 @@
      <li>Cookie <code>cat_hien_session</code> (HttpOnly, SameSite=Lax, hết hạn sau 30 ngày). Máy chủ chỉ lưu mã băm SHA-256 của cookie này.</li>
      <li>Khi đăng nhập bằng Google có thêm hai cookie tạm <code>cat_hien_oauth_state</code> và <code>cat_hien_oauth_return</code>, tự hết hạn sau 10 phút.</li>
      <li>Cookie <code>cat_hien_device</code> (HttpOnly, SameSite=Strict, chỉ gửi tới <code>/api/auth/</code>, hết hạn sau 1 năm) được đặt khi bạn tạo tài khoản, đăng nhập hoặc đổi mật khẩu: một mã ngẫu nhiên kèm chữ ký của máy chủ, không chứa email hay mật khẩu. Nhờ nó, người khác nhập sai mật khẩu tài khoản của bạn ở nơi khác không làm trình duyệt quen của bạn bị chặn đăng nhập.</li>
+     <li>Chỉ với người quản trị Hoa Trí, không đặt cho học sinh: cookie <code>cat_hien_admin</code> (HttpOnly, SameSite=Strict, chỉ gửi tới <code>/api/</code>) giữ phiên đăng nhập trang quản trị. Đây là cookie phiên: trình duyệt xóa nó khi đóng lại (trừ khi trình duyệt được đặt mở lại các trang của lần trước), và máy chủ kết thúc phiên sau tối đa 12 giờ, hoặc sớm hơn nếu 2 giờ không dùng. Máy chủ chỉ lưu mã băm SHA-256 của cookie này.</li>
+     <li>Cũng chỉ với người quản trị: cookie <code>cat_hien_admin_device</code> (HttpOnly, SameSite=Strict, chỉ gửi tới <code>/api/admin/</code>, hết hạn sau 1 năm) được đặt khi người quản trị đăng nhập, tạo tài khoản quản trị, đổi hoặc đặt lại mật khẩu: một mã ngẫu nhiên kèm chữ ký của máy chủ, không chứa tên đăng nhập hay mật khẩu. Nhờ nó, người khác nhập sai mật khẩu quản trị ở nơi khác không làm trình duyệt quen của người quản trị bị chặn đăng nhập.</li>
     </ul>
     <h3>Tài liệu và bản dịch</h3>
     <ul>

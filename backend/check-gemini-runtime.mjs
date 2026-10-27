@@ -1,3 +1,5 @@
+// Checks the running server's Gemini settings from this machine. It reads ADMIN_TOKEN from .dev.vars and sends it as a
+// Bearer token, the credential of command-line tools; people sign in to /admin with an admin account instead.
 import {readFile} from 'node:fs/promises';
 import {translatePdfBlocks} from './pdf-block-translation.js';
 const text=await readFile(new URL('../.dev.vars',import.meta.url),'utf8');

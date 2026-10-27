@@ -9,6 +9,7 @@ import {termMatcher,highlightTerms,bindTermPopover} from '../frontend/reader-ter
 import {footerHtml} from '../frontend/site-footer.js';
 import {isSample,sampleBadge,sampleCardNote,sampleReaderNotice,SAMPLE_LABEL} from '../frontend/library-samples.js';
 import {bilingualSource} from '../frontend/bilingual-reader.js';
+import {translationContentHtml,readingStyles} from '../frontend/study-layout-view.js';
 
 // The library and reader in a real browser engine with the real stylesheets: a closed glossary popover is really gone,
 // library cards can be opened on a phone, and a PDF part is drawn as pages there. Pages are served from memory and the
@@ -167,6 +168,57 @@ test('Reader at 390 px in the real app: footnote notes stay on screen, the term 
   await page.goBack();await page.waitForFunction(()=>document.querySelector('.reader h1')?.textContent==='Thế gia');
   assert.equal(reads['book-su-ky'],2,'Back loads the earlier book once');
   assert.deepEqual(await csp(),[]);assert.deepEqual(errors,[]);
+ }finally{await context.close();}
+});
+
+// Formulas wider than a phone's reading column, as textbooks of every subject print them: a derivation, a ruled table and
+// a matrix inside a sentence. Each scrolls sideways inside its own box (style.css, study-layout-view.js readingStyles),
+// so the page never does and nothing is cut off, while math-text.js leaves them unbounded for the PDF fitting.
+const DERIVATION=String.raw`\[\begin{aligned} S_n &= a_1 + a_2 + a_3 + \cdots + a_{n-1} + a_n \\ &= a_1 + (a_1 + d) + (a_1 + 2d) + \cdots + [a_1 + (n-2)d] + [a_1 + (n-1)d] \end{aligned}\]`;
+const TABLE=String.raw`\[\begin{array}{|c|c|c|c|c|c|c|c|c|c|c|c|}\hline X & 0 & 1 & 2 & 3 & 4 & 5 & 6 & 7 & 8 & 9 & 10 \\ \hline P & \frac{1}{1024} & \frac{10}{1024} & \frac{45}{1024} & \frac{120}{1024} & \frac{210}{1024} & \frac{252}{1024} & \frac{210}{1024} & \frac{120}{1024} & \frac{45}{1024} & \frac{10}{1024} & \frac{1}{1024} \\ \hline \end{array}\]`;
+const MATRIX=String.raw`Ma trận trong câu: \(A=\begin{pmatrix} 21 & -13 & 35 & 40 & 57 & -76 & 11 & 13 & 82 & 97 \\ 14 & 45 & -29 & 63 & 70 & 98 & 12 & 14 & 61 & 33 \end{pmatrix}\) là ma trận cỡ 2×10.`;
+const WIDE=`Tổng n số hạng đầu của cấp số cộng được tính như sau:\n${DERIVATION}\nBảng phân phối: ${TABLE}\n${MATRIX}`;
+// Each formula box of a view: scrolls sideways when wider than its column, its end can be scrolled to, nothing cut above or
+// below, and the box itself inside the card holding it and the screen.
+const formulaBoxes=(selector,card)=>[...document.querySelectorAll(selector)].map(box=>{
+ const style=getComputedStyle(box),env=box.classList.contains('math-env')?box:box.querySelector('.math-env'),view=box.getBoundingClientRect(),holder=box.closest(card).getBoundingClientRect();
+ box.scrollLeft=box.scrollWidth;const end=env.getBoundingClientRect().right<=box.getBoundingClientRect().right+1;box.scrollLeft=0;
+ return {kind:env.className.split(' ').pop(),overflowX:style.overflowX,wide:box.scrollWidth>box.clientWidth+1,end,cut:box.scrollHeight>box.clientHeight+1,inside:view.left>=holder.left-.5&&view.right<=Math.min(holder.right,document.documentElement.clientWidth)+.5};
+});
+test('Wide formulas at 360 px in the real reader: a derivation, a ruled table and a matrix scroll in their own box, never the page; the table\'s rules meet',{skip,timeout:60000},async()=>{
+ const api=path=>path==='/api/library'?[200,[{id:'book-toan',title:'Toán 11',genre:'Toán học · STEM',chapters:1,visibility:'public'}]]:path==='/api/read/book-toan'?[200,[{id:'t1',title:'Cấp số cộng',mime:'text/plain',content:WIDE}]]:undefined;
+ const {context,page,errors,csp}=await openApp('/#reader/book-toan/1',{width:360,api});
+ try{
+  await page.waitForSelector('.reader .prose .math-env');
+  assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth-document.documentElement.clientWidth),0,'no sideways scroll');
+  const boxes=await page.evaluate(`(${formulaBoxes})('.reader .prose .math-display,.reader .prose .math-inline>.math-env','.reader')`);
+  assert.deepEqual(boxes.map(box=>box.kind),['math-env-aligned','math-env-array','math-env-pmatrix']);
+  for(const box of boxes){assert.equal(box.overflowX,'auto',box.kind);assert.ok(box.wide,`${box.kind} is wider than the column`);assert.ok(box.end,`${box.kind}: its end can be scrolled to`);assert.equal(box.cut,false,`${box.kind}: nothing cut above or below`);assert.ok(box.inside,`${box.kind} inside the column`);}
+  // The table's column rules run from its first row to its last and its \hline rules across every column.
+  const rules=await page.evaluate(()=>{
+   const grid=document.querySelector('.math-env-array>.math-grid'),box=grid.getBoundingClientRect(),style=getComputedStyle(grid),top=box.top+parseFloat(style.paddingTop),bottom=box.bottom-parseFloat(style.paddingBottom),left=box.left+parseFloat(style.paddingLeft),right=box.right-parseFloat(style.paddingRight);
+   return {vertical:[...grid.querySelectorAll('.math-vrule')].map(rule=>{const r=rule.getBoundingClientRect();return [r.top-top,bottom-r.bottom,r.width];}),across:[...grid.querySelectorAll('.math-hrule')].map(rule=>{const r=rule.getBoundingClientRect();return [r.left-left,right-r.right,r.height];})};
+  });
+  assert.equal(rules.vertical.length,13);assert.equal(rules.across.length,3);
+  for(const [above,below,width] of rules.vertical)assert.ok(Math.abs(above)<.5&&Math.abs(below)<.5&&width>0,`a column rule ${above} px from the top, ${below} px from the bottom`);
+  for(const [before,after,height] of rules.across)assert.ok(Math.abs(before)<.5&&Math.abs(after)<.5&&height>0,`an \\hline ${before} px from the left, ${after} px from the right`);
+  // The matrix's drawn parentheses are in the text a reader selects and copies, taking no room.
+  assert.deepEqual(await page.evaluate(()=>{const env=document.querySelector('.math-env-pmatrix'),range=document.createRange();range.selectNodeContents(env);return {fences:range.toString().replace(/[^()]/gu,''),widths:[...env.querySelectorAll('.math-copy')].map(copy=>copy.getBoundingClientRect().width)};}),{fences:'()',widths:[0,0]});
+  assert.deepEqual(await csp(),[]);assert.deepEqual(errors,[]);
+ }finally{await context.close();}
+});
+test('Wide formulas at 360 px in Xưởng dịch\'s translated part: each scrolls in its own box instead of being cut off by the part\'s card',{skip},async()=>{
+ // The part's card (study.css .translation-part) hides what overflows it. The formulas stand inside a paragraph, alone on
+ // their lines (pre.translated-formula), in a sentence, and as a bare system in a paragraph (OCR text).
+ const system=String.raw`Và hệ a_n = \begin{cases} S_1 + S_2 + S_3 + S_4 + S_5 + S_6 + S_7 + S_8 + S_9, & n = 1, \\ S_n - S_{n-1} + S_{n-2} - S_{n-3} + S_{n-4}, & n \geq 2. \end{cases}`;
+ const text=`Tổng n số hạng đầu của cấp số cộng được tính như sau: ${DERIVATION}\n\n${TABLE}\n\n${MATRIX}\n\n${system}`;
+ const {context,page,errors}=await open(360,`<style>${read('study.css')}${readingStyles}</style><main><section class="translation-parts"><details class="translation-part done" open><summary><span>Phần 01</span><small>Hoàn tất</small></summary><div class="translation-pair"><div class="translation-part-text"><article class="translation-document">${translationContentHtml(text)}</article></div></div></details></section></main>`);
+ try{
+  assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth-document.documentElement.clientWidth),0,'no sideways scroll');
+  const boxes=await page.evaluate(`(${formulaBoxes})('.translation-document .math-display,.translation-document .math-inline>.math-env,.translation-document p>.math-env','.translation-part')`);
+  assert.deepEqual(boxes.map(box=>box.kind),['math-env-aligned','math-env-array','math-env-pmatrix','math-env-cases']);
+  for(const box of boxes){assert.equal(box.overflowX,'auto',box.kind);assert.ok(box.wide,`${box.kind} is wider than the part`);assert.ok(box.end,`${box.kind}: its end can be scrolled to`);assert.equal(box.cut,false,`${box.kind}: nothing cut above or below`);assert.ok(box.inside,`${box.kind} inside the part's card`);}
+  assert.deepEqual(errors,[]);
  }finally{await context.close();}
 });
 
