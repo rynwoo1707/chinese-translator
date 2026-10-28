@@ -124,13 +124,21 @@ test('Privacy page: what the PDF service receives and the daily counts kept per 
  assert.match(privacy,/Hoa Trí đếm số tài khoản được tạo từ mỗi địa chỉ IP trong ngày/u);
 });
 
-test('Site footer: legal links, source code, dictionary attribution and the AGPL notice',()=>{
+test('Site footer: one line of legal links, contact, source code and licences; the attribution lives in terms §12 and the Tra chữ Hán panel',()=>{
  const html=footerHtml();
- for(const href of ['/dieu-khoan','/quyen-rieng-tu','/quyen-rieng-tu#lien-he','/dieu-khoan#giay-phep',SOURCE_URL,'https://creativecommons.org/licenses/by-sa/4.0/deed.vi'])assert.ok(html.includes(`href="${href}"`),href);
- for(const words of ['CC-CEDICT (MDBG)','CVDICT (Phong Phan)','CC BY-SA 4.0','hanviet-pinyin-wordlist (MIT)','Unicode, Inc.','PyMuPDF','GNU AGPL-3.0','services/pdf-layout'])assert.ok(html.includes(words),words);
+ for(const href of ['/dieu-khoan','/quyen-rieng-tu','/quyen-rieng-tu#lien-he','/dieu-khoan#giay-phep',SOURCE_URL])assert.ok(html.includes(`href="${href}"`),href);
  assert.match(SOURCE_URL,/^https:\/\/github\.com\/[\w.-]+\/[\w.-]+\/tree\/[\w./-]+[\w-]$/u,'the deployed branch or tag, not the default branch');
- assert.equal(SERVICE_SOURCE_URL,`${SOURCE_URL}/services/pdf-layout`);assert.ok(html.includes(`href="${SERVICE_SOURCE_URL}"`),'the service link');
+ assert.equal(SERVICE_SOURCE_URL,`${SOURCE_URL}/services/pdf-layout`);
  assert.doesNotMatch(html,/<script|\son[a-z]+=/u);
+ // A page read without JavaScript shows the same footer.
+ for(const page of ['frontend/404.html','frontend/dieu-khoan.html','frontend/quyen-rieng-tu.html'])assert.ok(read(page).includes(`<footer class="site-footer" data-site-footer>${html}</footer>`),page);
+ // "Giấy phép" opens what CC BY-SA 4.0 asks for (§3(a) allows a link to it): who made the data, its licence and that it
+ // was changed, with the source of the AGPL service; the Tra chữ Hán panel credits the data where it shows.
+ const licences=/<section id="giay-phep"[\s\S]*?<\/section>/u.exec(pages.terms)?.[0]||'';
+ for(const words of ['CC-CEDICT','MDBG','CVDICT','Phong Phan','hanviet-pinyin-wordlist','Unihan','Unicode, Inc.','PyMuPDF','GNU AGPL-3.0','đã chuyển đổi'])assert.ok(licences.includes(words),words);
+ for(const href of ['https://creativecommons.org/licenses/by-sa/4.0/deed.vi',SOURCE_URL,SERVICE_SOURCE_URL])assert.ok(licences.includes(`href="${href}"`),href);
+ const panel=read('frontend/hanzi-lookup.js');
+ for(const words of ['CC-CEDICT (MDBG)','CVDICT (Phong Phan)','CC BY-SA 4.0','hanviet-pinyin-wordlist','Unicode, Inc.'])assert.ok(panel.includes(words),words);
 });
 
 test('Homepage head and robots.txt',()=>{
