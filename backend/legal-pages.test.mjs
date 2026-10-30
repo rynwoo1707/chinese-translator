@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {readFileSync,existsSync,readdirSync} from 'node:fs';
+import vm from 'node:vm';
 import {footerHtml,SOURCE_URL,SERVICE_SOURCE_URL} from '../frontend/site-footer.js';
 import {placeholderFiles,PLACEHOLDER} from './deploy.mjs';
 import {TERMS_VERSION} from './reader-auth.js';
@@ -139,6 +140,22 @@ test('Site footer: one line of legal links, contact, source code and licences; t
  for(const href of ['https://creativecommons.org/licenses/by-sa/4.0/deed.vi',SOURCE_URL,SERVICE_SOURCE_URL])assert.ok(licences.includes(`href="${href}"`),href);
  const panel=read('frontend/hanzi-lookup.js');
  for(const words of ['CC-CEDICT (MDBG)','CVDICT (Phong Phan)','CC BY-SA 4.0','hanviet-pinyin-wordlist','Unicode, Inc.'])assert.ok(panel.includes(words),words);
+});
+
+// The footer's music switch (music.js), run with a stand-in button: its icon is drawn and hidden from screen readers, so
+// its words alone name it (a font glyph such as ♫ or Ⅱ is missing from the site font and is read aloud).
+test('Music switch: words beside a hidden drawn icon, no glyph; pressing keeps the id and flips aria-pressed',()=>{
+ const button={setAttribute(name,value){this[name]=value;}};
+ const context=vm.createContext({localStorage:{getItem:()=>null,setItem(){}},document:{addEventListener(){},querySelector:selector=>selector==='#music-toggle'?button:null},Audio:class{addEventListener(){}play(){return Promise.resolve();}pause(){}}});
+ vm.runInContext(read('frontend/music.js').replace(/^export /gmu,''),context);
+ const label=words=>new RegExp(`^<svg [^>]*aria-hidden="true"[^>]*>(?:<path [^>]*/>)+</svg><span>${words}</span>$`,'u');
+ const markup=context.musicMarkup(),inner=/^<div class="background-music" role="group" aria-label="Nhạc nền"><button id="music-toggle" type="button" aria-pressed="false">(.*)<\/button><\/div>$/u.exec(markup)?.[1];
+ assert.match(inner||'',label('Bật nhạc nền'),markup);
+ context.bindMusic(()=>{});button.onclick();
+ assert.equal(button['aria-pressed'],'true');assert.match(button.innerHTML,label('Dừng nhạc'));
+ const pressed=button.innerHTML;button.onclick();
+ assert.equal(button['aria-pressed'],'false');assert.equal(button.innerHTML,inner);
+ for(const html of [markup,pressed])assert.doesNotMatch(html.replace(/<[^>]+>/gu,''),/[\p{So}\p{Nl}]/u,html);
 });
 
 test('Homepage head and robots.txt',()=>{
