@@ -243,9 +243,9 @@ class InlineRegions(unittest.TestCase):
         self.assertAlmostEqual(inline["height"], box.height, delta=.01)
         self.assertTrue(box.y0 <= inline["axis"] <= box.y1, f"{name}: axis {inline['axis']} inside the box")
 
-    def test_version(self):
-        self.assertEqual(self.page["extractionVersion"], 3)
-        self.assertEqual(self.document["extractionVersion"], 3)
+    def test_version_is_the_coverage_stamp_on_the_document_and_its_page(self):
+        self.assertEqual(self.page["extractionVersion"], 4)
+        self.assertEqual(self.document["extractionVersion"], 4)
         self.assertTrue(self.page["ocr"])
 
     def test_stacked_fraction_is_one_complete_box(self):

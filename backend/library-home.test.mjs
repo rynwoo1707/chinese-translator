@@ -61,9 +61,9 @@ test('Home: an empty library points to the workspace; a failed library is an err
  // Signed in, a personal list that failed is kept apart from the ones that loaded.
  const partly=app({answers:url=>url==='/api/me'?[200,{authenticated:true,user:{id:'u',name:'Lan'}}]:url==='/api/my/library'?[503,{error:'Bận.'}]:url==='/api/my/requests'?[200,[{id:'r'}]]:null});await settle();
  assert.equal(partly.run('state.errors.myLibrary.status'),503);assert.equal(partly.run('state.myRequests.length'),1);assert.equal(partly.run('state.reader.authenticated'),true);
- assert.deepEqual(partly.calls,['/api/library','/api/me','/api/my/library','/api/my/requests'],'the personal lists follow a confirmed session');
+ assert.deepEqual(partly.calls,['/api/library','/api/me','/api/my/library','/api/my/requests','/api/my/study/books'],'the personal lists (and the parts of the student\'s books, for "Bố cục cũ") follow a confirmed session');
  // A page that already knows the session asks for everything at once on the next refresh.
- partly.calls.length=0;partly.run('refresh()');assert.deepEqual(partly.calls,['/api/my/library','/api/my/requests','/api/library','/api/me']);
+ partly.calls.length=0;partly.run('refresh()');assert.deepEqual(partly.calls,['/api/my/library','/api/my/requests','/api/my/study/books','/api/library','/api/me']);
 });
 
 test('Deep links: #reader/<id>/<part> and /?read=<id>&phan=<n> open that part, keep it in the address and name it in the title',async()=>{

@@ -13,8 +13,9 @@ import {validGlossary} from './config.mjs';
 
 // Delimited math without Chinese in it must reach the translation unchanged (math with Chinese words is translated).
 const keptFormulas=(source,translation)=>{const kept=new Set(protectMathExpressions(translation).formulas.map(f=>f.formula));return protectMathExpressions(source).formulas.map(f=>f.formula).filter(f=>!/\p{Script=Han}/u.test(f)&&!kept.has(f)&&!translation.includes(f));};
-// Extractor notes worth a warning: Chinese outside every block stays Chinese on the exported page.
-const LEFT_CHINESE=/chữ Hán không thuộc đoạn nào/u;
+// Extractor notes worth a warning: Chinese outside every block stays Chinese on the exported page (an older manifest's
+// wording, then extract.py's count by cause, a tilted watermark and the page checks).
+const LEFT_CHINESE=/chữ Hán không thuộc đoạn nào|vẫn giữ nguyên chữ gốc trong bản xuất|hình mờ in chéo|bản quét nghiêng khoảng|chạy theo chiều dọc/u;
 
 // domain: the sample's subject; its built-in terms tell which of the book's terms stand on their own in a block.
 export function importTexts(document,texts,{slug,chunk,glossary={},domain='general'}={}){

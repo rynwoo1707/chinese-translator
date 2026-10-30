@@ -4,7 +4,8 @@ import {readFile} from 'node:fs/promises';
 import {createRequire} from 'node:module';
 import {fileURLToPath} from 'node:url';
 import {extname,join,normalize} from 'node:path';
-import {MODES,modeLabel,modeProfile} from '../frontend/translation-modes.js';
+import {MODES,modeLabel,modeProfile,LAYOUT_VERSION} from '../frontend/translation-modes.js';
+import {errorResponse} from './http.js';
 
 // Xưởng dịch in Microsoft Edge, for what a student does to a session after it started: changing Cách dịch or Lĩnh vực,
 // a key Gemini refuses or not, saves the server refuses, PDFs that cannot be opened, the phone layout of books, the
@@ -26,7 +27,7 @@ const PARTS=['第一段：学而时习之，不亦说乎。','第二段：有朋
 const TEXT_ID='5a1c2b3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d';
 const textItem=(over={})=>({id:TEXT_ID,title:'Luận ngữ',filename:'',domain:'history',mode:'economy',status:'translating',translated_parts:2,total_parts:3,library_story_id:null,library_chapter_id:null,created_at:'2026-10-20 07:00:00',updated_at:'2026-10-20 08:00:00',page_start:null,page_end:null,source_total_pages:null,source_sha256:null,revision:4,...over});
 const textState=(translationParts=[...DONE,''],done=2)=>({source:PARTS.join('\n\n'),parts:PARTS,translationParts,done,context:'',glossary:{},manualGlossary:{},previousSource:'',previousTranslation:''});
-const MANIFEST={version:1,extractionVersion:3,engine:'pymupdf',totalPages:1,pages:[{number:1,width:400,height:560,original:PNG,background:PNG,blocks:[{id:'p1-b1',text:'第一段的内容。',source:'第一段的内容。',box:[40,60,260,92],fontSize:12}],images:[],drawings:[],ocr:false,protectedRegions:[],extractionVersion:3}],warnings:[]};
+const MANIFEST={version:1,extractionVersion:LAYOUT_VERSION,engine:'pymupdf',totalPages:1,pages:[{number:1,width:400,height:560,original:PNG,background:PNG,blocks:[{id:'p1-b1',text:'第一段的内容。',source:'第一段的内容。',box:[40,60,260,92],fontSize:12}],images:[],drawings:[],ocr:false,protectedRegions:[],extractionVersion:LAYOUT_VERSION}],warnings:[]};
 const LAYOUT_ITEM={id:'5d7c1f7e-1111-4c2b-9d1e-2a2f0c9b7a10',title:'Bài thử giữ bố cục',filename:'bai-thu.pdf',domain:'general',mode:'economy',status:'complete',translated_parts:1,total_parts:1,library_story_id:null,library_chapter_id:null,updated_at:'2026-10-20 08:00:00',page_start:1,page_end:1,source_total_pages:1,revision:2};
 
 const defaults=(path,method)=>path==='/api/me'?USER:path==='/api/my/study/history'&&method==='GET'?[]:path==='/api/my/study/books'?[]:path==='/api/my/study/book-jobs'?{jobs:[]}:path==='/api/my/study/pdf-layout/config'?{configured:true}:path==='/api/my/study/config'?SAME_MODEL:path==='/api/my/study/library-match'?{match:null}:path==='/api/my/study/models'?{models:[{id:'gemini-test'}],requested:'gemini-test',selected:'gemini-test'}:undefined;
@@ -222,6 +223,35 @@ test('A save the server refuses says why and stops before Gemini: a full history
   assert.equal(revisions[0],3);assert.equal(revisions.at(-1),lost.item.revision-1,'the last save names the revision the retried one made');
   assert.deepEqual(retry.errors,[]);
  }finally{await retry.context.close();}
+});
+
+test('A database behind the code is named in the server\'s words, start.cmd on this machine: the save is sent once and nothing reaches Gemini',{skip,timeout:90000},async t=>{
+ // backend/http.js's own answer to a database without migration 0026, for a page on this machine (loopback).
+ t.mock.method(console,'error',()=>{});
+ const outdated=async(path,text)=>{const url=new URL(ORIGIN+path),response=errorResponse(new Error(text),{request:new Request(url),url,path});return {fakeStatus:response.status,json:await response.json()};};
+ const LOCAL=/^Cơ sở dữ liệu cục bộ chưa cập nhật: hãy tắt Hoa Trí rồi chạy start\.cmd \(hoặc npm run db:local rồi khởi động lại\)\. Mã [\w-]+\.$/u;
+ // 1. The history list: its card says it, with Thử lại.
+ const list=await openStudy({api:(path,method)=>path==='/api/my/study/history'&&method==='GET'?outdated(path,'D1_ERROR: no such column: engine at offset 65: SQLITE_ERROR'):undefined});
+ try{
+  await historyLoaded(list.page);const card=await list.page.textContent('#study-history-list .load-error');
+  assert.match(card,/^Chưa tải được lịch sử dịch\.Cơ sở dữ liệu cục bộ chưa cập nhật: hãy tắt Hoa Trí rồi chạy start\.cmd/u);assert.deepEqual(list.errors,[]);
+ }finally{await list.context.close();}
+ // 2. The first save of a run: refused once (no wait mends it), the run stops before Gemini, and nothing blames the network.
+ let posts=0,translations=0;
+ const save=await openStudy({api:(path,method)=>{
+  if(path==='/api/my/study/history'&&method==='POST'){posts++;return outdated(path,'D1_ERROR: table study_sessions has no column named engine: SQLITE_ERROR');}
+  if(path==='/api/my/study/translate'){translations++;return {translation:'x',context:'',glossary:{},usage:{},warnings:[]};}
+ }});
+ try{
+  await historyLoaded(save.page);await save.page.fill('#content-title','Thử lưu');await save.page.fill('#api-key',KEY);await save.page.fill('#source','子曰：学而时习之。');await save.page.click('#translate');
+  await waitProgress(save.page,/không gửi thêm yêu cầu tới Gemini/u);
+  assert.equal(posts,1);assert.equal(translations,0);
+  const said=await progress(save.page),refusal=said.replace(/^Đã dừng vì chưa lưu được tiến độ vào tài khoản, nên Hoa Trí không gửi thêm yêu cầu tới Gemini: /u,'');
+  assert.notEqual(refusal,said,said);assert.match(refusal,LOCAL);
+  const warning=await save.page.textContent('#save-warning');assert.match(warning,/^Chưa lưu được tiến độ vào tài khoản: Cơ sở dữ liệu cục bộ chưa cập nhật: hãy tắt Hoa Trí rồi chạy start\.cmd/u);
+  for(const text of [said,warning])assert.doesNotMatch(text,/[Kk]iểm tra mạng/u);
+  assert.deepEqual(save.errors,[]);
+ }finally{await save.context.close();}
 });
 
 test('A PDF with a password, or a file that is not a PDF, is explained in Vietnamese and leaves nothing picked; a good PDF then opens',{skip,timeout:90000},async()=>{

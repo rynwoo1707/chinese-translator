@@ -4,8 +4,11 @@ import {readFile} from 'node:fs/promises';
 import {createRequire} from 'node:module';
 import {fileURLToPath} from 'node:url';
 import {extname,join,normalize} from 'node:path';
+// A manifest the extractor of this code made carries its stamp (an older one is offered "Cập nhật bố cục").
+import {LAYOUT_VERSION,modeProfile} from '../frontend/translation-modes.js';
 import {overflowMessage,blockLabel} from '../services/pdf-layout/engine.mjs';
 import {serviceFailure} from './pdf-layout.js';
+import {translatePdfBlocks} from './pdf-block-translation.js';
 
 // "Giữ bố cục PDF" for a range picked by hand, in Microsoft Edge: Dừng while a scan is read, the slim OCR answer, blocks
 // Gemini will not translate (translate-blocks partial), a quota part-way, a busy or overloaded PDF service, scanned
@@ -26,7 +29,7 @@ const now=()=>new Date().toISOString();
 // A one-page manifest: count blocks, scanned (each block an image Gemini reads) or with a text layer.
 function manifest(count,{scanned=false}={}){
  const blocks=Array.from({length:count},(_,i)=>{const source=scanned?`（扫描）第${i+1}段`:`第${i+1}段：学而时习之，不亦说乎。`;return {id:`p1-b${i+1}`,text:source,source,box:[40,40+i*36,360,68+i*36],fontSize:12,...(scanned?{image:PNG}:{})};});
- return {version:1,extractionVersion:3,engine:'pymupdf',totalPages:1,pages:[{number:1,width:400,height:560,original:PNG,background:PNG,blocks,images:[],drawings:[],ocr:scanned,protectedRegions:[],extractionVersion:3}],warnings:[]};
+ return {version:1,extractionVersion:LAYOUT_VERSION,engine:'pymupdf',totalPages:1,pages:[{number:1,width:400,height:560,original:PNG,background:PNG,blocks,images:[],drawings:[],ocr:scanned,protectedRegions:[],extractionVersion:LAYOUT_VERSION}],warnings:[]};
 }
 // Ordinary text pages (not a cover), so the picked range starts at page 1 itself.
 const pdfBytes=async(count=1)=>{const pdf=await PDFDocument.create(),font=await pdf.embedFont(StandardFonts.Helvetica);for(let number=1;number<=count;number++){const page=pdf.addPage([400,560]);for(let line=0;line<20;line++)page.drawText(`Trang ${number}, dong ${line+1}: noi dung mau de kiem tra bo cuc`,{x:36,y:520-line*20,size:10,font});}return Buffer.from(await pdf.save());};
@@ -151,18 +154,19 @@ test('Blocks Gemini will not translate keep a stand-in (its draft, or the Chines
   assert.deepEqual(account.session.translationParts,[translated('p1-b1'),'Bản nháp đoạn hai, thiếu năm.',source(2),translated('p1-b4')],'what passed is kept; the failed blocks have their stand-ins');
   assert.equal(account.calls.render,1,'the part is complete and exported');
   const warnings=await page.textContent('#warnings');
-  assert.match(warnings,/Trang 1 · đoạn 2: Block p1-b2 thiếu số hoặc dẫn chứng: 2019\. Đã dùng bản dịch này của Gemini; hãy đối chiếu với nguyên tác và sửa trong “Chỉnh bản dịch từng đoạn”\./u);
+  assert.match(warnings,/Trang 1 · đoạn 2: thiếu số hoặc dẫn chứng: 2019\. Đã dùng bản dịch này của Gemini; hãy đối chiếu với nguyên tác và sửa trong “Chỉnh bản dịch từng đoạn”\./u);
   assert.match(warnings,/Trang 1 · đoạn 3: giữ nguyên chữ gốc\. Gemini không trả kết quả vì đoạn này trùng khớp nguyên văn với nội dung có bản quyền\. Bấm Bắt đầu dịch để thử dịch lại/u);
   assert.match(await progress(page),/^PDF tiếng Việt đã được lưu vào Thư viện riêng\. Cần xem lại: 1 đoạn giữ nguyên chữ gốc vì Gemini không dịch được, 1 đoạn dùng bản dịch còn thiếu số hoặc dẫn chứng/u);
   assert.equal(await page.inputValue('#api-key'),'');assert.equal(await page.textContent('#key-status'),'Đã nạp khóa Gemini cho phiên này.');
   assert.deepEqual(errors,[]);
  }finally{await context.close();}
- // Another tab opens the part from the history: the block still in Chinese is named again; Bắt đầu dịch sends only it,
- // and the part is exported anew.
+ // Another tab opens the part from the history: the block still in Chinese and the draft kept with its problem (saved
+ // with the session: pdfLayout.review) are named again; Bắt đầu dịch sends only the Chinese one, and the part is exported
+ // anew.
  const again=await openStudy(account.api);
  try{
   await again.page.click('#study-history > summary');await again.page.click(`[data-history-open="${SESSION}"]`);await waitProgress(again.page,/Bản dịch đã hoàn tất/u);await idle(again.page);
-  assert.equal(await again.page.textContent('#warnings'),'Trang 1 · đoạn 3: vẫn là chữ gốc vì Gemini chưa dịch được đoạn này. Bấm Bắt đầu dịch để thử dịch lại, hoặc dịch tay trong “Chỉnh bản dịch từng đoạn”.\n');
+  assert.equal(await again.page.textContent('#warnings'),'Trang 1 · đoạn 2: bản dịch có thể thiếu số hoặc dẫn chứng của nguyên tác; hãy đối chiếu và sửa trong “Chỉnh bản dịch từng đoạn”.\nTrang 1 · đoạn 3: vẫn là chữ gốc vì Gemini chưa dịch được đoạn này. Bấm Bắt đầu dịch để thử dịch lại, hoặc dịch tay trong “Chỉnh bản dịch từng đoạn”.\n');
   await again.page.fill('#api-key',KEY);await again.page.click('#translate');await waitProgress(again.page,/^PDF tiếng Việt đã được lưu vào Thư viện riêng/u);
   assert.deepEqual(account.translateBodies.at(-1).blocks.map(block=>block.id),['p1-b3']);assert.equal(account.session.translationParts[2],translated('p1-b3'));
   assert.equal(account.calls.render,2);assert.doesNotMatch(await again.page.textContent('#warnings'),/đoạn 3:/u);
@@ -224,6 +228,24 @@ test('A busy PDF service is waited out with a countdown before the student is to
  }finally{await context.close();}
 });
 
+test('The PDF service of the machine running Hoa Trí that does not answer is waited for briefly, then named with start.cmd; started meanwhile, the run goes on',{skip,timeout:120000},async()=>{
+ // backend/pdf-layout.js's answer for a loopback service that does not answer (Retry-After 1: the page's shortest wait, 5 s).
+ const OFF='Dịch vụ PDF trên máy này chưa chạy: hãy tắt Hoa Trí rồi khởi động lại bằng start.cmd (hoặc npm start). Nếu đã khởi động như vậy, xem các dòng [PDF] trong cửa sổ đó.';
+ const account=fakeAccount(manifest(2),{extract:call=>call<=5?{fakeStatus:503,json:{error:OFF,code:'pdf_local_off',retryAfter:1},headers:{'Retry-After':'1'}}:null});
+ const {context,page,errors}=await openStudy(account.api);
+ try{
+  // Never started (npm run dev): three waits, then the server's words; nothing blames the network.
+  await pickPdf(page);await page.click('#translate');await idle(page);
+  assert.equal(account.calls.extract,4);assert.equal(await progress(page),OFF);assert.equal(account.calls.translate,0);
+  const statuses=await page.evaluate(()=>window.__statuses);
+  assert.ok(statuses.some(line=>/^Dịch vụ PDF trên máy này chưa trả lời \(có thể còn đang khởi động\)\. Tự thử lại sau \d+ giây… Bấm Dừng để thôi chờ\.$/u.test(line)),statuses.join(' | '));
+  assert.ok(statuses.every(line=>!/[Kk]iểm tra mạng|Mất kết nối/u.test(line)),statuses.join(' | '));
+  // Still starting: it answers after one wait and the part is translated.
+  await page.click('#translate');assert.ok(await until(()=>account.calls.translate>0,60000),'translated once the service answers');await idle(page);
+  assert.equal(account.calls.extract,6);assert.deepEqual(errors,[]);
+ }finally{await context.close();}
+});
+
 // What the Worker answers when the PDF service finds translations longer than their boxes: the service's message
 // (services/pdf-layout/engine.mjs overflowMessage: each block named in a sentence as Xưởng dịch names it, "Trang N ·
 // đoạn k", and "Đoạn k" only as the editor's option to pick), mapped and checked by backend/pdf-layout.js
@@ -276,7 +298,7 @@ test('An export refused for translations longer than their boxes says so in the 
  }finally{await context.close();}
 });
 
-test('A scanned block Gemini could not read again keeps its machine text: named in the warnings and the Hanzi panel, never read again, and named again with the session',{skip,timeout:120000},async()=>{
+test('A scanned block Gemini could not read keeps its machine text after one more reading (Tiết kiệm too): named in the warnings and the Hanzi panel, never read again, and named again with the session',{skip,timeout:120000},async()=>{
  const NOTE=`Trang 1 · đoạn 2: ${OCR_REFUSED}. Đoạn này giữ chữ OCR máy, có thể sai; hãy đối chiếu với trang gốc.`,REFUSED='Gemini không trả kết quả vì đoạn này trùng khớp nguyên văn với nội dung có bản quyền.';
  // Gemini then also refuses to translate that block once: it keeps its Chinese until Bắt đầu dịch asks again.
  const account=fakeAccount(manifest(3,{scanned:true}),{ocrKept:{'p1-b2':'refused'},translate:(json,call)=>call===1?{blocks:json.blocks.filter(b=>b.id!=='p1-b2').map(b=>({id:b.id,translation:translated(b.id)})),failedBlocks:[{id:'p1-b2',code:'gemini_refused',message:REFUSED}],context:'',glossary:{},usage:{prompt:600,output:200,total:800,requests:1},warnings:[],model:'gemini-test'}:null});
@@ -285,9 +307,11 @@ test('A scanned block Gemini could not read again keeps its machine text: named 
   await pickPdf(page);await page.click('#translate');await waitProgress(page,/^PDF tiếng Việt đã được lưu vào Thư viện riêng/u);await idle(page);
   let warnings=await page.textContent('#warnings');assert.ok(warnings.includes(NOTE),warnings);assert.match(warnings,/Trang 1 · đoạn 2: giữ nguyên chữ gốc\./u);
   assert.equal(account.session.parts[1],'（扫描）第2段','the machine text is what is translated');
+  // The economy mode read that block once more, alone, before translating; it was refused again.
+  assert.equal(account.calls.ocr,2);assert.deepEqual([account.ocrBodies[1].reread,account.ocrBodies[1].rereadIds,account.ocrBodies[1].mode],[true,['p1-b2'],'economy']);
   // Bắt đầu dịch asks Gemini again only for the block still in Chinese: its OCR note stays, its image is not read again.
   await page.click('#translate');await waitProgress(page,/^PDF tiếng Việt đã được lưu vào Thư viện riêng/u);await idle(page);
-  assert.equal(account.calls.ocr,1);assert.deepEqual(account.translateBodies.at(-1).blocks.map(b=>b.id),['p1-b2']);
+  assert.equal(account.calls.ocr,2);assert.deepEqual(account.translateBodies.at(-1).blocks.map(b=>b.id),['p1-b2']);
   warnings=await page.textContent('#warnings');assert.ok(warnings.includes(NOTE),`the OCR note stays when the translation is asked for again: ${warnings}`);assert.doesNotMatch(warnings,/giữ nguyên chữ gốc/u);
   // The Hanzi panel of the original says the text is the machine's.
   await page.click('[data-source-block="p1-b2"]');await page.waitForSelector('#hanzi-panel:not([hidden])');
@@ -298,19 +322,20 @@ test('A scanned block Gemini could not read again keeps its machine text: named 
  const again=await openStudy(account.api);
  try{
   await again.page.click('#study-history > summary');await again.page.click(`[data-history-open="${SESSION}"]`);await waitProgress(again.page,/Bản dịch đã hoàn tất/u);await idle(again.page);
-  assert.ok((await again.page.textContent('#warnings')).includes(NOTE));assert.equal(account.calls.ocr,1);assert.deepEqual(again.errors,[]);
+  assert.ok((await again.page.textContent('#warnings')).includes(NOTE));assert.equal(account.calls.ocr,2);assert.deepEqual(again.errors,[]);
  }finally{await again.context.close();}
 });
 
-test('A scanned block kept with its machine text is never paid for again, even when the server leaves it unmarked as read',{skip,timeout:120000},async()=>{
+test('A scanned block kept with its machine text is read once more, then never paid for again, even when the server leaves it unmarked as read',{skip,timeout:120000},async()=>{
  const account=fakeAccount(manifest(2,{scanned:true}),{ocrKept:{'p1-b1':'unread'},keptUnmarked:true});
  const {context,page,errors}=await openStudy(account.api);
  try{
   await pickPdf(page);await page.click('#translate');await waitProgress(page,/^PDF tiếng Việt đã được lưu vào Thư viện riêng/u);await idle(page);
-  assert.equal(account.calls.ocr,1);assert.equal(account.document.ocrCorrectedVersion,0);
+  assert.equal(account.calls.ocr,2,'read, and read once more');assert.equal(account.document.ocrCorrectedVersion,0);
   await page.click('#translate');await idle(page);
-  assert.equal(account.calls.refresh,0,'the scan is not extracted and read again');assert.equal(account.calls.ocr,1,'nor read again');assert.equal(account.calls.extract,1);
-  assert.match(await progress(page),/^Đã dịch đủ các đoạn\./u);assert.deepEqual(errors,[]);
+  assert.equal(account.calls.refresh,0,'the scan is not extracted and read again');assert.equal(account.calls.ocr,2,'nor read again');assert.equal(account.calls.extract,1);
+  // Nothing is left to send, and what the student still has to look at is said (D5).
+  assert.match(await progress(page),/^Đã dịch đủ các đoạn; cần xem lại: 1 đoạn chữ trong ảnh có thể đọc sai \(chi tiết trong phần cảnh báo\)\./u);assert.deepEqual(errors,[]);
  }finally{await context.close();}
 });
 
@@ -498,6 +523,211 @@ test('A finished part that no longer belongs to a book (its book deleted, or its
   // A text translation outside any book is not said to be in Thư viện riêng either.
   await page.click(`[data-history-open="${TEXT}"]`);await waitProgressText(page,`${DETACHED}; bản dịch vẫn xem được ở đây.`,15000);await idle(page);
   assert.equal(await card(),'Hoàn tất · trang 1');
+  assert.deepEqual(errors,[]);
+ }finally{await context.close();}
+});
+// What every Cách dịch does about a translation still in Chinese (a draft the server's retry could not mend), blocks a
+// request did not reach and a block with nothing to use: what the server answers is played here; the checks behind it are
+// backend/pdf-block-translation.js's own (pdf-block-translation.test.mjs).
+const STRIP_REFUSED='Gemini không trả kết quả vì đoạn này trùng khớp nguyên văn với nội dung có bản quyền.',NOT_REACHED='Gemini chưa dịch tới đoạn này trong lượt này (các đoạn bên cạnh bị từ chối nên phải tách nhỏ).';
+const answerWith=(ids,failedBlocks)=>({blocks:ids.map(id=>({id,translation:translated(id)})),failedBlocks,context:'',glossary:{},usage:{prompt:600,output:200,total:800,requests:1},warnings:[],model:'gemini-test'});
+test('Chinese left in a translation after the server\'s retry comes back as a draft: used, named "Trang N · đoạn k" and counted in Cần xem lại; opened again it is named again and Bắt đầu dịch asks for it',{skip,timeout:120000},async()=>{
+ const account=fakeAccount(manifest(3),{translate:(json,call)=>call===1?answerWith(['p1-b1','p1-b3'],[{id:'p1-b2',code:'block_check',message:'Block p1-b2 còn chữ Hán chưa dịch: 探究.',draft:'Khám phá 探究',problems:['han']}]):null});
+ const {context,page,errors}=await openStudy(account.api);
+ try{
+  await pickPdf(page);await page.click('#translate');await waitProgress(page,/^PDF tiếng Việt đã được lưu vào Thư viện riêng\. Cần xem lại: 1 đoạn còn chữ Hán chưa dịch \(chi tiết trong phần cảnh báo\)/u);await idle(page);
+  assert.equal(account.session.translationParts[1],'Khám phá 探究','the draft is used');assert.equal(account.calls.render,1);
+  assert.equal(await page.textContent('#warnings'),'Trang 1 · đoạn 2: còn chữ Hán chưa dịch: 探究. Đã dùng bản dịch này của Gemini; hãy đối chiếu với nguyên tác và sửa trong “Chỉnh bản dịch từng đoạn”.\n');
+  assert.deepEqual(errors,[]);
+ }finally{await context.close();}
+ const again=await openStudy(account.api);
+ try{
+  await again.page.click('#study-history > summary');await again.page.click(`[data-history-open="${SESSION}"]`);await waitProgress(again.page,/Bản dịch đã hoàn tất/u);await idle(again.page);
+  assert.equal(await again.page.textContent('#warnings'),'Trang 1 · đoạn 2: bản dịch vẫn còn chữ Hán chưa dịch: 探究. Bấm Bắt đầu dịch để thử dịch lại, hoặc sửa trong “Chỉnh bản dịch từng đoạn”.\n');
+  await again.page.fill('#api-key',KEY);await again.page.click('#translate');await waitProgress(again.page,/^PDF tiếng Việt đã được lưu vào Thư viện riêng/u);await idle(again.page);
+  assert.deepEqual(account.translateBodies.at(-1).blocks.map(block=>block.id),['p1-b2']);assert.equal(account.session.translationParts[1],translated('p1-b2'));
+  assert.doesNotMatch(await again.page.textContent('#warnings'),/đoạn 2:/u);assert.deepEqual(again.errors,[]);
+ }finally{await again.context.close();}
+});
+
+// A translation the student wrote may keep Chinese on purpose (a character discussed, a name written first): it is the
+// student's, so no run asks Gemini for it again and no note says to.
+test('A block translated by hand that keeps Chinese stays as written: Bắt đầu dịch never sends it again, opened again no note asks for it',{skip,timeout:120000},async()=>{
+ const account=fakeAccount(manifest(3),{translate:(json,call)=>call===1?answerWith(['p1-b1','p1-b3'],[{id:'p1-b2',code:'block_check',message:'Block p1-b2 còn chữ Hán chưa dịch: 探究.',draft:'Khám phá 探究',problems:['han']}]):null});
+ const {context,page,errors}=await openStudy(account.api),own='Chữ 探究 có nghĩa là tìm tòi, khám phá.';
+ try{
+  await pickPdf(page);await page.click('#translate');await waitProgress(page,/^PDF tiếng Việt đã được lưu vào Thư viện riêng/u);await idle(page);
+  await page.click('#pdf-dual-viewer .pdf-block-editor > summary');await page.selectOption('[data-pdf-edit-select]','p1-b2');
+  await page.fill('[data-pdf-edit-text]',own);await page.click('[data-pdf-edit-save]');await waitProgress(page,/^Đã lưu đoạn sửa\./u);await idle(page);
+  assert.equal(account.session.translationParts[1],own);assert.deepEqual(account.session.pdfLayout.edited,['p1-b2']);
+  const calls=account.calls.translate;await page.click('#translate');await waitProgress(page,/^Đã dịch đủ các đoạn\. Bấm Xuất PDF tiếng Việt/u);await idle(page);
+  assert.equal(account.calls.translate,calls,'nothing is sent to Gemini');assert.equal(account.session.translationParts[1],own);
+  assert.deepEqual(errors,[]);
+ }finally{await context.close();}
+ const again=await openStudy(account.api);
+ try{
+  await again.page.click('#study-history > summary');await again.page.click(`[data-history-open="${SESSION}"]`);await waitProgress(again.page,/Bản dịch đã hoàn tất/u);await idle(again.page);
+  assert.doesNotMatch(await again.page.textContent('#warnings'),/đoạn 2:/u);
+  const calls=account.calls.translate;await again.page.fill('#api-key',KEY);await again.page.click('#translate');await waitProgress(again.page,/^Đã dịch đủ các đoạn\. Bấm Xuất PDF tiếng Việt/u);await idle(again.page);
+  assert.equal(account.calls.translate,calls,'opened again, the hand translation is still never sent');assert.equal(account.session.translationParts[1],own);assert.deepEqual(again.errors,[]);
+ }finally{await again.context.close();}
+});
+
+test('Blocks a request did not reach go again at once in a request of their own, in the groups the server left them in and without the block Gemini refused, at most twice; a block with nothing to use goes once more on its own',{skip,timeout:180000},async()=>{
+ const first=()=>answerWith(['p1-b4'],[{id:'p1-b1',code:'gemini_refused',message:STRIP_REFUSED},{id:'p1-b2',code:'not_reached',message:NOT_REACHED},{id:'p1-b3',code:'block_check',message:'Block p1-b3 không bảo toàn ký hiệu toán.'}]);
+ const account=fakeAccount(manifest(4),{translate:(json,call)=>call===1?first():null});
+ const {context,page,errors}=await openStudy(account.api);
+ try{
+  await pickPdf(page);await page.click('#translate');await waitProgress(page,/^PDF tiếng Việt đã được lưu vào Thư viện riêng\. Cần xem lại: 1 đoạn giữ nguyên chữ gốc vì Gemini không dịch được/u);await idle(page);
+  assert.deepEqual(account.translateBodies.map(body=>body.blocks.map(block=>block.id)),[['p1-b1','p1-b2','p1-b3','p1-b4'],['p1-b3'],['p1-b2']],'the block with nothing to use alone, then the one not reached; never the refused one');
+  assert.deepEqual(account.session.translationParts,[manifest(4).pages[0].blocks[0].source,...['p1-b2','p1-b3','p1-b4'].map(translated)]);
+  const warnings=await page.textContent('#warnings');assert.match(warnings,/^Trang 1 · đoạn 1: giữ nguyên chữ gốc\. Gemini không trả kết quả vì đoạn này trùng khớp/u);assert.doesNotMatch(warnings,/đoạn [234]:/u);
+  assert.deepEqual(errors,[]);
+ }finally{await context.close();}
+ // A block never reached is sent again while the requests sending it make headway (another block translated), twice at
+ // most, then keeps its Chinese with a note; one failing alone again keeps it too. (A resend that translates nothing ends
+ // it at once: a batch Gemini refuses whole is not asked for again and again.)
+ const stubborn=fakeAccount(manifest(5),{translate:(json,call)=>{
+  const ids=json.blocks.map(block=>block.id);if(call===1)return answerWith(['p1-b4'],[{id:'p1-b1',code:'gemini_refused',message:STRIP_REFUSED},{id:'p1-b2',code:'not_reached',message:NOT_REACHED},{id:'p1-b3',code:'block_check',message:'Block p1-b3 không bảo toàn ký hiệu toán.'},{id:'p1-b5',code:'not_reached',message:NOT_REACHED}]);
+  return ids.includes('p1-b2')?answerWith(ids.filter(id=>id!=='p1-b2'),[{id:'p1-b2',code:'not_reached',message:NOT_REACHED}]):answerWith([],[{id:'p1-b3',code:'block_check',message:'Block p1-b3 không bảo toàn ký hiệu toán.'}]);
+ }});
+ const second=await openStudy(stubborn.api);
+ try{
+  await pickPdf(second.page);await second.page.click('#translate');await waitProgress(second.page,/^PDF tiếng Việt đã được lưu vào Thư viện riêng\. Cần xem lại: 3 đoạn giữ nguyên chữ gốc vì Gemini không dịch được/u);await idle(second.page);
+  assert.deepEqual(stubborn.translateBodies.map(body=>body.blocks.map(block=>block.id)),[['p1-b1','p1-b2','p1-b3','p1-b4','p1-b5'],['p1-b3'],['p1-b2','p1-b5'],['p1-b2']]);
+  const warnings=await second.page.textContent('#warnings');
+  assert.match(warnings,/Trang 1 · đoạn 2: giữ nguyên chữ gốc\. Gemini chưa dịch tới đoạn này trong lượt này/u);assert.match(warnings,/Trang 1 · đoạn 3: giữ nguyên chữ gốc\. Không bảo toàn ký hiệu toán\./u);
+  assert.deepEqual(second.errors,[]);
+ }finally{await second.context.close();}
+ // A run longer than one request (Kỹ nhất sends 16 blocks at a time): the blocks not reached go before the blocks not sent
+ // yet and never with them, naming the groups the server left them in.
+ const document=manifest(8);for(const number of [2,3]){const added=structuredClone(document.pages[0]);added.number=number;added.blocks=added.blocks.map((b,i)=>({...b,id:`p${number}-b${i+1}`,text:`第${number}页第${i+1}段：温故而知新。`,source:`第${number}页第${i+1}段：温故而知新。`}));document.pages.push(added);}document.totalPages=3;
+ const left=['p1-b2','p1-b5','p2-b3'],ids=page=>Array.from({length:8},(_,i)=>`p${page}-b${i+1}`);
+ const long=fakeAccount(document,{translate:(json,call)=>call===1?answerWith(json.blocks.map(b=>b.id).filter(id=>!left.includes(id)),left.map((id,i)=>({id,code:'not_reached',message:NOT_REACHED,group:Math.min(i,1)}))):null});
+ const third=await openStudy(long.api);
+ try{
+  await third.page.setInputFiles('#source-file',{name:'ba-trang.pdf',mimeType:'application/pdf',buffer:await pdfBytes(3)});
+  await third.page.waitForFunction(()=>/^3 trang · /u.test(document.querySelector('#file-status').textContent),null,{timeout:30000});
+  await third.page.fill('#content-title','Bài giữ bố cục');await third.page.fill('#api-key',KEY);await third.page.selectOption('#mode','premium');
+  await third.page.click('#translate');await waitProgress(third.page,/^PDF tiếng Việt đã được lưu vào Thư viện riêng/u);await idle(third.page);
+  assert.deepEqual(long.translateBodies.map(body=>[body.blocks.map(b=>b.id),body.groups??null]),[[[...ids(1),...ids(2)],null],[left,[['p1-b2'],['p1-b5','p2-b3']]],[ids(3),null]]);
+  assert.deepEqual(long.session.translationParts,[...ids(1),...ids(2),...ids(3)].map(translated));assert.equal(await third.page.textContent('#warnings'),'');
+  assert.deepEqual(third.errors,[]);
+ }finally{await third.context.close();}
+});
+
+// The Worker's own translate-blocks (backend/pdf-block-translation.js) behind the fake account, Gemini answered here by
+// answer(blocks, again) ('REFUSE': refused as recitation): what a run costs the student's key, call by call. Each test's
+// Gemini is told apart by the key it is given, so tests running side by side never answer each other's calls.
+const geminiTests=new Map(),passFetch=globalThis.fetch;
+globalThis.fetch=(url,options)=>{const answer=geminiTests.get(options?.headers?.['x-goog-api-key']);return answer?answer(url,options):passFetch(url,options);};
+function realGemini(t,answer){
+ const calls=[],key=`student-key-${geminiTests.size+1}-${Math.random().toString(36).slice(2)}`,env={GEMINI_API_KEY:key,GEMINI_MODEL:'gemini-2.5-flash',GEMINI_THINKING:'minimal'};
+ geminiTests.set(key,async(url,options)=>{
+  assert.match(String(url),/generativelanguage\.googleapis\.com/u);
+  const body=JSON.parse(options.body),payload=JSON.parse(body.contents[0].parts[0].text),again=/asked for again/u.test(body.systemInstruction.parts[0].text),value=answer(payload.blocks,again);calls.push({ids:payload.blocks.map(b=>b.id),again});
+  if(value==='REFUSE')return Response.json({usageMetadata:{promptTokenCount:20,candidatesTokenCount:0,totalTokenCount:20},candidates:[{finishReason:'RECITATION',content:{parts:[]}}]});
+  return Response.json({usageMetadata:{promptTokenCount:20,candidatesTokenCount:10,totalTokenCount:30},candidates:[{finishReason:'STOP',content:{parts:[{text:JSON.stringify({blocks:value,contextUpdate:'',glossaryUpdates:{}})}]}}]});
+ });
+ t.after(()=>geminiTests.delete(key));
+ return {calls,translate:json=>translatePdfBlocks(env,json,{strict:modeProfile(json.mode).strict}).then(result=>({...result,model:'gemini-test'}))};
+}
+// D5, Tiết kiệm included: a block a request leaves with nothing to use (a formula token lost) costs the server's retry and
+// one request on its own, which the server asks once (again): three calls a press. A press that changes nothing keeps the
+// exported PDF. Translations that keep characters on purpose (a word list) or join short sentences (a primary reader)
+// cost one call and are named nowhere.
+test('A block left with nothing to use costs three Gemini calls a press, the last marked as its one more try; a press that changes nothing keeps the PDF; a word list and a primary reader cost one call',{skip,timeout:120000},async t=>{
+ const sources=['第一段：学而时习之，不亦说乎。','公式 @@PDF_INLINE_0@@ 成立。','生词：山 shān，水 shuǐ','小猫来了。小狗来了。小鸡也来了。'];
+ const said={'p1-b1':'Đoạn một: học mà thường ôn luyện, chẳng phải là vui sao.','p1-b2':'Công thức bị mất.','p1-b3':'Từ mới: 山 (sơn – núi), 水 (thủy – nước)','p1-b4':'Mèo con đến, chó con đến, gà con cũng đến.'};
+ const gemini=realGemini(t,blocks=>blocks.map(b=>({id:b.id,translation:said[b.id]}))),document=manifest(4);document.pages[0].blocks.forEach((b,i)=>{b.source=b.text=sources[i];});
+ const account=fakeAccount(document,{translate:json=>gemini.translate(json)}),{context,page,errors}=await openStudy(account.api);
+ try{
+  await pickPdf(page);await page.click('#translate');await waitProgress(page,/^PDF tiếng Việt đã được lưu vào Thư viện riêng\. Cần xem lại: 1 đoạn giữ nguyên chữ gốc vì Gemini không dịch được \(/u);await idle(page);
+  assert.deepEqual(gemini.calls,[{ids:['p1-b1','p1-b2','p1-b3','p1-b4'],again:false},{ids:['p1-b2'],again:true},{ids:['p1-b2'],again:true}]);
+  assert.deepEqual(account.translateBodies.map(body=>[body.blocks.map(b=>b.id),body.again??false]),[[['p1-b1','p1-b2','p1-b3','p1-b4'],false],[['p1-b2'],true]]);
+  assert.deepEqual(account.session.translationParts,[said['p1-b1'],sources[1],said['p1-b3'],said['p1-b4']]);assert.equal(account.calls.render,1);
+  const warnings=await page.textContent('#warnings');assert.match(warnings,/^Trang 1 · đoạn 2: giữ nguyên chữ gốc\. Không bảo toàn ký hiệu toán\./mu);assert.doesNotMatch(warnings,/đoạn [34]:/u);
+  // Pressed again, as the status asks: the stand-in costs the same three calls; nothing changed, so the PDF stays.
+  gemini.calls.length=0;await page.click('#translate');await waitProgress(page,/^PDF tiếng Việt đã được lưu vào Thư viện riêng\. Cần xem lại: 1 đoạn giữ nguyên chữ gốc/u);await idle(page);
+  assert.equal(gemini.calls.length,3);assert.equal(account.calls.render,1,'the exported PDF is kept');assert.deepEqual(errors,[]);
+ }finally{await context.close();}
+});
+
+// A batch Gemini refuses whole (every block of a famous text) costs one request's calls (MAX_CALLS) and translates
+// nothing: it is never sent again and again. Tiết kiệm sends the 48 blocks in one request; Kỹ nhất (16 a request) stops
+// the range run after the first, keeping the other blocks for a later press.
+test('A batch Gemini refuses whole costs one request, at most 12 calls, and is not sent again; a range run stops there',{skip,timeout:180000},async t=>{
+ const gemini=realGemini(t,()=>'REFUSE'),document=manifest(48);document.pages[0].blocks.forEach((b,i)=>{b.box=[40,10+i*11,360,19+i*11];b.fontSize=8;});
+ for(const [mode,sent,done] of [['economy',48,/^PDF tiếng Việt đã được lưu vào Thư viện riêng\. Cần xem lại: 48 đoạn giữ nguyên chữ gốc/u],['premium',16,/^Gemini từ chối dịch cả lượt 16 đoạn \(Trang 1 · đoạn 1, .* và 11 đoạn khác\), nên Hoa Trí dừng lại để không tốn thêm token; các đoạn đó giữ nguyên chữ gốc\. Còn 32 đoạn chưa dịch/u]]){
+  gemini.calls.length=0;const account=fakeAccount(document,{translate:json=>gemini.translate(json)}),{context,page,errors}=await openStudy(account.api);
+  try{
+   await pickPdf(page);await page.selectOption('#mode',mode);await page.click('#translate');await waitProgress(page,done);await idle(page);
+   assert.ok(gemini.calls.length<=12,`${mode}: ${gemini.calls.length} calls`);assert.deepEqual(account.translateBodies.map(body=>body.blocks.length),[sent],mode);
+   assert.equal(account.session.translationParts.filter((text,i)=>text===document.pages[0].blocks[i].source).length,sent);assert.deepEqual(errors,[]);
+  }finally{await context.close();}
+ }
+});
+
+// A session saved before hand edits were recorded (no pdfLayout.edited) may hold one that keeps Chinese on purpose: opened,
+// such a block is recorded as possibly the student's (legacy) and never sent again; its note says how to have Gemini
+// translate it again: its own Chinese saved in the editor gives it back, and the next press sends it.
+test('A translation saved before hand edits were recorded that keeps Chinese is never sent again; saving its own Chinese gives it back to Gemini',{skip,timeout:120000},async()=>{
+ const account=fakeAccount(manifest(3)),first=await openStudy(account.api);
+ try{await pickPdf(first.page);await first.page.click('#translate');await waitProgress(first.page,/^PDF tiếng Việt đã được lưu vào Thư viện riêng/u);await idle(first.page);}finally{await first.context.close();}
+ const own='Từ 探究 (thám cứu) nghĩa là tìm tòi.';account.session.translationParts[1]=own;delete account.session.pdfLayout.edited;
+ const calls=account.calls.translate,again=await openStudy(account.api);
+ try{
+  await again.page.click('#study-history > summary');await again.page.click(`[data-history-open="${SESSION}"]`);await waitProgress(again.page,/Bản dịch đã hoàn tất/u);await idle(again.page);
+  assert.match(await again.page.textContent('#warnings'),/^Trang 1 · đoạn 2: bản dịch còn chữ Hán \(探究\), có thể là bản dịch tay trước đây nên không gửi lại cho Gemini\. /mu);
+  await again.page.fill('#api-key',KEY);await again.page.click('#translate');await waitProgress(again.page,/^Đã dịch đủ các đoạn; cần xem lại: 1 đoạn còn chữ Hán chưa dịch/u);await idle(again.page);
+  assert.equal(account.calls.translate,calls,'nothing is sent');assert.equal(account.session.translationParts[1],own);assert.deepEqual([account.session.pdfLayout.edited,account.session.pdfLayout.legacy],[[],['p1-b2']]);
+  await again.page.click('#pdf-dual-viewer .pdf-block-editor > summary');await again.page.selectOption('[data-pdf-edit-select]','p1-b2');
+  await again.page.fill('[data-pdf-edit-text]',manifest(3).pages[0].blocks[1].source);await again.page.click('[data-pdf-edit-save]');await waitProgress(again.page,/^Đã lưu: đoạn này giữ chữ gốc\./u);await idle(again.page);
+  assert.deepEqual([account.session.pdfLayout.edited,account.session.pdfLayout.legacy],[[],[]]);
+  await again.page.click('#translate');await waitProgress(again.page,/^PDF tiếng Việt đã được lưu vào Thư viện riêng/u);await idle(again.page);
+  assert.deepEqual(account.translateBodies.at(-1).blocks.map(b=>b.id),['p1-b2']);assert.equal(account.session.translationParts[1],translated('p1-b2'));assert.deepEqual(again.errors,[]);
+ }finally{await again.context.close();}
+});
+
+// The problems of a draft live with the session (pdfLayout.review): opened again, a draft that may lack a line is still
+// named and counted in Cần xem lại, and no later press sends it.
+test('A draft that may lack a line is named and counted again when the session is opened again, and never sent again',{skip,timeout:120000},async()=>{
+ const account=fakeAccount(manifest(3),{translate:(json,call)=>call===1?answerWith(['p1-b1','p1-b3'],[{id:'p1-b2',code:'block_check',message:'Block p1-b2 bản dịch có thể thiếu dòng so với nguyên tác.',draft:'Đoạn hai, thiếu một dòng.',problems:['rows']}]):null});
+ const first=await openStudy(account.api);
+ try{await pickPdf(first.page);await first.page.click('#translate');await waitProgress(first.page,/^PDF tiếng Việt đã được lưu vào Thư viện riêng\. Cần xem lại: 1 đoạn có thể thiếu dòng/u);await idle(first.page);assert.deepEqual(account.session.pdfLayout.review,{'p1-b2':['rows']});}
+ finally{await first.context.close();}
+ const calls=account.calls.translate,again=await openStudy(account.api);
+ try{
+  await again.page.click('#study-history > summary');await again.page.click(`[data-history-open="${SESSION}"]`);await waitProgress(again.page,/Bản dịch đã hoàn tất/u);await idle(again.page);
+  assert.equal(await again.page.textContent('#warnings'),'Trang 1 · đoạn 2: bản dịch có thể thiếu dòng so với nguyên tác; hãy đối chiếu và sửa trong “Chỉnh bản dịch từng đoạn”.\n');
+  await again.page.fill('#api-key',KEY);await again.page.click('#translate');await waitProgress(again.page,/^Đã dịch đủ các đoạn; cần xem lại: 1 đoạn có thể thiếu dòng/u);await idle(again.page);
+  assert.equal(account.calls.translate,calls,'the draft is not sent again');assert.deepEqual(account.session.pdfLayout.review,{'p1-b2':['rows']});assert.deepEqual(again.errors,[]);
+ }finally{await again.context.close();}
+});
+
+test('A block of the same text as one translated in the session takes that translation, however its spaces were read: a running footer on every page is asked for once, and reads the same on each',{skip,timeout:120000},async()=>{
+ const document=twoPages(2);document.pages[0].blocks[1].source=document.pages[0].blocks[1].text='第一章　空间向量与立体几何';document.pages[1].blocks[1].source=document.pages[1].blocks[1].text=' 第一章空间向量与 立体几何';
+ const account=fakeAccount(document),{context,page,errors}=await openStudy(account.api);
+ try{
+  await page.setInputFiles('#source-file',{name:'bai-hai-trang.pdf',mimeType:'application/pdf',buffer:await pdfBytes(2)});
+  await page.waitForFunction(()=>/^2 trang · /u.test(document.querySelector('#file-status').textContent),null,{timeout:30000});
+  await page.fill('#content-title','Bài giữ bố cục');await page.fill('#api-key',KEY);await page.click('#translate');await waitProgress(page,/^PDF tiếng Việt đã được lưu vào Thư viện riêng/u);await idle(page);
+  assert.deepEqual(account.translateBodies.flatMap(body=>body.blocks.map(block=>block.id)),['p1-b1','p1-b2','p2-b1'],'the second footer is not sent');
+  assert.deepEqual(account.session.translationParts,[translated('p1-b1'),translated('p1-b2'),translated('p2-b1'),translated('p1-b2')]);
+  assert.equal(await page.textContent('#warnings'),'');assert.deepEqual(errors,[]);
+ }finally{await context.close();}
+});
+
+test('A scanned block whose reading holds nothing to translate keeps the page\'s pixels: read once more, never sent for translation, named and counted in Cần xem lại',{skip,timeout:120000},async()=>{
+ const unread={source:'[□]',text:'[□]',ocrCorrected:true,ocrKept:'empty',keepPixels:true},usage={prompt:1000,output:200,total:1200,requests:1};
+ const account=fakeAccount(manifest(3,{scanned:true}),{ocr:json=>({blocks:json.blockIds.map(id=>id==='p1-b2'?{id,...unread}:{id,source:`第${id.slice(-1)}段`,text:`第${id.slice(-1)}段`,ocrCorrected:true}),ocrCorrectedVersion:1,ocrWarnings:[],usage,warnings:[],model:json.model})});
+ const {context,page,errors}=await openStudy(account.api);
+ try{
+  await pickPdf(page);await page.click('#translate');await waitProgress(page,/^PDF tiếng Việt đã được lưu vào Thư viện riêng\. Cần xem lại: 1 đoạn giữ nguyên hình gốc vì Gemini không đọc được chữ trong ảnh/u);await idle(page);
+  assert.deepEqual(account.ocrBodies.map(body=>[body.blockIds,body.rereadIds??null]),[[['p1-b1','p1-b2','p1-b3'],null],[['p1-b2'],['p1-b2']]],'read, then read once more');
+  assert.deepEqual(account.translateBodies.flatMap(body=>body.blocks.map(block=>block.id)),['p1-b1','p1-b3'],'nothing to translate is never sent');
+  assert.equal(account.session.translationParts[1],'[□]');
+  assert.match(await page.textContent('#warnings'),/Trang 1 · đoạn 2: Gemini không đọc được chữ trong ảnh của đoạn này nên trang giữ nguyên hình gốc ở đây, không dịch/u);
   assert.deepEqual(errors,[]);
  }finally{await context.close();}
 });

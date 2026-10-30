@@ -2,7 +2,8 @@ import {extractDocxText,documentTooLarge} from './document-limits.js';
 import {extractEpub} from './epub.js';
 import {extractAzw3} from './azw3.js';
 import {decodeText} from './text-storage.js';
-import {recognizeDocument,translateAndVerify} from './ai.js';
+import {recognizeDocument,translateAndVerify,spentOn} from './ai.js';
+import {withoutEdgeMarks} from './pdf-cleaning.js';
 import {currentReader} from './reader-auth.js';
 import {studyHistoryRoute} from './study-history.js';
 import {studyBookRoute} from './study-books.js';
@@ -39,6 +40,10 @@ function checkBatch(blocks,{chars,blocks:most}){
 const validKey=value=>typeof value==='string'&&value.length>=20&&value.length<=500&&!/[\r\n\0]/.test(value);
 const MAX_STUDY_CHARACTERS=2_000_000,TOO_LONG='Tệp không có văn bản hoặc vượt giới hạn 2 triệu ký tự của không gian học tập.';
 const scopedEnv=(env,apiKey,model,thinking=model==='gemini-2.5-flash'?'default':'minimal')=>new Proxy(env,{get(target,property){if(property==='GEMINI_API_KEY')return apiKey;if(property==='GEMINI_MODEL')return model;if(property==='GEMINI_THINKING')return thinking;if(property==='GEMINI_MODEL_RECOVERY')return true;if(property==='GEMINI_PREFERRED_MODEL')return target.GEMINI_MODEL||'gemini-3.6-flash';if(property==='FILES')return undefined;return Reflect.get(target,property);}});
+// The whole part at a glance, beside the line-by-line checks of translateAndVerify (which name each paragraph that keeps
+// Chinese or lacks a heading, an item, a caption, a verse line or a number): much Chinese left, or a translation far too
+// short. Paragraph counts are only reported: Gemini joins the wrapped lines of an OCR reading, so a count that differs
+// says nothing by itself.
 export function localTranslationReview(source,translation){
  const sourceText=String(source||'').trim(),translatedText=String(translation||'').trim();
  const sourceHan=(sourceText.match(/\p{Script=Han}/gu)||[]).length,remainingHan=(translatedText.match(/\p{Script=Han}/gu)||[]).length;
@@ -46,7 +51,6 @@ export function localTranslationReview(source,translation){
  const warnings=[];
  if(sourceHan>=20&&remainingHan/sourceHan>.25)warnings.push('Bản dịch còn nhiều chữ Hán; nên đối chiếu vì có thể có đoạn chưa được dịch hết.');
  if(sourceText.length>=200&&translatedText.length<sourceText.length*.35)warnings.push('Bản dịch ngắn bất thường so với nguyên tác; nên kiểm tra khả năng bỏ sót nội dung.');
- if(sourceParagraphs>=3&&Math.abs(sourceParagraphs-translatedParagraphs)>Math.max(1,Math.floor(sourceParagraphs*.25)))warnings.push('Số đoạn giữa nguyên tác và bản dịch chênh lệch đáng kể; nên đối chiếu cấu trúc.');
  return {warnings,metrics:{sourceCharacters:sourceText.length,translationCharacters:translatedText.length,sourceParagraphs,translatedParagraphs,remainingHan}};
 }
 
@@ -90,8 +94,9 @@ export async function studyRoute(request,env,url,path){
   // their IDs and the browser keeps its own copy of the sources.
   if(Array.isArray(body.blocks))body.blocks=body.blocks.map(block=>block&&typeof block.source==='string'?{...block,source:unifyHan(block.source)}:block);
   if(body.glossary&&typeof body.glossary==='object'&&!Array.isArray(body.glossary))body.glossary=unifyGlossaryKeys(body.glossary);
-  // The mode sets how much Gemini reasons and, when strict, retries a block that still holds Chinese, changed a number or
-  // came back implausibly short.
+  // The mode sets how much Gemini reasons; every mode asks once more for a block that still holds Chinese or lacks a line,
+  // a strict one also for a block that changed a number or came back implausibly short (body.groups: blocks not reached
+  // sent again in the groups they were left in).
   const result=await translatePdfBlocks(scopedEnv(env,apiKey,model,profile.translateThinking),body,{strict:profile.strict});return reply({...result,model:result.model||model});
  }
  if(path==='/api/my/study/extract'){
@@ -117,8 +122,14 @@ export async function studyRoute(request,env,url,path){
   if(!webp&&!jpeg)throw new Error('Ảnh OCR phải là WebP hoặc JPEG.');
   const selectedModel=isStudyModel(String(form.get('model')||''))?String(form.get('model')):modelFor(env,mode);
   const result=await recognizeDocument(scopedEnv(env,apiKey,selectedModel,modeProfile(mode).ocrThinking),file,webp?'image/webp':'image/jpeg');
-  if(typeof result.text!=='string'||!result.text.trim())throw new Error('OCR không nhận được văn bản; hãy kiểm tra trang scan.');
-  return reply({text:result.text,warnings:Array.isArray(result.warnings)?result.warnings:[],usage:result.__usage||null,model:result.__model||selectedModel});
+  // ocr_empty: nothing was read, which the browser counts as a region left unread (frontend/pdf-client.js readPictureText);
+  // the reading was billed all the same, and its tokens go back with the error to the student's counter.
+  if(typeof result.text!=='string'||!result.text.trim())throw spentOn(new UserError('OCR không nhận được văn bản; hãy kiểm tra trang scan.',400,'ocr_empty'),result.__usage);
+  // A page read on its own keeps its running head and foot as lines to translate, without the marks the reading put on them
+  // (text). marked: the reading with those marks, when it has any, so the study page keeps a running head or foot once
+  // across the pages it read (frontend/study.js cleanReadPages, D8); a page that does not know it reads text as before.
+  const text=withoutEdgeMarks(result.text);
+  return reply({text,...(text!==result.text?{marked:result.text}:{}),warnings:Array.isArray(result.warnings)?result.warnings:[],usage:result.__usage||null,model:result.__model||selectedModel});
  }
  if(path==='/api/my/study/translate'){
   // Text pasted from a PDF may spell Chinese with radicals or compatibility ideographs: the source, its context and the
@@ -134,14 +145,14 @@ export async function studyRoute(request,env,url,path){
   // ai.js adds the math terms itself (by genre); another subject's terms travel in the glossary it is given.
   const story={genre:subjectOf(domain).label,context,glossary:JSON.stringify({...subjectTerms,...glossary}),previousSource,previousTranslation};
   const selectedModel=requestModel(body,modelFor(env,mode)),qualityModel=body.model?selectedModel:modelFor(env,'quality');
-  // The mode bounds the reasoning of the translation and of a marker repair, and (often a little more) of the full retry
-  // of a short passage that lost a year or footnote marker: unbounded default thinking can cost more than the translation.
+  // The mode bounds the reasoning of the translation and of the one correction of the places the checks find (Chinese
+  // left, a line, a number or a marker missing), made by the stronger model: unbounded default thinking can cost more than
+  // the translation.
   const outcome=await translateAndVerify(scopedEnv(env,apiKey,selectedModel,profile.translateThinking),source,story,{
    repairEnv:scopedEnv(env,apiKey,qualityModel,profile.translateThinking),
-   retryEnv:scopedEnv(env,apiKey,qualityModel,profile.retryThinking),
    allowRepair:profile.allowRepair
   });
-  const model=outcome.model||(outcome.repairScope==='full'?qualityModel:selectedModel);
+  const model=outcome.model||selectedModel;
   const review=localTranslationReview(source,outcome.translation);
   // Subject terms may vary with context, as the math ones do: only the student's own terms are checked afterwards.
   const warnings=Object.keys(subjectTerms).length?[...outcome.warnings.filter(warning=>!warning.startsWith(GLOSSARY_WARNING)),...ownTermWarnings(source,outcome.translation,glossary)]:outcome.warnings;

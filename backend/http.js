@@ -91,7 +91,10 @@ export function crossOrigin(request,url){
 export const originRefused=()=>json({error:'Nguồn yêu cầu không hợp lệ.',code:'origin'},403);
 
 // D1 and SQLite failures are plain Errors too; their text names tables and columns, so it is logged, never shown.
-const INTERNAL=/D1_|SQLITE|no such (?:table|column)|constraint failed|FOREIGN KEY|syntax error/iu;
+const INTERNAL=/D1_|SQLITE|no such (?:table|column)|has no column named|constraint failed|FOREIGN KEY|syntax error/iu;
+// A database missing the newest migration: a read names a table or column it lacks ("no such column: engine"), a write
+// one it cannot fill ("table study_sessions has no column named engine").
+const OUTDATED=/no such (?:table|column)|has no column named/iu;
 // Tokens a failed Gemini call had already spent (ai.js puts them on the error): Gemini bills them, so the browser adds
 // them to the student's counter, which must never read low.
 function spent(error){const usage=error?.usage;return usage&&typeof usage==='object'&&Object.values(usage).some(value=>Number(value)>0)?{usage}:{};}
@@ -107,7 +110,8 @@ export function errorResponse(error,{request,url,path,body}={}){
  if(error?.constructor===Error&&message&&!INTERNAL.test(message))return json({error:message,...spent(error)},400);
  const ray=request?.headers.get('cf-ray')||crypto.randomUUID().slice(0,8);
  logEvent('api_error',{method:request?.method,route:routeLabel(path),name:error?.name||typeof error,message:message.slice(0,300),ray});
- // A database missing the newest migration fails every query naming a new column: say that instead of a bare error.
- if(/no such (?:table|column)/iu.test(message))return json({error:`Cơ sở dữ liệu chưa được cập nhật lên phiên bản mới${url&&isLoopback(url.hostname)?' (chạy npm run db:local rồi khởi động lại)':''}. Hãy báo quản trị viên, kèm mã ${ray}.`,code:'schema_outdated',ray,...spent(error)},500);
+ // A database missing the newest migration fails every query naming a new table or column: say that instead of a bare
+ // error. On this machine it is the local database (start.cmd runs setup, which applies the migrations).
+ if(OUTDATED.test(message))return json({error:url&&isLoopback(url.hostname)?`Cơ sở dữ liệu cục bộ chưa cập nhật: hãy tắt Hoa Trí rồi chạy start.cmd (hoặc npm run db:local rồi khởi động lại). Mã ${ray}.`:`Cơ sở dữ liệu chưa được cập nhật lên phiên bản mới. Hãy báo quản trị viên, kèm mã ${ray}.`,code:'schema_outdated',ray,...spent(error)},500);
  return json({error:`Máy chủ gặp lỗi ngoài dự kiến. Hãy thử lại sau ít phút; nếu lỗi lặp lại, hãy gửi mã ${ray} cho quản trị viên.`,code:'internal',ray,...spent(error)},500);
 }

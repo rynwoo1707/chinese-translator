@@ -688,7 +688,8 @@ class ShortLines(unittest.TestCase):
         finally:
             extract.tesseract = real
         self.assertEqual([b["id"] for b in blocks if fitz.Rect(b["box"]).intersects(heading)], [])
-        self.assertIn("Trang 3: 1 dòng chữ ngắn (như tiêu đề hay nhãn) OCR không đọc được nên sẽ giữ nguyên trong bản xuất; hãy đối chiếu với PDF gốc.", notes)
+        # the page's one note on what stays Chinese counts the heading's five Han glyphs
+        self.assertIn("Trang 3: khoảng 5 chữ Hán mà OCR không đọc được vẫn giữ nguyên chữ gốc trong bản xuất; hãy đối chiếu với PDF gốc.", notes)
 
     def test_a_caption_misread_as_a_formula_is_read_again(self):
         # '图1.1-9' in small print under a drawing (one Han glyph, smaller than the body's), misread at 240 dpi as

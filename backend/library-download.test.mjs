@@ -104,3 +104,31 @@ test('"Tải cả quyển" of a whole-book run counts a blank page inside a part
  // Without the run's page states (its progress deleted, or the list failed), each page of a part counts as before.
  const older=await download(answers(null));assert.equal(older.saved.length,1);assert.equal(older.result.message,'Đã ghép 6 trang như bản gốc. Đã dịch 5/6 trang; các trang còn lại giữ nguyên bản gốc.');
 });
+
+// A part an older extractor read is downloaded as it is, and the download names it with the way to update it in Xưởng
+// dịch (the part's session, or the refreshed copy begun already); a part of this extractor is not named.
+test('"Tải cả quyển" of a student\'s book names the parts with an older layout, each with its link to "Cập nhật bố cục"',async()=>{
+ const original=await pdf(['Bia','Goc 2','Goc 3']),sha256=hex(original),rendered=await pdf(['Dich 2','Dich 3']);
+ const part={id:'c1',title:'Trang 2–3',position:1,mime:'application/pdf',sessionId:'6a1b2c3d-1111-4a2b-8c3d-4e5f6a7b8c90',filename:'sach.pdf',pageStart:2,pageEnd:3,totalPages:3,sha256,pages:[2,3],updatedAt:'2026-10-15 08:00:00',translatedAt:'2026-10-15 08:00:00',layout:true,file:'/api/chapter-file/c1',layoutVersion:null,layoutOutdated:true,oldPdf:false,refresh:null};
+ const served={'/api/my/study/books/book-1/assembly':{id:'book-1',title:'Sách học',cover:{image:false,page:0,sha256:null},parts:[part],storedSources:[{sha256,pages:3,url:`/api/my/study/sources/${sha256}`}]},'/api/my/study/book-jobs':{jobs:[]},[`/api/my/study/sources/${sha256}`]:original,'/api/chapter-file/c1':rendered};
+ const fetch=async url=>{const value=served[new URL(url,ORIGIN).pathname];return value===undefined?Response.json({error:'Không tìm thấy.'},{status:404}):value instanceof Uint8Array?new Response(value,{headers:{'Content-Type':'application/pdf'}}):Response.json(value);};
+ const {run,saved}=await reader(null,{fetch});
+ run(`state.route='reader';state.chapters=[{id:'c1',title:'Trang 2–3',mime:'application/pdf'}];state.chapter=0;state.readerStory={id:'book-1',title:'Sách học',cover:false,study:true,sample:false,assembly:false};state.bookDownload=null`);
+ await run('downloadWholeBook()');assert.equal(saved.length,1,'downloaded as it is');
+ const html=run('bookDownloadPanel()');
+ assert.ok(html.includes('<li>Phần “Trang 2–3” · Bố cục cũ: <a href="/study?history=6a1b2c3d-1111-4a2b-8c3d-4e5f6a7b8c90&amp;refresh=1">mở lại để cập nhật</a>.</li>'),html);
+ // The refreshed copy begun already is linked instead, with what it still has to translate; a part of this extractor is
+ // not named.
+ served['/api/my/study/books/book-1/assembly'].parts=[{...part,refresh:{sessionId:'9d4e5f6a-4444-4d5e-9f6a-7b8c9d0e1f23',blocks:7}}];run('state.bookDownload=null');await run('downloadWholeBook()');
+ assert.ok(run('bookDownloadPanel()').includes('<a href="/study?history=9d4e5f6a-4444-4d5e-9f6a-7b8c9d0e1f23">mở lại để cập nhật</a> (còn 7 đoạn cần dịch).</li>'));
+ served['/api/my/study/books/book-1/assembly'].parts=[{...part,layoutVersion:4,layoutOutdated:false}];run('state.bookDownload=null');await run('downloadWholeBook()');
+ assert.doesNotMatch(run('bookDownloadPanel()'),/Bố cục cũ/u);
+ // A local database behind the code answers schema_outdated: its own words (start.cmd) are said, when the whole book is
+ // joined and beside the PDF in the reader; "có thể do thiếu bộ nhớ" is kept for a failure on this device.
+ const SCHEMA='Cơ sở dữ liệu cục bộ chưa cập nhật: hãy tắt Hoa Trí rồi chạy start.cmd (hoặc npm run db:local rồi khởi động lại).';
+ const behind=await reader(null,{fetch:async url=>new URL(url,ORIGIN).pathname==='/api/my/study/books/book-1/assembly'?Response.json({error:SCHEMA,code:'schema_outdated'},{status:500}):fetch(url)});
+ behind.run(`state.route='reader';state.chapters=[{id:'c1',title:'Trang 2–3',mime:'application/pdf'}];state.chapter=0;state.readerStory={id:'book-1',title:'Sách học',cover:false,study:true,sample:false,assembly:false};state.bookDownload=null`);
+ const failed=await behind.run('downloadWholeBook()').then(()=>null,error=>error);assert.equal(failed?.message,SCHEMA);
+ behind.run('state.readerAssembly=null;readerAssembly()');await new Promise(resolve=>setTimeout(resolve,50));
+ assert.ok(behind.run('pdfTools(state.chapters[0])').includes(`<span class="bilingual-toggle-hint" role="status">${SCHEMA}</span>`));
+});

@@ -190,7 +190,8 @@ test('Account page: the header\'s initials, failed lists as error cards with "Th
  // "Thử lại" asks for everything again.
  const retry=app({hash:'#account',answers:url=>url==='/api/me'?[200,ME_IN]:null});await settle();
  retry.calls.length=0;await retry.run(`retryLoad('account')`);
- assert.deepEqual(retry.calls.map(call=>call.url).sort(),['/api/library','/api/me','/api/my/library','/api/my/requests']);
+ // The parts of the student's books come too: they only add the "Bố cục cũ" notes.
+ assert.deepEqual(retry.calls.map(call=>call.url).sort(),['/api/library','/api/me','/api/my/library','/api/my/requests','/api/my/study/books']);
 });
 
 // One name for the student's library ("Thư viện riêng"), dates as the reader's own day (dd/mm/yyyy), and the sign-in
@@ -325,4 +326,47 @@ test('The toast region is a polite live region that stays in the page while idle
  const page=app();
  assert.equal(page.toast.getAttribute('aria-live'),'polite');assert.equal(page.toast.getAttribute('aria-atomic'),'true');
  page.run(`toast('Đã lưu.')`);assert.equal(page.toast.className,'is-visible');assert.equal(page.toast.textContent,'Đã lưu.');
+});
+
+// A part of a student's book an older extractor read (GET /api/my/study/books: layoutOutdated) says "Bố cục cũ" on the
+// book's card and above the part in the reader, with a link to Xưởng dịch: the part's session with refresh=1, or the
+// refreshed copy begun already, with the blocks it still has to translate. Nothing else is asked for or paid.
+test('Thư viện riêng and the reader say "Bố cục cũ" on parts an older extractor read, linking each to Xưởng dịch',async()=>{
+ const OLD='6a1b2c3d-1111-4a2b-8c3d-4e5f6a7b8c90',DRAFT='9d4e5f6a-4444-4d5e-9f6a-7b8c9d0e1f23';
+ const book={id:'book-1',title:'tesst',genre:'Toán học · STEM',chapters:3,visibility:'private',source_url:'study-book:book-1'};
+ const parts=[{id:'chapter-1',title:'Trang 4–6',sessionId:OLD,layoutVersion:null,layoutOutdated:true,refresh:null},{id:'chapter-2',title:'Trang 7–8',sessionId:'s-2',layoutVersion:2,layoutOutdated:true,refresh:{sessionId:DRAFT,blocks:12}},{id:'chapter-3',title:'Trang 9',sessionId:'s-3',layoutVersion:4,layoutOutdated:false,refresh:null}];
+ const page=app({hash:'#account',answers:url=>url==='/api/me'?[200,ME_IN]:url==='/api/my/library'?[200,[book]]:url==='/api/my/study/books'?[200,[{id:'book-1',title:'tesst',parts}]]:null});await settle();
+ const card=page.run('personalBookCards()');
+ assert.ok(card.includes(`<p class="sample-card-note layout-outdated">Phần “Trang 4–6” · Bố cục cũ: <a href="/study?history=${OLD}&amp;refresh=1">mở lại để cập nhật</a></p>`),card);
+ assert.ok(card.includes(`<p class="sample-card-note layout-outdated">Phần “Trang 7–8” · Bố cục cũ: <a href="/study?history=${DRAFT}">mở lại để cập nhật</a> (còn 12 đoạn cần dịch)</p>`),card);
+ assert.doesNotMatch(card,/Trang 9/u,'a part of this extractor says nothing');
+ // The reader: above the part, with the same link; another part, or a book of the public library, says nothing.
+ const reader=chapter=>page.run(`state.route='reader';state.readerStory={id:'book-1',title:'tesst',study:true,cover:false,sample:false};state.chapters=[{id:'${chapter}',title:'Phần',mime:'application/pdf'}];state.chapter=0;readerView()`);
+ const first=reader('chapter-1');
+ assert.ok(first.includes('<aside class="sample-notice layout-outdated" role="note"><strong>Bố cục cũ:</strong> phần này được tách trang bằng bộ tách cũ'),first);
+ assert.ok(first.includes(`<a href="/study?history=${OLD}&amp;refresh=1">Mở lại để cập nhật</a>; chỉ các đoạn mới hoặc đổi vùng chữ tốn token.</aside>`),first);
+ assert.match(reader('chapter-2'),/Mở lại để cập nhật<\/a> \(còn 12 đoạn cần dịch\); chỉ các đoạn mới hoặc đổi vùng chữ tốn token/u);
+ assert.doesNotMatch(reader('chapter-3'),/Bố cục cũ/u);
+ assert.doesNotMatch(page.run(`state.readerStory={id:'book-1',title:'tesst',study:false};state.chapters=[{id:'chapter-1',title:'Phần',mime:'application/pdf'}];readerView()`),/Bố cục cũ/u);
+ // Without that list (it failed, or an older server), nothing is said and nothing fails.
+ const quiet=app({hash:'#account',answers:url=>url==='/api/me'?[200,ME_IN]:url==='/api/my/library'?[200,[book]]:url==='/api/my/study/books'?[503,{error:'Bận.'}]:null});await settle();
+ assert.doesNotMatch(quiet.run('personalBookCards()'),/Bố cục cũ/u);assert.equal(quiet.run('state.errors.myLibrary'),undefined);
+ assert.doesNotMatch(quiet.run('accountView()'),/Chưa đọc được các phần sách/u);
+ // A local database behind the code (schema_outdated) is said with how to mend it, instead of the notes vanishing.
+ const SCHEMA='Cơ sở dữ liệu cục bộ chưa cập nhật: hãy tắt Hoa Trí rồi chạy start.cmd (hoặc npm run db:local rồi khởi động lại).';
+ const behind=app({hash:'#account',answers:url=>url==='/api/me'?[200,ME_IN]:url==='/api/my/library'?[200,[book]]:url==='/api/my/study/books'?[500,{error:SCHEMA,code:'schema_outdated'}]:null});await settle();
+ assert.ok(behind.run('accountView()').includes(`<h2>Chưa đọc được các phần sách của bạn</h2><p>${SCHEMA}</p>`));assert.match(behind.run('personalBookCards()'),/tesst/u,'the shelf itself still shows');
+});
+
+// Two parts, or two books, may share a title (the owner's "tesst" pages 4–6 and 7–8): a "Bố cục cũ" note names the part
+// by its pages, or, without pages, by its place among the parts of that title; a title that says its pages is not
+// repeated.
+test('"Bố cục cũ" tells parts of one title apart by their pages, or by their place in the book',async()=>{
+ const shelf=(id,chapters)=>({id,title:'tesst',genre:'Toán học · STEM',chapters,visibility:'private',source_url:`study-book:${id}`});
+ const part=(id,pageStart,pageEnd,title='tesst')=>({id,title,sessionId:`s-${id}`,layoutVersion:2,layoutOutdated:true,refresh:null,pageStart,pageEnd});
+ const books=[{id:'book-1',title:'tesst',parts:[part('c1',4,6)]},{id:'book-2',title:'tesst',parts:[part('c4',4,6),part('c7',7,8),part('c9',9,9,'Trang 9')]},{id:'book-3',title:'tesst',parts:[part('c10',null,null),part('c11',null,null)]}];
+ const page=app({hash:'#account',answers:url=>url==='/api/me'?[200,ME_IN]:url==='/api/my/library'?[200,[shelf('book-1',1),shelf('book-2',3),shelf('book-3',2)]]:url==='/api/my/study/books'?[200,books]:null});await settle();
+ const cards=page.run('personalBookCards()');
+ assert.ok(cards.includes('<p class="sample-card-note layout-outdated">Bố cục cũ (trang 4–6): <a href="/study?history=s-c1&amp;refresh=1">'),cards);
+ for(const label of ['“tesst” (trang 4–6)','“tesst” (trang 7–8)','“Trang 9”','“tesst” (phần 1)','“tesst” (phần 2)'])assert.ok(cards.includes(`<p class="sample-card-note layout-outdated">Phần ${label} · Bố cục cũ: `),label);
 });

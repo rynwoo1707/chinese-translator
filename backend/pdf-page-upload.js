@@ -1,5 +1,9 @@
 import {getPdfManifest} from './pdf-pipeline.js';
 
+// Besides a page's text or image, the browser may send (frontend/app.js uploadJob): note, a line for the job's
+// warnings (what its analysis or its reading of the page found); cleaned, with a text, '1' when the text is the page's
+// text layer the browser already cleaned from each line's place (the server keeps its lines); hint, with an image, the
+// page's own text layer as {text, reason}, which the server weighs Gemini's reading against (worker.js processJob).
 export async function savePreparedPdfPage(jobId,form,env){
  const page=Number(form.get('page')),total=Number(form.get('total'));
  if(!Number.isInteger(page)||!Number.isInteger(total)||page<1||page>total||total>1000)throw new Error('Thứ tự trang PDF không hợp lệ.');
@@ -20,8 +24,11 @@ export async function savePreparedPdfPage(jobId,form,env){
  manifest??={version:3,kind:'mixed-pages',totalPages:total,pagesPerPart:1,parts:[],complete:false};
  if(manifest.totalPages!==total)throw new Error('Tổng số trang PDF đã thay đổi.');
  await env.FILES.put(key,data,{httpMetadata:{contentType:mime}});
+ const note=typeof form.get('note')==='string'?form.get('note').trim().slice(0,1000):'',hint=kind==='scan'&&typeof form.get('hint')==='string'?form.get('hint'):'';
+ const extra={...(note?{note}:{}),...(kind==='text'&&form.get('cleaned')==='1'?{cleaned:true}:{})};
+ if(hint&&new TextEncoder().encode(hint).length<=1024*1024){extra.hint=`${key}.hint.json`;await env.FILES.put(extra.hint,hint,{httpMetadata:{contentType:'application/json; charset=utf-8'}});}
  manifest.parts=manifest.parts.filter(part=>part.startPage!==page);
- manifest.parts.push({index:page-1,startPage:page,endPage:page,key,mime,kind});
+ manifest.parts.push({index:page-1,startPage:page,endPage:page,key,mime,kind,...extra});
  manifest.parts.sort((a,b)=>a.startPage-b.startPage);
  manifest.complete=manifest.parts.length===total&&manifest.parts.every((part,index)=>part.startPage===index+1);
  await env.FILES.put(`split/${jobId}/manifest.json`,JSON.stringify(manifest));

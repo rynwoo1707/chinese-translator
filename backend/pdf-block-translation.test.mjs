@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {translatePdfBlocks,MAX_CALLS,blockTranslationWarnings} from './pdf-block-translation.js';
+import {translatePdfBlocks,MAX_CALLS,blockTranslationWarnings,missingRows,BLOCK_TRANSLATION_RULES} from './pdf-block-translation.js';
 import {studyRoute} from './study-translation.js';
 import {errorResponse} from './http.js';
 
@@ -168,7 +168,7 @@ test('Partial answers keep the good blocks when one keeps dropping a year, and r
  const response=await translatePdfBlocks(env,{blocks:source,partial:true});
  assert.deepEqual(requests,[['p1-b1','p1-b2','p1-b3'],['p1-b2']],'only the failing block is asked for again');
  assert.deepEqual(response.blocks,[{id:'p1-b1',translation:'Đoạn p1-b1.'},{id:'p1-b3',translation:'Đoạn p1-b3.'}]);
- assert.deepEqual(response.failedBlocks,[{id:'p1-b2',code:'block_check',message:'Block p1-b2 thiếu số hoặc dẫn chứng: 1949.',draft:'Được thành lập.'}]);
+ assert.deepEqual(response.failedBlocks,[{id:'p1-b2',code:'block_check',message:'Block p1-b2 thiếu số hoặc dẫn chứng: 1949.',draft:'Được thành lập.',problems:['numbers']}]);
  assert.deepEqual(response.usage,spent(2));
  // Without partial the contract is unchanged: the batch fails after the same two calls.
  await assert.rejects(()=>translatePdfBlocks(env,{blocks:source}),/thiếu số hoặc dẫn chứng: 1949/u);
@@ -196,22 +196,79 @@ test('A quota error part-way keeps what was translated; one before anything was 
  await assert.rejects(()=>translatePdfBlocks(env,{blocks:line(2),partial:true}),error=>error.code==='quota_minute'&&error.retryAfter===40);
 });
 
-test('Splitting stops after MAX_CALLS calls, and IDs Gemini repeats, drops or invents fail only their own blocks',async t=>{
+test('Splitting stops after MAX_CALLS calls: the groups left are not reached, never refused, and numbered; new requests for them, asking those groups first, find the refused blocks and strand no other; IDs Gemini repeats, drops or invents fail only their own blocks',async t=>{
  // One refused block among 48 is found within the budget.
  let requests=blockGemini(t,ids=>ids.includes('p1-b47')?refusal('RECITATION'):translations(ids));
  let response=await translatePdfBlocks(env,{blocks:line(48),partial:true});
  assert.equal(requests.length,11);assert.deepEqual(response.failedBlocks.map(b=>b.id),['p1-b47']);assert.equal(response.blocks.length,47);
- // Two of them need more calls than MAX_CALLS: the groups left over are reported, every other block is kept.
+ // One at the start of a final pair needs a 13th call: its partner is left not reached, without the refusal's words, and
+ // the request the browser sends for it at once translates it.
+ requests=blockGemini(t,ids=>ids.includes('p1-b0')?refusal('RECITATION'):translations(ids));
+ response=await translatePdfBlocks(env,{blocks:line(48),partial:true});
+ assert.equal(requests.length,MAX_CALLS);assert.deepEqual(response.failedBlocks.map(({id,code})=>[id,code]),[['p1-b0','gemini_refused'],['p1-b1','not_reached']]);
+ assert.doesNotMatch(response.failedBlocks[1].message,/bản quyền/u);
+ response=await translatePdfBlocks(env,{blocks:[line(2)[1]],partial:true});
+ assert.deepEqual(response.blocks.map(b=>b.id),['p1-b1']);assert.deepEqual(response.failedBlocks,[]);
+ // Two of them need more calls than MAX_CALLS: the groups left over are not reached. Sent again in requests of their own
+ // (a fresh budget each, at most two, as the browser does), only the two refused blocks stay untranslated.
  requests=blockGemini(t,ids=>ids.includes('p1-b0')||ids.includes('p1-b47')?refusal('RECITATION'):translations(ids));
  response=await translatePdfBlocks(env,{blocks:line(48),partial:true});
- assert.equal(requests.length,MAX_CALLS);const left=response.failedBlocks.map(b=>b.id);
+ assert.equal(requests.length,MAX_CALLS);let left=response.failedBlocks.map(b=>b.id);
  assert.ok(left.includes('p1-b0')&&left.includes('p1-b47'));assert.ok(left.length<=12,`${left.length} blocks left`);assert.equal(response.blocks.length+left.length,48);
- assert.ok(response.failedBlocks.every(b=>b.code==='gemini_refused'));
+ assert.ok(response.failedBlocks.every(b=>b.code==='not_reached'&&!/bản quyền/u.test(b.message)),JSON.stringify(response.failedBlocks.map(b=>b.code)));
+ const refused=[],translated=new Set(response.blocks.map(b=>b.id));
+ for(let extra=0;extra<2&&left.length;extra++){
+  response=await translatePdfBlocks(env,{blocks:line(48).filter(b=>left.includes(b.id)),partial:true});for(const b of response.blocks)translated.add(b.id);
+  refused.push(...response.failedBlocks.filter(b=>b.code==='gemini_refused').map(b=>b.id));left=response.failedBlocks.filter(b=>b.code==='not_reached').map(b=>b.id);
+ }
+ assert.deepEqual(left,[]);assert.deepEqual(refused.sort(),['p1-b0','p1-b47']);assert.equal(translated.size,46,'no innocent block is left in Chinese');
+ // Three refusals: sent again in the groups they were left in (below), no other block is stranded either.
+ const bad=['p1-b5','p1-b20','p1-b40'];requests=blockGemini(t,ids=>ids.some(id=>bad.includes(id))?refusal('RECITATION'):translations(ids));
+ response=await translatePdfBlocks(env,{blocks:line(48),partial:true});
+ const groupsOf=answer=>{const groups=[];for(const b of answer.failedBlocks.filter(b=>b.code==='not_reached')){assert.ok(Number.isInteger(b.group),JSON.stringify(b));(groups[b.group]??=[]).push(b.id);}return groups;};
+ let groups=groupsOf(response);assert.ok(groups.length>1&&groups.every(Boolean),JSON.stringify(groups));
+ const reached=new Set(response.blocks.map(b=>b.id)),stopped=new Set(response.failedBlocks.filter(b=>b.code==='gemini_refused').map(b=>b.id));
+ for(let extra=0;extra<2&&groups.length;extra++){
+  const made=requests.length;response=await translatePdfBlocks(env,{blocks:line(48).filter(b=>groups.flat().includes(b.id)),partial:true,groups});
+  assert.deepEqual(requests.slice(made,made+groups.length),groups,'each group is asked first as it was left');
+  for(const b of response.blocks)reached.add(b.id);for(const b of response.failedBlocks.filter(b=>b.code==='gemini_refused'))stopped.add(b.id);groups=groupsOf(response);
+ }
+ assert.deepEqual(groups,[]);assert.deepEqual([...stopped].sort(),bad.toSorted());assert.equal(reached.size,45,'no innocent block is left in Chinese');
+ // Groups that do not fit the request are ignored: it is one group, as before.
+ requests=blockGemini(t,ids=>translations(ids));
+ for(const groups of [[['p1-b0'],['p1-b0']],[['p1-b9']],'x',[[]]])await translatePdfBlocks(env,{blocks:line(2),partial:true,groups});
+ assert.deepEqual(requests,Array(4).fill(['p1-b0','p1-b1']));
  // p1-b0 twice, p1-b1 missing, p9-b9 unknown; the retry fixes both.
  const fixed=blockGemini(t,(ids,n)=>n===1?gemini(result([{id:'p1-b0',translation:'Một.'},{id:'p1-b0',translation:'Hai.'},{id:'p9-b9',translation:'Lạ.'},{id:'p1-b2',translation:'Ba.'}])):translations(ids));
  const salvaged=await translatePdfBlocks(env,{blocks:line(3),partial:true});
  assert.deepEqual(fixed,[['p1-b0','p1-b1','p1-b2'],['p1-b0','p1-b1']]);
  assert.deepEqual(salvaged.blocks,[{id:'p1-b0',translation:'Bản dịch p1-b0.'},{id:'p1-b1',translation:'Bản dịch p1-b1.'},{id:'p1-b2',translation:'Ba.'}]);assert.deepEqual(salvaged.failedBlocks,[]);
+});
+
+// D5: one more try per block. A batch Gemini refuses whole (every block of a famous text, an answer it never writes
+// readably) costs one request's MAX_CALLS: what is left fails as its group did, so the browser does not send it again and
+// again. A request that is itself a block's one more try (body.again: the browser's try on its own, a whole-book run's
+// last pass) is never asked again inside. A draft paid for before the budget ran out is kept, its retry cut or not.
+test('A batch refused whole costs at most MAX_CALLS and comes back refused, not owed; a request marked again costs one call; a draft whose retry the budget cut is kept',async t=>{
+ let requests=blockGemini(t,()=>refusal('RECITATION'));
+ let response=await translatePdfBlocks(env,{blocks:line(48),partial:true});
+ assert.ok(requests.length<=MAX_CALLS,`${requests.length} calls`);assert.deepEqual(response.blocks,[]);
+ assert.ok(response.failedBlocks.length===48&&response.failedBlocks.every(b=>b.code==='gemini_refused'),JSON.stringify(response.failedBlocks.map(b=>b.code)));
+ // A block whose formula token keeps getting lost: its request and the server's retry; marked again, the request alone.
+ const token=[{id:'p1-b2',source:'公式 @@PDF_INLINE_0@@ 成立。'}],sent=instructions(t);sent.answer=()=>'Công thức bị mất.';
+ response=await translatePdfBlocks(env,{blocks:token,partial:true});assert.equal(sent.length,2);
+ sent.length=0;response=await translatePdfBlocks(env,{blocks:token,partial:true,again:true});
+ assert.equal(sent.length,1,'the one more try is the try');assert.match(sent[0].instruction,/asked for again/u,'asked with the reason');
+ assert.deepEqual(response.failedBlocks.map(({id,code,draft})=>({id,code,draft})),[{id:'p1-b2',code:'block_check',draft:undefined}]);
+ // Groups sent again keep the mark; a block still keeping Chinese there comes back as its draft at once.
+ sent.length=0;sent.answer=b=>b.id==='p1-b1'?'Suy nghĩ 思考 tiếp.':`Đoạn ${b.id} đã dịch đầy đủ.`;
+ response=await translatePdfBlocks(env,{blocks:[{id:'p1-b0',source:'第一段。'},{id:'p1-b1',source:'思考。'}],partial:true,again:true,groups:[['p1-b0'],['p1-b1']]});
+ assert.deepEqual(sent.map(call=>call.ids),[['p1-b0'],['p1-b1']]);assert.deepEqual(response.failedBlocks.map(({id,code,problems})=>({id,code,problems})),[{id:'p1-b1',code:'block_check',problems:['han']}]);
+ // Refusals around two drafts take the budget before their retry: each draft comes back to use, never as not reached.
+ const refused=['p1-b0','p1-b20','p1-b40'],han=['p1-b10','p1-b30'];
+ requests=blockGemini(t,ids=>ids.some(id=>refused.includes(id))?refusal('RECITATION'):gemini(result(ids.map(id=>({id,translation:`Đoạn ${id} được dịch đầy đủ sang tiếng Việt${han.includes(id)?' 思考':''}.`})))));
+ response=await translatePdfBlocks(env,{blocks:line(48),partial:true});assert.equal(requests.length,MAX_CALLS);
+ for(const id of han){const failure=response.failedBlocks.find(b=>b.id===id);assert.equal(failure?.code,'block_check',id);assert.match(failure.draft,/思考/u);}
 });
 
 test('The study route passes partial through and answers 200 with failedBlocks',async t=>{
@@ -275,7 +332,7 @@ test('One translation for two sources is named only when its words outside formu
  }
 });
 
-test('Strict mode asks once more for a block that keeps Chinese, lacks a number or is far too short, and keeps the better translation with its warnings',async t=>{
+test('Every mode asks once more for a block that keeps Chinese; strict modes also for one lacking a number or far too short, keeping the better translation with its warnings',async t=>{
  const blocks=[{id:'p3-b1',source:'向量的模是向量的长度。'},{id:'p3-b2',source:'第3节有12道习题。'},{id:'p3-b3',source:'“的”字在这里表示所属关系。'},{id:'p3-b4',source:'物体的加速度与合力成正比，与质量成反比，这就是牛顿第二定律的内容。'},{id:'p3-b5',source:'两个向量相等。'}];
  // By call: Chinese left, then fixed; 12 dropped twice (the first stays); a character the source quotes, which may stay;
  // far too short, then whole.
@@ -285,31 +342,99 @@ test('Strict mode asks once more for a block that keeps Chinese, lacks a number 
  const chosen=[answers['p3-b1'][1],answers['p3-b2'][0],answers['p3-b3'][0],answers['p3-b4'][1],answers['p3-b5'][0]];
  let requests=answered(t,answer);const strict=await translatePdfBlocks(env,{blocks},{strict:true});
  assert.deepEqual(requests,[ids,again]);assert.deepEqual(strict.blocks.map(b=>b.translation),chosen);assert.equal(strict.usage.requests,2);
- assert.deepEqual(strict.warnings,['Block p3-b3: còn chữ Hán chưa dịch: 的','Block p3-b2: bản dịch thiếu hoặc đổi số của nguyên tác: 12']);
+ // A character the source quotes may stay: it is neither asked for again nor named.
+ assert.deepEqual(strict.warnings,['Block p3-b2: bản dịch thiếu hoặc đổi số của nguyên tác: 12']);
  // The same with partial answers: nothing fails, the same translations are chosen.
  requests=answered(t,answer);const partial=await translatePdfBlocks(env,{blocks,partial:true},{strict:true});
  assert.deepEqual(requests,[ids,again]);assert.deepEqual(partial.blocks.map(b=>b.translation),chosen);assert.deepEqual(partial.failedBlocks,[]);assert.deepEqual(partial.warnings,strict.warnings);
- // Without strict these are warnings only, after one call.
- requests=answered(t,answer);const loose=await translatePdfBlocks(env,{blocks});
- assert.deepEqual(requests,[ids]);assert.deepEqual(loose.warnings.map(w=>w.split(':')[0]),['Block p3-b1','Block p3-b3','Block p3-b2','Block p3-b4']);
- // A retry refused or unreadable leaves the first translations, never a failed block, and its tokens are counted.
+ // Without strict only the block that kept Chinese is asked for again; a number missing and a short translation are
+ // warnings only.
+ for(const body of [{blocks},{blocks,partial:true}]){
+  requests=answered(t,answer);const loose=await translatePdfBlocks(env,body);
+  assert.deepEqual(requests,[ids,['p3-b1']]);assert.equal(loose.blocks.find(b=>b.id==='p3-b1').translation,answers['p3-b1'][1]);
+  assert.deepEqual(loose.warnings.map(w=>w.split(':')[0]),['Block p3-b2','Block p3-b4']);
+ }
+ // A retry refused or unreadable leaves the first translations and its tokens are counted: a block asked again for the
+ // strict checks keeps its own; one that kept Chinese keeps it too without partial, and with partial fails with it as draft.
  for(const partialAnswers of [false,true]){
   requests=blockGemini(t,(sent,n)=>n===1?gemini(result(sent.map(id=>({id,translation:answers[id][0]})))):refusal('SAFETY'));
-  const kept=await translatePdfBlocks(env,{blocks,partial:partialAnswers},{strict:true});
-  assert.deepEqual(kept.blocks.map(b=>b.translation),blocks.map(b=>answers[b.id][0]),String(partialAnswers));assert.equal(kept.usage.requests,2,String(partialAnswers));
-  if(partialAnswers)assert.deepEqual(kept.failedBlocks,[]);
+  const kept=await translatePdfBlocks(env,{blocks,partial:partialAnswers},{strict:true});assert.equal(kept.usage.requests,2,String(partialAnswers));
+  if(!partialAnswers){assert.deepEqual(kept.blocks.map(b=>b.translation),blocks.map(b=>answers[b.id][0]));continue;}
+  assert.deepEqual(kept.blocks.map(b=>b.translation),blocks.slice(1).map(b=>answers[b.id][0]));
+  assert.deepEqual(kept.failedBlocks,[{id:'p3-b1',code:'block_check',message:'Block p3-b1 còn chữ Hán chưa dịch: 向量.',draft:answers['p3-b1'][0],problems:['han']}]);
  }
 });
 
-test('Strict mode asks a block that failed a check and one that fell short of the strict checks again together; only the first can still fail',async t=>{
+test('A block that dropped a year and one that kept Chinese are asked for again together; without partial the year fails the batch, with partial each fails with its draft',async t=>{
  const blocks=[{id:'p5-b1',source:'1949年成立。'},{id:'p5-b2',source:'向量的模是向量的长度。'}];
  const requests=answered(t,b=>b.id==='p5-b1'?'Được thành lập.':'Môđun của 向量 là độ dài.');
  await assert.rejects(()=>translatePdfBlocks(env,{blocks},{strict:true}),/thiếu số hoặc dẫn chứng: 1949/u);
  assert.deepEqual(requests,[['p5-b1','p5-b2'],['p5-b1','p5-b2']]);
  answered(t,b=>b.id==='p5-b1'?'Được thành lập.':'Môđun của 向量 là độ dài.');
  const partial=await translatePdfBlocks(env,{blocks,partial:true},{strict:true});
- assert.deepEqual(partial.blocks,[{id:'p5-b2',translation:'Môđun của 向量 là độ dài.'}]);assert.deepEqual(partial.failedBlocks.map(b=>[b.id,b.code]),[['p5-b1','block_check']]);
- assert.deepEqual(partial.warnings,['Block p5-b2: còn chữ Hán chưa dịch: 向量']);
+ assert.deepEqual(partial.blocks,[]);assert.deepEqual(partial.warnings,[]);
+ assert.deepEqual(partial.failedBlocks,[{id:'p5-b1',code:'block_check',message:'Block p5-b1 thiếu số hoặc dẫn chứng: 1949.',draft:'Được thành lập.',problems:['numbers']},{id:'p5-b2',code:'block_check',message:'Block p5-b2 còn chữ Hán chưa dịch: 向量.',draft:'Môđun của 向量 là độ dài.',problems:['han']}]);
+});
+
+// Tiết kiệm (no strict), partial as the browser sends it. Each answer is answer(block as sent, call number).
+const instructions=t=>{const sent=[];t.mock.method(globalThis,'fetch',async(url,options)=>{const body=JSON.parse(options.body),blocks=JSON.parse(body.contents[0].parts[0].text).blocks;sent.push({ids:blocks.map(b=>b.id),instruction:body.systemInstruction.parts[0].text});return gemini(result(blocks.map(b=>({id:b.id,translation:sent.answer(b,sent.length)}))));});return sent;};
+
+test('Every mode asks once more, saying why, for a heading Gemini leaves in Chinese; left again, it comes back as a draft to look at',async t=>{
+ const blocks=[{id:'p1-b1',source:'空间向量的概念。'},{id:'p1-b2',source:'思考'},{id:'p1-b3',source:'小资料'}];
+ // 思考 is echoed twice; 小资料 half translated, then whole.
+ let sent=instructions(t);sent.answer=(b,call)=>({'p1-b1':'Khái niệm vectơ trong không gian.','p1-b2':'思考','p1-b3':call===1?'Tư liệu 小资料':'Tư liệu tham khảo'})[b.id];
+ const response=await translatePdfBlocks(env,{blocks,partial:true});
+ assert.deepEqual(sent.map(call=>call.ids),[['p1-b1','p1-b2','p1-b3'],['p1-b2','p1-b3']]);
+ assert.equal(sent[0].instruction,BLOCK_TRANSLATION_RULES,'a first request carries the rules alone');
+ assert.ok(sent[1].instruction.startsWith(BLOCK_TRANSLATION_RULES)&&/asked for again: a previous answer left Chinese in them/u.test(sent[1].instruction)&&/Hán-Việt reading with the Chinese in parentheses/u.test(sent[1].instruction),'the second says why');
+ // ... and keeps the Chinese a lesson teaches as language, as the text-mode correction does (ai.js TEXT_REPAIR_INSTRUCTION).
+ assert.match(sent[1].instruction,/Chinese the text discusses as language \(a character, word or example it teaches, reads or asks to write\) stays as written, with its reading\./u);
+ assert.deepEqual(response.blocks,[{id:'p1-b1',translation:'Khái niệm vectơ trong không gian.'},{id:'p1-b3',translation:'Tư liệu tham khảo'}]);
+ assert.deepEqual(response.failedBlocks,[{id:'p1-b2',code:'block_check',message:'Block p1-b2 còn chữ Hán chưa dịch: 思考.',draft:'思考',problems:['han']}]);
+ assert.deepEqual(response.usage,spent(2));
+ // Chinese a translation may keep costs no second call: a character the source quotes, a name glossed in parentheses.
+ sent=instructions(t);sent.answer=b=>({'p2-b1':'Chữ “的” chỉ quan hệ sở hữu.','p2-b2':'Trương Tam (张三) đến trường.'})[b.id];
+ const kept=await translatePdfBlocks(env,{blocks:[{id:'p2-b1',source:'“的”字表示所属关系。'},{id:'p2-b2',source:'张三来到学校。'}],partial:true});
+ assert.equal(sent.length,1);assert.deepEqual(kept.failedBlocks,[]);assert.deepEqual(kept.warnings,[]);
+ // A title is translated: kept in 《》 it is asked for again, given in parentheses after its rendering it is not.
+ sent=instructions(t);sent.answer=(b,call)=>call===1?'《论语》 ghi lời Khổng Tử.':'Luận ngữ (《论语》) ghi lời Khổng Tử.';
+ const title=await translatePdfBlocks(env,{blocks:[{id:'p3-b1',source:'《论语》记录了孔子的言行。'}],partial:true});
+ assert.equal(sent.length,2);assert.deepEqual(title.blocks,[{id:'p3-b1',translation:'Luận ngữ (《论语》) ghi lời Khổng Tử.'}]);
+});
+
+// The rule text mode and whole books learn by (translation-modes.js learnedTerm): a name kept with its Hán-Việt reading
+// and the Chinese in parentheses (D9) is learned, so later blocks say it the same way.
+test('A term Gemini proposes is learned only as a Vietnamese rendering, its Chinese in parentheses after a reading at most: in Chinese, Chinese first, or as its own term, never',async t=>{
+ t.mock.method(globalThis,'fetch',async()=>gemini({...result([{id:'p1-b0',translation:'Khám phá: vectơ.'}]),glossaryUpdates:{探究:'探究',张三:'Trương Tam (张三)',史景迁:'史景迁 (Sử Cảnh Khiên)',向量:'vectơ',DNA:'DNA'}}));
+ const response=await translatePdfBlocks(env,{blocks:[{id:'p1-b0',source:'探究：向量。'}],partial:true,glossary:{人名:'Nhân danh'}});
+ assert.deepEqual(response.glossary,{人名:'Nhân danh',张三:'Trương Tam (张三)',向量:'vectơ'});
+});
+
+test('A translation that drops a line or a sentence is asked for again in every mode; still short of it, it comes back as a draft to look at',async t=>{
+ const poem='床前明月光，\n疑是地上霜。\n举头望明月，\n低头思故乡。',exercise='(1) 求证：平面ABC与平面ABD垂直；\n(2) 求二面角C-AB-D的大小；\n(3) 若点P在棱AB上，求点P到平面的距离。';
+ const full={poem:'Đầu giường ánh trăng soi,\nNgỡ mặt đất phủ sương.\nNgẩng đầu nhìn trăng sáng,\nCúi đầu nhớ cố hương.',exercise:'(1) Chứng minh mặt phẳng ABC vuông góc với mặt phẳng ABD;\n(2) Tìm góc nhị diện C-AB-D;\n(3) Nếu điểm P nằm trên cạnh AB, tìm khoảng cách từ P đến mặt phẳng.'};
+ const short={poem:full.poem.split('\n').filter((_,i)=>i!==2).join('\n'),exercise:full.exercise.split('\n').filter((_,i)=>i!==1).join('\n')};
+ const blocks=[{id:'p1-b1',source:poem},{id:'p1-b2',source:exercise},{id:'p1-b3',source:'他来了。我走了。'}];
+ // The poem lacks its third line twice; the exercise lacks (2) once; two short sentences joined lose nothing.
+ const sent=instructions(t);sent.answer=(b,call)=>b.id==='p1-b1'?short.poem:b.id==='p1-b2'?call===1?short.exercise:full.exercise:'Anh ấy đến và tôi đi.';
+ const response=await translatePdfBlocks(env,{blocks,partial:true});
+ assert.deepEqual(sent.map(call=>call.ids),[['p1-b1','p1-b2','p1-b3'],['p1-b1','p1-b2']]);
+ assert.deepEqual(response.blocks,[{id:'p1-b2',translation:full.exercise},{id:'p1-b3',translation:'Anh ấy đến và tôi đi.'}]);
+ assert.deepEqual(response.failedBlocks,[{id:'p1-b1',code:'block_check',message:'Block p1-b1 bản dịch có thể thiếu dòng so với nguyên tác.',draft:short.poem,problems:['rows']}]);
+ // Every line there, or one sentence joined to another: the zero-token check says nothing and no call is added.
+ for(const [source,translation] of [[poem,full.poem],[exercise,full.exercise],['他来了。我走了。','Anh ấy đến và tôi đi.'],['甲来了。乙走了。丙笑了。','Giáp đến, Ất đi. Bính cười.']])assert.equal(missingRows(source,translation),0,translation);
+ // Short sentences read as one in Vietnamese, joined by commas or semicolons: a primary reader, exclamations, a dialogue,
+ // terse solution steps (any subject).
+ for(const [source,translation] of [['小猫来了。小狗来了。小鸡也来了。','Mèo con đến, chó con đến, gà con cũng đến.'],['好！好！好！','Tốt, tốt, tốt!'],['你好！我叫小明。你呢？','Chào bạn, mình tên Tiểu Minh, còn bạn?'],['解：因为a=1，所以b=2。因此c=3。故d=4。','Giải: Vì a=1 nên b=2, do đó c=3, vậy d=4.'],['他笑了。她哭了。我走了。','Anh ấy cười; cô ấy khóc; tôi đi.']])assert.equal(missingRows(source,translation),0,translation);
+ for(const [source,translation] of [[poem,short.poem],[exercise,short.exercise],['甲来了。乙走了。丙笑了。丁哭了。','Giáp đến. Ất đi.'],['注意：\n在空间中，任意两个向量都是共面的。','Trong không gian, hai vectơ bất kỳ luôn đồng phẳng.'],
+  // The source's own commas hold none of its sentences, and a translation far too short gets no comma's benefit.
+  ['甲来了，乙走了。丙笑了。丁哭了。','Giáp đến, Ất đi.'],['春天来了。花开了。鸟儿在树上唱歌。','Theo đó, xuân đến.']])assert.ok(missingRows(source,translation)>0,translation);
+});
+
+test('Clean answers cost one call per batch: the checks of every mode add none',async t=>{
+ const sent=instructions(t);sent.answer=b=>`Đoạn ${b.id.split('-b')[1]}: vectơ trong không gian có độ lớn và hướng.`;
+ const response=await translatePdfBlocks(env,{blocks:Array.from({length:48},(_,i)=>({id:`p1-b${i}`,source:`第${i}段：空间向量有大小和方向。`})),partial:true});
+ assert.equal(sent.length,1);assert.equal(response.blocks.length,48);assert.deepEqual(response.failedBlocks,[]);assert.deepEqual(response.usage,spent(1));
 });
 
 test('A translation that leaves a \( or \[ open, or closes one never opened, is named: the page prints the delimiter as written',()=>{

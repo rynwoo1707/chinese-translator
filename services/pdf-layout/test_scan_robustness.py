@@ -200,7 +200,8 @@ class PageObjects(unittest.TestCase):
         self.assertTrue(all(any(inside(p, b["box"]) for b in self.page["blocks"]) for p in rows))
 
     def test_text_that_reaches_no_block_is_reported(self):
-        # Tesseract reading nothing on the prose round the photograph leaves it in no block: the page says so.
+        # Tesseract reading nothing on the prose round the photograph leaves it in no block: the page's one note on
+        # what stays Chinese names that cause, and its count.
         page, real = self.scan[0], extract.tesseract
         wrap = fitz.Rect(60, 260, 320, 400)
 
@@ -210,13 +211,18 @@ class PageObjects(unittest.TestCase):
             return real(page, rect, language, dpi, invert)
 
         extract.tesseract = blind
+        lost = {}
         try:
-            blocks, masks, protected, notes = extract.scan_layout(page, 1)
+            blocks, masks, protected, notes = extract.scan_layout(page, 1, untranslated=lost)
         finally:
             extract.tesseract = real
-        self.assertTrue(any("không thuộc đoạn nào" in note for note in notes), notes)
+        found = [note for note in notes if "vẫn giữ nguyên chữ gốc" in note]
+        self.assertEqual(len(found), 1, notes)
+        self.assertRegex(found[0], r"^Trang 1: khoảng \d+ chữ Hán mà OCR không đọc được")
+        self.assertGreaterEqual(lost["unread"], 100, lost)
         # the page as scanned says nothing of the kind
-        self.assertFalse([w for w in self.document["warnings"] if "không thuộc" in w])
+        self.assertFalse([w for w in self.document["warnings"] if "giữ nguyên chữ gốc" in w])
+        self.assertFalse(any(self.page["untranslated"].values()), self.page["untranslated"])
 
 
 class Rules(unittest.TestCase):

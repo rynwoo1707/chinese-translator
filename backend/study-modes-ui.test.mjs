@@ -4,9 +4,10 @@ import {readFile} from 'node:fs/promises';
 import {createRequire} from 'node:module';
 import {fileURLToPath} from 'node:url';
 import {extname,join,normalize} from 'node:path';
-import {MODES,ADMIN_DEFAULT_MODE,modeProfile,modeLabel} from '../frontend/translation-modes.js';
+import {MODES,ADMIN_DEFAULT_MODE,modeProfile,modeLabel,LAYOUT_VERSION} from '../frontend/translation-modes.js';
 import {ocrImageBatches,blockBatches} from '../frontend/pdf-box-layout.js';
 import {pageTokens,formatTokens} from '../frontend/whole-book.js';
+import {W,H,BODY,BODY2,chineseFont,write,image,glyphs,png,drawScan} from './test-support/text-pdf.mjs';
 
 // "Cách dịch" (frontend/translation-modes.js) in Xưởng dịch, in Microsoft Edge: the hint under the field, the mode sent
 // with every request of a kept-layout run in calls no larger than the mode allows, the second reading of kept and
@@ -33,11 +34,11 @@ const DOUBT_NOTE='Bản đọc của Gemini cho đoạn này có chỗ đáng ng
 // (OCR sheets of that many blocks each, extract.py ocr_sheets). Tab labels are unique in the document, as extract.py makes them.
 function scanned(pages){
  let label=0;
- return {version:1,extractionVersion:3,engine:'pymupdf',totalPages:pages.length,warnings:[],pages:pages.map((spec,p)=>{
+ return {version:1,extractionVersion:LAYOUT_VERSION,engine:'pymupdf',totalPages:pages.length,warnings:[],pages:pages.map((spec,p)=>{
   const number=p+1,count=spec.sheets?spec.sheets.reduce((a,b)=>a+b,0):spec.blocks,ocrSheets=[];
   const blocks=Array.from({length:count},(_,i)=>{const source=`（扫描）第${number}页第${i+1}段`;return {id:`p${number}-b${i+1}`,text:source,source,box:[40,24+i*11,360,33+i*11],fontSize:8,...(spec.sheets?{}:{image:PNG})};});
   let next=0;for(const [s,size] of (spec.sheets||[]).entries()){const id=`p${number}-s${s+1}`,strips=blocks.slice(next,next+size).map((b,i)=>{b.ocrSheet=id;b.ocrLabel=`#${++label}`;return {label:b.ocrLabel,blockId:b.id,box:[0,i*20,100,i*20+18]};});ocrSheets.push({id,image:PNG,strips});next+=size;}
-  return {number,width:400,height:560,original:PNG,background:PNG,blocks,images:[],drawings:[],ocr:true,protectedRegions:[],extractionVersion:3,...(spec.sheets?{ocrSheets}:{})};
+  return {number,width:400,height:560,original:PNG,background:PNG,blocks,images:[],drawings:[],ocr:true,protectedRegions:[],extractionVersion:LAYOUT_VERSION,...(spec.sheets?{ocrSheets}:{})};
  })};
 }
 const keptNote=id=>{const [,page,k]=/^p(\d+)-b(\d+)$/u.exec(id);return `Trang ${page} · đoạn ${k}: Gemini không trả bản đọc dùng được. Đoạn này giữ chữ OCR máy, có thể sai; hãy đối chiếu với trang gốc.`;};
@@ -170,7 +171,7 @@ test('Kỹ nhất goes with the extraction, every OCR call and every translation
  assert.ok(counts.premium>counts.economy,`Kỹ nhất makes more, smaller calls: ${JSON.stringify(counts)}`);
 });
 
-test('A mode that reads again sends the kept and the doubtful readings once more after the OCR pass (reread), kept ones first, at most maxPerPage a page; the notes follow; Tiết kiệm never reads again',{skip,timeout:150000},async()=>{
+test('A mode that reads again sends the kept and the doubtful readings once more after the OCR pass (reread), kept ones first, at most maxPerPage a page; the notes follow; Tiết kiệm reads again only what it could not read and readings short of their strip\'s Chinese',{skip,timeout:150000},async()=>{
  const document=scanned([{blocks:8},{blocks:2}]);
  const first={'p1-b2':{kept:'unread'},'p1-b3':{doubt:'tex'},'p1-b5':{doubt:'glued'},'p1-b6':{kept:'formula'},'p1-b8':{doubt:'hint'},'p2-b1':{doubt:'han'}};
  // Read again, p1-b6 is still kept and p1-b3 still doubtful; the others come back good.
@@ -202,11 +203,13 @@ test('A mode that reads again sends the kept and the doubtful readings once more
   const before=account.ocr.length;await page.keyboard.press('Escape');await page.click('#translate');await idle(page);assert.equal(account.ocr.length,before);
   assert.deepEqual(errors,[]);
  }finally{await context.close();}
- // Tiết kiệm reads once: the same readings, no reread, the kept note stays.
+ // Tiết kiệm reads again only the block Gemini could not read (p1-b2) and the reading short of its strip's Chinese (p2-b1):
+ // never a block kept for its formula (p1-b6) nor a formula doubt. The note of p1-b2 goes; that of p1-b6 stays.
  const cheap=layoutAccount(document,{first,again}),plain=await openStudy(cheap.api);
  try{
   await pickPdf(plain.page,2);await plain.page.click('#translate');await waitProgress(plain.page,EXPORTED);await idle(plain.page);
-  assert.equal(cheap.ocr.filter(body=>body.reread).length,0);assert.ok((await plain.page.textContent('#warnings')).includes(keptNote('p1-b2')));
+  checkRereads(cheap,'economy',{exact:['p1-b2','p2-b1']});
+  const warnings=await plain.page.textContent('#warnings');assert.ok(!warnings.includes(keptNote('p1-b2')),warnings);assert.ok(warnings.includes(keptNote('p1-b6')),warnings);
   assert.deepEqual(plain.errors,[]);
  }finally{await plain.context.close();}
 });
@@ -445,5 +448,133 @@ test('A scanned page with a figure keeps the reading Gemini made of it (Kỹ nh�
    assert.deepEqual(errors,[]);
   }finally{await context.close();}
  }
+});
+
+// A PDF read as text on the study page (frontend/pdf-client.js analyzePdf, then prepare): a searchable scan, whose PDF
+// text layer is its own hidden OCR text, is read from its picture and keeps that layer where the device's reading holds
+// fewer Han, gaining the lines the reading adds; Han drawn as a picture on a page of text is read on the device and set
+// where it stands. The device's reading is served in place of local-ocr.js (the page, or a cropped region: told apart
+// by the image's height), and no figure is cut out.
+const LAYER=[BODY,BODY2,BODY,BODY2],PICTURED='第四章 水的循环与人类活动';
+const READER=`import {structureLayoutBlocks} from './document-layout.js';import {assessLocalOcr} from './ocr-policy.js';
+export const OCR_DOWNLOAD={paddle:{engine:'PaddleOCR',mb:29},tesseract:{engine:'Tesseract',mb:9}};
+export async function ocrDownload(){return {cached:true};}
+export function fallbackNotice(){return '';}
+export function missedNotice(cells){return 'khoảng '+cells+' chữ chưa đọc được';}
+export async function terminateLocalOcr(){}
+const PAGE=${JSON.stringify(['第三章 归乡',BODY,BODY2.replace('河水','河木'),BODY,BODY2])},REGION=${JSON.stringify([PICTURED])};
+export async function recognizeChinesePage(blob){const {height}=await createImageBitmap(blob),lines=height>600?PAGE:REGION;const layout={engine:'paddle',width:1240,height:1754,...structureLayoutBlocks(lines.map((text,i)=>({id:'line-'+(i+1),text,box:{x:.08,y:.1+i*.05,width:.84,height:.03},confidence:93}))),confidence:93,metrics:{}};return {...assessLocalOcr(layout,{preserveNumbers:true}),layout,engine:'paddle',metrics:{}};}`;
+const NO_FIGURES=`export function detectDocumentFigures(){return [];}
+export async function extractPageFigures(){return [];}`;
+async function searchablePdf(){
+ const heading=png((()=>{const img=image(320,40);glyphs(img,{x:10,y:8,size:24,count:9});return img;})()),doc=await PDFDocument.create();
+ let page=doc.addPage([W,H]),font=chineseFont(doc,page,'S');await drawScan(doc,page);LAYER.forEach((line,l)=>write(page,font,11,60,640-l*26,line,{mode:3}));
+ page=doc.addPage([W,H]);font=chineseFont(doc,page,'T');page.drawImage(await doc.embedPng(heading),{x:140,y:760,width:320,height:40});for(let l=0;l<12;l++)write(page,font,11,60,650-l*22,l%2?BODY2:BODY);
+ return Buffer.from(await doc.save());
+}
+test('A searchable scan read as text keeps its own OCR layer and gains the lines the device reads more; a heading drawn as a picture is read on the device and set where it stands; what the checks still find is named by its page',{skip,timeout:150000},async()=>{
+ const ID='5e6f7a8b-9c0d-4e1f-8a2b-3c4d5e6f7a83',sent=[],{context,page,errors}=await openStudy((path,method,json)=>{
+  if(path==='/api/my/study/pdf-layout/config')return {configured:false};
+  if(path==='/api/my/study/history'&&method==='POST')return {id:ID,status:'draft',libraryStoryId:null,updatedAt:now(),revision:1};
+  if(path===`/api/my/study/history/${ID}`&&method==='PUT')return {id:ID,status:'complete',libraryStoryId:null,updatedAt:now(),revision:2};
+  if(path==='/api/my/study/ocr')throw new Error('the device read every page: no Gemini OCR');
+  // What the server's checks still find in a part is named by the part's page (backend/ai.js textProblems: "Đoạn k: …").
+  if(path==='/api/my/study/translate'){sent.push(json.source);return {translation:'Bản dịch.',context:'',glossary:{},usage:{prompt:10,output:5,total:15,requests:1},warnings:sent.length===1?['Đoạn 1: còn chữ Hán chưa dịch: 归乡','Thuật ngữ mới cần xem lại.']:[]};}
+ },{init:()=>Object.defineProperty(navigator,'connection',{configurable:true,value:{saveData:false,effectiveType:'4g'}}),modules:{'/local-ocr.js':READER,'/document-figures.js':NO_FIGURES}});
+ try{
+  await page.waitForFunction(()=>/chưa được cấu hình/u.test(document.querySelector('#pdf-layout-service-status').textContent));
+  await page.fill('#content-title','Sách có trang scan tìm được chữ');await page.fill('#api-key',KEY);await page.selectOption('#mode','economy');
+  await page.setInputFiles('#source-file',{name:'sach.pdf',mimeType:'application/pdf',buffer:await searchablePdf()});
+  await page.waitForFunction(()=>/trang scan/u.test(document.querySelector('#file-status').textContent),null,{timeout:60000});
+  assert.match(await page.textContent('#file-status'),/^1 trang có lớp chữ · 1 trang scan \(1 trang có lớp chữ không khớp ảnh trang nên sẽ được đọc lại từ ảnh\)\. Đang chọn 1-2;/u);
+  await page.click('#translate');await waitProgress(page,/^Hoàn tất/u,120000);
+  const [scan,text]=(await page.inputValue('#source')).split('\n\n');
+  assert.equal(scan,['第三章 归乡',...LAYER].join('\n'),'the layer\'s own lines stay (a character the device misread changes nothing) and the title it lacked is added');
+  assert.equal(text.split('\n')[0],PICTURED,'the pictured heading is read and set above the text it heads');assert.match(text,new RegExp(BODY,'u'));
+  const notes=await page.textContent('#warnings');
+  assert.match(notes,/Trang 1: lớp chữ có sẵn của PDF là chữ nhận dạng nằm ẩn dưới ảnh scan nên trang được đọc lại từ ảnh\./u);
+  assert.match(notes,/Trang 1: lớp chữ nhận dạng sẵn trong PDF thiếu khoảng \d+ chữ so với ảnh trang; đã thêm các dòng đó từ bản nhận dạng lại\./u);
+  assert.match(notes,/Trang 2: khoảng 9 chữ nằm trong hình ảnh hoặc nét vẽ, không có trong lớp chữ của PDF, nên được nhận dạng từ ảnh\./u);
+  assert.match(notes,/^Trang 1 · đoạn 1: còn chữ Hán chưa dịch: 归乡$/mu);assert.match(notes,/^Trang 1: Thuật ngữ mới cần xem lại\.$/mu);
+  assert.ok(sent.join('\n').includes(PICTURED),'the reading reaches the translation');assert.deepEqual(errors,[]);
+ }finally{await context.close();}
+});
+
+// The device's reader served in place of local-ocr.js: a page reads weakly, and a cropped region (told apart by the
+// image's height) makes the reader itself fail.
+const FAILING=`import {structureLayoutBlocks} from './document-layout.js';import {assessLocalOcr} from './ocr-policy.js';
+export const OCR_DOWNLOAD={paddle:{engine:'PaddleOCR',mb:29},tesseract:{engine:'Tesseract',mb:9}};
+export async function ocrDownload(){return {cached:true};}
+export function fallbackNotice(){return '';}
+export function missedNotice(cells){return 'khoảng '+cells+' chữ chưa đọc được';}
+export async function terminateLocalOcr(){}
+export async function recognizeChinesePage(blob){const {height}=await createImageBitmap(blob);if(height<=600)throw new Error('the device reader failed');const layout={engine:'paddle',width:1240,height:1754,...structureLayoutBlocks([{id:'line-1',text:'第一课',box:{x:.1,y:.3,width:.3,height:.03},confidence:90}]),confidence:90,metrics:{}};return {...assessLocalOcr(layout,{preserveNumbers:true}),layout,engine:'paddle',metrics:{}};}`;
+// A history kept here: saves, the list and a session opened again.
+function historyStore(ID){
+ const store={state:null,api(path,method,json){
+  if(path==='/api/my/study/history'&&method==='POST'||path===`/api/my/study/history/${ID}`&&method==='PUT'){store.state=structuredClone(json.state);const complete=json.state.done===json.state.parts.length;return {id:ID,status:complete?'complete':'translating',libraryStoryId:null,updatedAt:now(),revision:method==='POST'?1:2};}
+  const row=()=>({id:ID,title:'Sách scan',filename:'sach-scan.pdf',domain:'general',mode:'premium',status:'complete',translated_parts:store.state.done,total_parts:store.state.parts.length,library_story_id:null,library_chapter_id:'chapter-1',created_at:'2026-10-30 01:00:00',updated_at:'2026-10-30 01:00:00',revision:2});
+  if(path==='/api/my/study/history'&&method==='GET')return store.state?[row()]:[];
+  if(path===`/api/my/study/history/${ID}`&&method==='GET')return {...row(),state:store.state};
+ }};
+ return store;
+}
+// D8 for pages read from their image: a line repeated at the same edge of three pages or more (a running head or foot) is
+// kept where it first appears and dropped where it repeats; headings and body lines stay. Gemini's [đầu trang]/[chân
+// trang] marks (the OCR answer's marked text) make the edge firm, so a running head that reads like a heading goes too;
+// without them the first and last lines are only a guess, and a heading-like one stays. The notes the checks leave on a
+// text session ("Trang N · đoạn k: …") are saved with it and named again when it is opened again.
+test('Pages read from their image keep a running head or foot once (firm where Gemini marked it); the checks\' notes of a text session come back with it',{skip,timeout:180000},async()=>{
+ const ID='5e6f7a8b-9c0d-4e1f-8a2b-3c4d5e6f7a84',doc=await PDFDocument.create();for(let n=0;n<4;n++)await drawScan(doc,doc.addPage([W,H]));const pdf=Buffer.from(await doc.save());
+ const lines=n=>[`[đầu trang] 第一章 集合与函数概念`,`第${n}节 集合的含义`,`第${n}页正文：学而时习之，不亦说乎。`,'[chân trang] 人民教育出版社'];
+ const body=n=>[`第${n}节 集合的含义`,`第${n}页正文：学而时习之，不亦说乎。`];
+ for(const marked of [true,false]){
+  const history=historyStore(ID),{context,page,errors}=await openStudy((path,method,json)=>{
+   if(path==='/api/my/study/pdf-layout/config')return {configured:false};
+   if(path==='/api/my/study/ocr'){const n=Number(/page-(\d+)\./u.exec(json.get('image').name)[1]),text=lines(n).join('\n');return {text:text.replace(/\[(?:đầu|chân) trang\] /gu,''),...(marked?{marked:text}:{}),usage:{prompt:900,output:60,thinking:0,total:960,requests:1},warnings:[]};}
+   if(path==='/api/my/study/translate')return {translation:'Bản dịch.',context:'',glossary:{},usage:{prompt:10,output:5,total:15,requests:1},warnings:/第1页/u.test(json.source)?['Đoạn 2: còn chữ Hán chưa dịch: 集合']:[]};
+   return history.api(path,method,json);
+  },{init:()=>Object.defineProperty(navigator,'connection',{configurable:true,value:{saveData:false,effectiveType:'4g'}}),modules:{'/local-ocr.js':FAILING,'/document-figures.js':NO_FIGURES}});
+  try{
+   await page.waitForFunction(()=>/chưa được cấu hình/u.test(document.querySelector('#pdf-layout-service-status').textContent));
+   await page.fill('#content-title','Sách scan');await page.fill('#api-key',KEY);await page.selectOption('#mode','premium');
+   await page.setInputFiles('#source-file',{name:'sach-scan.pdf',mimeType:'application/pdf',buffer:pdf});
+   await page.waitForFunction(()=>/trang scan/u.test(document.querySelector('#file-status').textContent),null,{timeout:60000});await page.fill('#page-range','1-4');
+   await page.click('#translate');await waitProgress(page,/^Hoàn tất/u,150000);
+   const pages=(await page.inputValue('#source')).split('\n\n');
+   assert.deepEqual(pages,marked?[['第一章 集合与函数概念',...body(1),'人民教育出版社'].join('\n'),...[2,3,4].map(n=>body(n).join('\n'))]:[['第一章 集合与函数概念',...body(1),'人民教育出版社'].join('\n'),...[2,3,4].map(n=>['第一章 集合与函数概念',...body(n)].join('\n'))]);
+   assert.match(await page.textContent('#warnings'),/^Trang 1 · đoạn 2: còn chữ Hán chưa dịch: 集合$/mu);assert.deepEqual(errors,[]);
+  }finally{await context.close();}
+  if(!marked)break;
+  // Opened again from the history (a reload, another device): the notes are named again.
+  const again=await openStudy(history.api);
+  try{
+   await again.page.click('#study-history > summary');await again.page.click(`[data-history-open="${ID}"]`);await waitProgress(again.page,/Bản dịch đã hoàn tất/u);
+   assert.equal(await again.page.textContent('#warnings'),'Trang 1 · đoạn 2: còn chữ Hán chưa dịch: 集合\n');assert.deepEqual(history.state.notes,['Trang 1 · đoạn 2: còn chữ Hán chưa dịch: 集合']);assert.deepEqual(again.errors,[]);
+  }finally{await again.context.close();}
+ }
+});
+
+// A region of Han drawn as a picture on a page of text that the device's reader fails on (not only reads nothing) is read
+// by Gemini when a key is there, as the comment of prepare() says, instead of staying unread.
+test('A pictured heading the device reader fails on is read by Gemini, set where it stands',{skip,timeout:150000},async()=>{
+ const ID='5e6f7a8b-9c0d-4e1f-8a2b-3c4d5e6f7a85',forms=[],heading=png((()=>{const img=image(320,40);glyphs(img,{x:10,y:8,size:24,count:9});return img;})()),doc=await PDFDocument.create();
+ const sheet=doc.addPage([W,H]),font=chineseFont(doc,sheet,'T');sheet.drawImage(await doc.embedPng(heading),{x:140,y:760,width:320,height:40});for(let l=0;l<12;l++)write(sheet,font,11,60,650-l*22,l%2?BODY2:BODY);
+ const pdf=Buffer.from(await doc.save()),{context,page,errors}=await openStudy((path,method,json)=>{
+  if(path==='/api/my/study/pdf-layout/config')return {configured:false};
+  if(path==='/api/my/study/history'&&method==='POST')return {id:ID,status:'draft',libraryStoryId:null,updatedAt:now(),revision:1};
+  if(path===`/api/my/study/history/${ID}`&&method==='PUT')return {id:ID,status:'complete',libraryStoryId:null,updatedAt:now(),revision:2};
+  if(path==='/api/my/study/ocr'){forms.push(json.get('mode'));return {text:PICTURED,usage:{prompt:300,output:20,thinking:0,total:320,requests:1},warnings:[]};}
+  if(path==='/api/my/study/translate')return {translation:'Bản dịch.',context:'',glossary:{},usage:{prompt:10,output:5,total:15,requests:1},warnings:[]};
+ },{init:()=>Object.defineProperty(navigator,'connection',{configurable:true,value:{saveData:false,effectiveType:'4g'}}),modules:{'/local-ocr.js':FAILING,'/document-figures.js':NO_FIGURES}});
+ try{
+  await page.waitForFunction(()=>/chưa được cấu hình/u.test(document.querySelector('#pdf-layout-service-status').textContent));
+  await page.fill('#content-title','Trang có tiêu đề vẽ');await page.fill('#api-key',KEY);await page.selectOption('#mode','economy');
+  await page.setInputFiles('#source-file',{name:'tieu-de.pdf',mimeType:'application/pdf',buffer:pdf});
+  await page.waitForFunction(()=>/có lớp chữ/u.test(document.querySelector('#file-status').textContent),null,{timeout:60000});
+  await page.click('#translate');await waitProgress(page,/^Hoàn tất/u,120000);
+  assert.deepEqual(forms,['economy'],'the region went to Gemini once');assert.equal((await page.inputValue('#source')).split('\n')[0],PICTURED);
+  assert.doesNotMatch(await page.textContent('#warnings'),/chưa nhận dạng được/u);assert.deepEqual(errors,[]);
+ }finally{await context.close();}
 });
 });

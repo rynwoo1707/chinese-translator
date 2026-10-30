@@ -175,10 +175,15 @@ test('Progress reports merge: translated pages stay translated, tokens add up, t
  assert.equal(result.status,200);assert.equal(result.body.job.pageStates,'.dbfc.......');assert.deepEqual(result.body.job.usage,usage);assert.equal(result.body.job.status,'running');assert.equal(result.body.job.model,'gemini-3.1-flash-lite');
  assert.deepEqual(result.body.job.glossary,{'加速度':'gia tốc','速度':'vận tốc'});
  // A stale tab or a failed retry cannot undo a translated page; other changes apply.
- result=await ctx.json(path,'PATCH',{pages:{'2':'pending','4':'done','6':'f'},addUsage:{prompt:100,total:100,requests:1},glossary:{'速度':'tốc độ','质量':'khối lượng'}});
+ // A term a chunk learned keeping Chinese bare, or repeating its term, would keep that Chinese for the rest of the book:
+ // left out. A name given its Hán-Việt reading with the Chinese in parentheses (D9) is learned, as text mode learns it.
+ result=await ctx.json(path,'PATCH',{pages:{'2':'pending','4':'done','6':'f'},addUsage:{prompt:100,total:100,requests:1},glossary:{'速度':'tốc độ','质量':'khối lượng','探究':'探究','张三':'Trương Tam (张三)','史景迁':'史景迁 (Sử Cảnh Khiên)','DNA':'DNA'}});
  assert.equal(result.body.job.pageStates,'.dbdcf......');assert.deepEqual(result.body.job.usage,{prompt:1000,output:300,thinking:12,total:1312,requests:3});
- assert.deepEqual(result.body.job.glossary,{'加速度':'gia tốc','速度':'tốc độ','质量':'khối lượng'});
+ assert.deepEqual(result.body.job.glossary,{'加速度':'gia tốc','速度':'tốc độ','质量':'khối lượng','张三':'Trương Tam (张三)'});
  result=await ctx.json(path,'PATCH',{pages:{'4':'f','2':'skipped'}});assert.equal(result.body.job.pageStates,'.sbdcf......','failed never replaces done; the student may still skip a page');
+ // A page with no block to translate that still shows Chinese outside every block is kept apart from a blank one.
+ result=await ctx.json(path,'PATCH',{pages:{'7':'untranslated','8':'u'}});assert.equal(result.body.job.pageStates,'.sbdcfuu....');
+ result=await ctx.json(path,'PATCH',{pages:{'7':'pending','8':'pending'}});assert.equal(result.body.job.pageStates,'.sbdcf......');
  result=await ctx.json(path,'PATCH',{status:'paused',pauseReason:'quota_minute'});assert.deepEqual([result.body.job.status,result.body.job.pauseReason],['paused','quota_minute']);
  result=await ctx.json(path,'PATCH',{status:'running'});assert.deepEqual([result.body.job.status,result.body.job.pauseReason],['running',null]);
  for(const [body,code] of [[{pages:{'0':'done'}},'bad_pages'],[{pages:{'13':'done'}},'bad_pages'],[{pages:{'1':'x'}},'bad_pages'],[{pages:['done']},'bad_pages'],[{addUsage:{prompt:-1}},'bad_usage'],[{addUsage:{total:1.5}},'bad_usage'],[{model:'gpt-4o'},'bad_model'],[{status:'stopped'},'bad_status'],[{pauseReason:'x'.repeat(201)},'bad_reason'],[{glossary:['x']},'bad_glossary'],[{},'no_change'],[{title:'renamed'},'no_change']]){
@@ -201,7 +206,7 @@ test('Progress reports merge: translated pages stay translated, tokens add up, t
  const reports=[7,8,9,10].map(page=>ctx.json(path,'PATCH',{pages:{[page]:'done'},addUsage:{prompt:10,output:5,total:15,requests:1}}));
  for(const report of await Promise.all(reports))assert.equal(report.status,200);
  const final=(await ctx.send(path)).body.job;assert.equal(final.pageStates,'.sbdcfdddd..');assert.deepEqual(final.usage,{prompt:1040,output:320,thinking:12,total:1372,requests:7});
- assert.equal(ctx.sqlite.prepare('SELECT version FROM book_jobs WHERE id=?').get(job.id).version,13);
+ assert.equal(ctx.sqlite.prepare('SELECT version FROM book_jobs WHERE id=?').get(job.id).version,15);
 });
 
 test('The book glossary stays bounded, keeps the terms in use and fits the translate-blocks glossary',async t=>{

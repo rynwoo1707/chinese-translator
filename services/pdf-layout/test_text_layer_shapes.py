@@ -7,8 +7,10 @@ English text, and the smaller rules round them (reading order below two columns,
 of one-line blocks, two one-line speeches, a wrapped citation, the time budget setting). The second verification
 added pinyin with erhua, quotes or digits, the labels of a figure and the header of a table side by side, one-character
 columns of a three-line table against a side label on the body's baselines, a longer column going on after a heading
-or a figure, paragraphs on ruled or graph paper, and compound paths of many strokes. Every case is general: none is
-tuned to one subject or one sample.
+or a figure, paragraphs on ruled or graph paper, and compound paths of many strokes. Scans that carry a little real
+text (a folio, a running head, a stamp or a watermark a PDF tool, a sharing site or a printer added) are read as scans,
+one under a long stamp by what its picture shows alone; pictures drawn in rows at any size (tiles, icons, a figure's
+triangles) keep a page of text and are no Han. Every case is general: none is tuned to one subject or one sample.
 
 Pages are built with PyMuPDF; scan_layout is replaced by a stub, so no OCR runs.
 
@@ -137,7 +139,7 @@ class StubbedOcr(unittest.TestCase):
         self.saved = extract.scan_layout
         self.scanned = []
 
-        def scan_layout(page, number, fine=False):
+        def scan_layout(page, number, fine=False, glyph_sink=None, untranslated=None):
             self.scanned.append(number)
             return [{"id": f"p{number}-b1", "text": "OCR", "source": "OCR", "box": [10, 10, 60, 30], "fontSize": 10, "bold": False, "color": "#202020", "inlines": [], "image": extract.image_url(page, fitz.Rect(10, 10, 60, 30), 1)}], [], [], []
         extract.scan_layout = scan_layout
@@ -521,8 +523,12 @@ class SplitLines(StubbedOcr):
 
 class PageDecisions(StubbedOcr):
     """A born-digital page keeps its exact text: a translucent watermark over it hides nothing, a picture of English
-    text holds no Han, and with a substantial text layer glyphs in pictures are named, not read by OCR. A scan with a
-    short header added is still a scan."""
+    text holds no Han, and with a substantial text layer glyphs in pictures are named, not read by OCR. A scan that
+    carries a little real text is still a scan, whatever that text's size or place: a folio, a running head or a stamp
+    set smaller or larger than the scan's print, a stamp mid-page, a diagonal watermark, Latin text; so is a cover-like
+    scan with less text than its stamp, and a scan of figures whose picture shows Han on one row only. A running head
+    and a folio over a full-page drawing without Han, a page of text on a decorative page-size background and a sparse
+    page over a watermark tiled across a page-size picture keep their text."""
 
     def body(self, page, count=12):
         write(page, 72, 80, "第三章　物质构成的奥秘", 16)
@@ -607,6 +613,241 @@ class PageDecisions(StubbedOcr):
         target.insert_image(shown, pixmap=page.get_pixmap(dpi=100, alpha=False))
         self.assertTrue(run(doc)["pages"][0]["ocr"])
         self.assertEqual(self.scanned, [1])
+
+    # Scans that carry a little real text: a folio, a running head, a stamp, a watermark.
+    FOLIO = "第 5 页"
+    HEAD = "二〇二四学年第一学期期末复习资料（化学）第三章练习题"
+    STAMP = ("本资料由学习小组整理，仅供个人学习交流使用，请勿用于商业用途。", "更多学习资料请关注本小组的公开分享页面，欢迎转发给需要的同学。")
+
+    def scan(self, count=24, size=SIZE, dpi=120, figure=False):
+        """A page of body text (count lines at size) scanned at dpi into a page-size picture; a figure in the middle
+        leaves a sparse page."""
+        source = fitz.open()
+        page = source.new_page(width=595, height=842)
+        write(page, 72, 80, "第三章　物质构成的奥秘", 16)
+        y = 120
+        for k in range(count):
+            if figure and k == count // 2:
+                page.draw_rect(fitz.Rect(150, y, 445, y + 300), color=(0, 0, 0), width=1)
+                page.draw_oval(fitz.Rect(180, y + 30, 415, y + 270), color=(0, 0, 0), fill=(.85, .85, .85), width=1)
+                y += 315
+            write(page, 72 + (2 * size if k % 4 == 0 else 0), y, TEXT[(k * 13) % 60:(k * 13) % 60 + int(450 // size) - (2 if k % 4 == 0 else 0)], size)
+            y += 1.6 * size
+        doc = fitz.open()
+        target = doc.new_page(width=595, height=842)
+        target.insert_image(target.rect, pixmap=page.get_pixmap(dpi=dpi, alpha=False))
+        return doc, target
+
+    def decided(self, doc):
+        self.scanned = []
+        return run(doc)["pages"][0]["ocr"]
+
+    def test_a_scan_with_a_folio_added_at_any_size_is_read_by_ocr(self):
+        for k in (.5, .7, 1, 1.3, 1.6):
+            with self.subTest(folio=f"{k} x the scan's print"):
+                doc, target = self.scan()
+                write(target, 280, 820, self.FOLIO, k * SIZE)
+                self.assertTrue(self.decided(doc))
+
+    def test_a_scan_with_a_header_added_at_any_size_is_read_by_ocr(self):
+        for k in (.5, .7, 1.3, 1.6):
+            with self.subTest(header=f"{k} x the scan's print"):
+                doc, target = self.scan()
+                write(target, 40, 30, self.HEAD[:int(515 // (k * SIZE))], k * SIZE)
+                self.assertTrue(self.decided(doc))
+
+    def test_a_scan_with_a_stamp_added_is_read_by_ocr(self):
+        for k in (.7, 1):
+            for rows in (1, 2):
+                with self.subTest(stamp=f"{rows} line(s) at {k} x the scan's print"):
+                    doc, target = self.scan()
+                    for r in range(rows):
+                        write(target, 30, 836 - (rows - 1 - r) * 1.4 * k * SIZE, self.STAMP[r][:int(535 // (k * SIZE))], k * SIZE)
+                    self.assertTrue(self.decided(doc))
+
+    def test_a_sparse_scan_with_a_two_line_stamp_is_read_by_ocr(self):
+        for k in (.7, 1):
+            with self.subTest(stamp=f"two lines at {k} x the scan's print"):
+                doc, target = self.scan(count=8, figure=True)
+                for r in range(2):
+                    write(target, 30, 836 - (1 - r) * 1.4 * k * SIZE, self.STAMP[r][:int(535 // (k * SIZE))], k * SIZE)
+                self.assertTrue(self.decided(doc))
+
+    def test_a_dense_scan_with_a_folio_and_a_stamp_is_read_by_ocr(self):
+        doc, target = self.scan(count=40, size=9)
+        write(target, 280, 812, self.FOLIO, 6)
+        write(target, 30, 830, self.STAMP[0], 8)
+        self.assertTrue(self.decided(doc))
+
+    def test_a_scan_under_a_diagonal_watermark_is_read_by_ocr(self):
+        doc, target = self.scan()
+        target.insert_text((130, 540), "内部资料　仅供学习", fontname="china-s", fontsize=36, color=(.75, .75, .75), morph=(fitz.Point(130, 540), fitz.Matrix(35)))
+        self.assertTrue(self.decided(doc))
+
+    def test_a_scan_with_a_latin_stamp_is_read_by_ocr(self):
+        doc, target = self.scan()
+        latin(target, 30, 830, "Shared for study only - www.example.org - do not resell", 8)
+        self.assertTrue(self.decided(doc))
+
+    def test_a_born_digital_page_on_a_page_size_background_keeps_its_text(self):
+        """A text layer over a decorative page-size background picture, with a picture of Han text beside it: the
+        design of test_han_in_a_picture_beside_a_substantial_text_layer_is_named_not_read_by_ocr, on a background."""
+        doc = fitz.open()
+        page = doc.new_page(width=595, height=842)
+        paper = fitz.open()
+        pp = paper.new_page(width=200, height=283)
+        pp.draw_rect(pp.rect, color=None, fill=(.97, .95, .9))
+        for k in range(0, 283, 12):
+            pp.draw_line(fitz.Point(0, k), fitz.Point(200, k + 6), color=(.93, .9, .85), width=.5)
+        page.insert_image(page.rect, pixmap=pp.get_pixmap(dpi=72, alpha=False))
+        y = self.body(page, 1)
+        src = fitz.open()
+        sp = src.new_page(width=260, height=110)
+        for k in range(5):
+            sp.insert_text((6, 18 + k * 20), TEXT[k * 20 + 3:k * 20 + 23], fontname="china-s", fontsize=11)
+        page.insert_image(fitz.Rect(72, y + 10, 332, y + 120), pixmap=sp.get_pixmap(dpi=150, alpha=False))
+        self.assertFalse(self.decided(doc))
+
+    def test_a_cover_like_scan_with_a_stamp_is_read_by_ocr(self):
+        """A scan with little text (a big title, a photo, one caption line) holds fewer Han glyphs than a stamp: the
+        stamp alone never makes it a page of text."""
+        source = fitz.open()
+        page = source.new_page(width=595, height=842)
+        write(page, 120, 160, "物质构成的奥秘", 30)
+        page.draw_rect(fitz.Rect(80, 220, 515, 620), color=(0, 0, 0), fill=(.55, .6, .65), width=1)
+        write(page, 150, 660, TEXT[:20], 12)
+        doc = fitz.open()
+        target = doc.new_page(width=595, height=842)
+        target.insert_image(target.rect, pixmap=page.get_pixmap(dpi=120, alpha=False))
+        for r in range(2):
+            write(target, 30, 836 - (1 - r) * 11, self.STAMP[r], 8)
+        self.assertTrue(self.decided(doc))
+
+    def test_furniture_text_over_a_picture_without_han_keeps_its_text(self):
+        """A running head and a folio over a page-size picture with no Han in it (a full-page drawing): the text layer
+        is all there is to read."""
+        doc = fitz.open()
+        page = doc.new_page(width=595, height=842)
+        art = fitz.open()
+        ap = art.new_page(width=595, height=842)
+        for k in range(12):
+            ap.draw_circle(fitz.Point(300, 420), 30 + 20 * k, color=(.2, .3, .5), width=1.2)
+        ap.draw_line(fitz.Point(40, 420), fitz.Point(555, 420), color=(0, 0, 0), width=1)
+        page.insert_image(page.rect, pixmap=ap.get_pixmap(dpi=100, alpha=False))
+        write(page, 72, 40, "第三章　物质构成的奥秘", 10)
+        write(page, 280, 820, "第 12 页", 9)
+        self.assertFalse(self.decided(doc))
+
+    def test_a_watermark_tiled_over_a_born_digital_page_is_named_not_read_by_ocr(self):
+        """A sparse born-digital page (a heading and a caption) over a page-size picture of a watermark tiled in rows
+        five sizes apart, darker than the ink threshold: its rows are no page's text, so the page keeps its exact text
+        and the watermark's Han are named."""
+        art = fitz.open()
+        ap = art.new_page(width=595, height=842)
+        for i in range(3):
+            for j in range(5):
+                ap.insert_text((40 + i * 190, 120 + j * 160), "仅供学习交流", fontname="china-s", fontsize=24, color=(.55, .55, .55))
+        doc = fitz.open()
+        page = doc.new_page(width=595, height=842)
+        page.insert_image(page.rect, stream=ap.get_pixmap(dpi=100, colorspace=fitz.csGRAY).tobytes("jpeg", jpg_quality=85))
+        write(page, 60, 80, "第三章　光的传播", 18)
+        write(page, 60, 500, "图3-1　小孔成像", 10)
+        self.scanned = []
+        document = run(doc)
+        self.assertFalse(document["pages"][0]["ocr"])
+        self.assertEqual(self.scanned, [])
+        self.assertEqual([b["source"] for b in document["pages"][0]["blocks"]], ["第三章　光的传播", "图3-1　小孔成像"])
+        self.assertEqual(len([w for w in document["warnings"] if "nằm trong hình ảnh" in w]), 1, document["warnings"])
+
+    def test_a_sparse_scan_of_a_figure_with_a_folio_added_is_read_by_ocr(self):
+        """A scanned page of figures whose only Han set like text is one caption row: a folio added over it leaves a
+        text layer of furniture alone, and the one row of Han its picture shows makes it a scan."""
+        source = fitz.open()
+        page = source.new_page(width=595, height=842)
+        page.draw_rect(fitz.Rect(120, 150, 475, 520), color=(0, 0, 0), width=1)
+        page.draw_oval(fitz.Rect(160, 190, 435, 480), color=(0, 0, 0), fill=(.85, .85, .85), width=1)
+        write(page, 230, 545, "图1-1　小孔成像的原理", 10)
+        doc = fitz.open()
+        target = doc.new_page(width=595, height=842)
+        target.insert_image(target.rect, pixmap=page.get_pixmap(dpi=150, alpha=False))
+        write(target, 280, 820, self.FOLIO, 9)
+        self.assertTrue(self.decided(doc))
+
+    def test_a_sparse_scan_with_a_stamp_in_the_middle_is_read_by_ocr(self):
+        """A stamp (or a horizontal watermark) set in the body of a sparse scan: the picture itself shows more Han than
+        the text layer holds."""
+        for where in ("stamp", "watermark"):
+            with self.subTest(overlay=where):
+                doc, target = self.scan(count=6, figure=True)
+                if where == "stamp":
+                    for r in range(2):
+                        write(target, 30, 430 + r * 11, self.STAMP[r], 8)
+                else:
+                    for r in range(3):
+                        for c in range(2):
+                            write(target, 60 + 270 * c, 250 + 210 * r, "仅供学习交流", 30, color=(.8, .8, .8))
+                self.assertTrue(self.decided(doc))
+
+    def test_a_scan_under_a_long_stamp_is_told_by_its_picture_alone(self):
+        """Four stamp lines mid-page hold more Han than a third of what the scan shows around them: the page is a scan
+        because its picture, read on its own (picture_han), shows more Han than the text layer holds."""
+        doc, target = self.scan(count=8)
+        for r in range(4):
+            write(target, 30, 300 + r * 12, self.STAMP[r % 2], 10)
+        data = doc.tobytes()
+        self.assertTrue(self.decided(data))
+        real = extract.picture_han
+        extract.picture_han = lambda page, info, text: 0
+        try:
+            self.assertFalse(self.decided(data), "the rule that decides is the picture's own count")
+        finally:
+            extract.picture_han = real
+
+    def test_rows_of_drawn_pictures_keep_a_page_of_text_and_name_nothing(self):
+        """Pictures drawn in rows at any size (the tiles of a pattern, the icons of a counting exercise, a figure's
+        triangles growing step by step) are no glyphs: a born-digital page with a heading and a caption keeps its text,
+        and no Han is said to be left in its pictures."""
+
+        def tiles(page, x, y, s):
+            for i in range(3):
+                for j in range(3):
+                    if (i + j) % 2 == 0:
+                        page.draw_rect(fitz.Rect(x + i * s / 3, y + j * s / 3, x + (i + 1) * s / 3, y + (j + 1) * s / 3), color=None, fill=(0, 0, 0))
+
+        def triangles(page, x, y, s, depth):
+            def draw(a, b, c, d):
+                if d == 0:
+                    page.draw_polyline([a, b, c, a], color=None, fill=(.1, .5, .6), closePath=True)
+                    return
+                ab, bc, ca = (a + b) / 2, (b + c) / 2, (c + a) / 2
+                draw(a, ab, ca, d - 1)
+                draw(ab, b, bc, d - 1)
+                draw(ca, bc, c, d - 1)
+            draw(fitz.Point(x, y + s), fitz.Point(x + s, y + s), fitz.Point(x + s / 2, y + s * .13), depth)
+
+        for kind, size, raster in (("tiles", 20, False), ("tiles", 30, True), ("tiles", 45, False), ("triangles", 45, False), ("triangles", 50, True)):
+            with self.subTest(kind=kind, size=size, raster=raster):
+                art = fitz.open()
+                sheet = art.new_page(width=595, height=842)
+                for r in range(3 if kind == "tiles" else 1):
+                    for c in range(5 if kind == "tiles" else 4):
+                        x, y = 90 + c * 1.4 * size, 250 + r * 1.5 * size
+                        tiles(sheet, x, y, size) if kind == "tiles" else triangles(sheet, x, y, size, c)
+                doc = fitz.open()
+                page = doc.new_page(width=595, height=842)
+                clip = fitz.Rect(60, 230, 540, 270 + 4.5 * size)
+                if raster:
+                    page.insert_image(clip, pixmap=sheet.get_pixmap(dpi=150, clip=clip, alpha=False))
+                else:
+                    page.show_pdf_page(page.rect, art, 0)
+                write(page, 72, 120, "第三章　图形的规律", 16)
+                write(page, 200, 290 + 4.5 * size, "图 3-1　找规律", 9)
+                self.scanned = []
+                document = run(doc)
+                self.assertFalse(document["pages"][0]["ocr"])
+                self.assertEqual(self.scanned, [])
+                self.assertEqual(document["pages"][0]["untranslated"]["figure"], 0)
+                self.assertEqual([w for w in document["warnings"] if "hình ảnh" in w], [])
 
 
 class Order(StubbedOcr):

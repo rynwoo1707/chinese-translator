@@ -7,7 +7,7 @@ import {readJsonShape} from './json-shape.js';
 import * as account from './account.js';
 
 import {SUBJECT_LABELS as DOMAINS} from './subject-glossaries.js';
-import {DEFAULT_MODE,isMode} from '../frontend/translation-modes.js';
+import {DEFAULT_MODE,isMode,LAYOUT_VERSION,layoutStamp} from '../frontend/translation-modes.js';
 // study_sessions.domain still has the CHECK of migration 0011; newer subjects live in the subject column (0017).
 const CHECKED_DOMAINS=new Set(['general','math','history']);
 // study_sessions.mode has that CHECK too: a newer mode ("Kỹ nhất", premium) is stored there as quality, and as itself in
@@ -58,6 +58,18 @@ function textArray(value,maxTotal,tooMany){
  tooMany(value.length);
  let total=0;const result=[];for(const item of value){const text=typeof item==='string'?item:'';total+=text.length;if(total>maxTotal)throw new Error('Lịch sử bản dịch vượt giới hạn lưu trữ.');result.push(text);}return result;
 }
+// What the browser keeps with a layout session besides its asset (frontend/study.js): the blocks the student translated by
+// hand (edited: their IDs, which no run sends again; an empty list still says the session records them), those that may
+// be hand edits saved before they were recorded (legacy: never sent again either), the problems of the drafts it holds
+// (review: id -> 'han', 'rows' or 'numbers', which a reload still names) and, for a refreshed copy, how many translated
+// blocks it kept of the part it takes over (carried: {before, kept}). The save keeps only IDs of the session's own blocks.
+const BLOCK_ID=/^[\w.:-]{1,64}$/u,PROBLEMS=new Set(['han','rows','numbers']);
+function layoutMarks(layout,count){
+ const ids=list=>Array.isArray(list)?[...new Set(list.filter(id=>typeof id==='string'&&BLOCK_ID.test(id)))].slice(0,count):null,edited=ids(layout.edited),legacy=ids(layout.legacy);
+ const review=layout.review&&typeof layout.review==='object'&&!Array.isArray(layout.review)?Object.fromEntries(Object.entries(layout.review).filter(([id,list])=>BLOCK_ID.test(id)&&Array.isArray(list)).map(([id,list])=>[id,[...new Set(list.filter(item=>PROBLEMS.has(item)))]]).filter(([,list])=>list.length).slice(0,count)):{};
+ const amount=value=>Number.isInteger(value)&&value>=0&&value<=MAX_PARTS?value:null,before=amount(layout.carried?.before),kept=amount(layout.carried?.kept);
+ return {...(edited?{edited}:{}),...(legacy?.length?{legacy}:{}),...(Object.keys(review).length?{review}:{}),...(before!==null&&kept!==null?{carried:{before,kept}}:{})};
+}
 function normalizeState(body){
  const source=String(body.source||'');if(!source.trim()||source.length>MAX_SOURCE)throw new Error('Nguyên tác trong lịch sử phải từ 1 đến 2 triệu ký tự.');
  const parts=textArray(body.parts,MAX_SOURCE,count=>{if(count>MAX_PARTS)throw new UserError(`Bản dịch có ${number(count)} phần, nhiều hơn mức ${number(MAX_PARTS)} phần của một lần lưu. Hãy chọn khoảng trang ngắn hơn rồi dịch lại.`,413,'too_many_parts');}),compact=value=>value.replace(/\s/gu,'');
@@ -66,8 +78,11 @@ function normalizeState(body){
  while(translationParts.length<parts.length)translationParts.push('');
  const translation=normalizeVietnameseText(translationParts.filter(Boolean).join('\n\n')).trim();
  const complete=done===parts.length&&parts.length>0&&translationParts.every(item=>item.trim());
- const pdfLayout=body.pdfLayout&&/^[a-f\d-]{36}$/iu.test(body.pdfLayout.assetId||'')?{assetId:body.pdfLayout.assetId}:null;
- return {version:1,source,parts,translationParts:translationParts.map(normalizeVietnameseText),done,context:String(body.context||'').slice(-1200),glossary:cleanObject(body.glossary),manualGlossary:cleanObject(body.manualGlossary),previousSource:String(body.previousSource||'').slice(-350),previousTranslation:normalizeVietnameseText(String(body.previousTranslation||'')).slice(-500),translation,complete,...(pdfLayout?{pdfLayout}:{})};
+ const pdfLayout=body.pdfLayout&&/^[a-f\d-]{36}$/iu.test(body.pdfLayout.assetId||'')?{assetId:body.pdfLayout.assetId,...layoutMarks(body.pdfLayout,parts.length)}:null;
+ // notes (a text session): what the checks still found in its parts, "Trang N · đoạn k: …", named again when the session
+ // is opened again (frontend/study.js); the last 200, each cut to 500 characters. Anything else is left out.
+ const notes=Array.isArray(body.notes)?body.notes.filter(note=>typeof note==='string'&&note.trim()).slice(-200).map(note=>note.slice(0,500)):[];
+ return {version:1,source,parts,translationParts:translationParts.map(normalizeVietnameseText),done,context:String(body.context||'').slice(-1200),glossary:cleanObject(body.glossary),manualGlossary:cleanObject(body.manualGlossary),previousSource:String(body.previousSource||'').slice(-350),previousTranslation:normalizeVietnameseText(String(body.previousTranslation||'')).slice(-500),translation,complete,...(notes.length&&!pdfLayout?{notes}:{}),...(pdfLayout?{pdfLayout}:{})};
 }
 function cleanTitle(value,filename){
  const title=(String(value||'').trim()||String(filename||'').replace(/\.[^.]+$/u,'').trim()||'Bản dịch chưa đặt tên').normalize('NFC');
@@ -131,8 +146,9 @@ function readCursor(value){
 }
 
 // What a history save and a book's page ranges read from a layout manifest: the blocks' ids, sources and formula tokens,
-// and the page numbers. The manifest's images (most of its up to ~15 MB) are streamed past, never held (json-shape.js).
-const MANIFEST_SHAPE={totalPages:true,sourceSha256:true,pages:[{number:true,blocks:[{id:true,source:true,inlines:[{token:true,text:true}]}]}]};
+// the page numbers and the extractor's stamps. The manifest's images (most of its up to ~15 MB) are streamed past, never
+// held (json-shape.js).
+const MANIFEST_SHAPE={totalPages:true,sourceSha256:true,extractionVersion:true,refreshedFrom:true,pages:[{number:true,extractionVersion:true,blocks:[{id:true,source:true,inlines:[{token:true,text:true}]}]}]};
 const RANGE_SHAPE={totalPages:true,sourceSha256:true,pages:[{number:true}]};
 // What a save compares with the state saved before it: its translations, never its source.
 const PRIOR_STATE_SHAPE={pdfLayout:true,translationParts:true};
@@ -170,22 +186,35 @@ export function placeBookPart(parts,part){
  return [...list.slice(0,index),part,...list.slice(index)];
 }
 // translatedAt: when the part's translation last changed; renaming or moving it changes only updatedAt.
-const partFromRow=row=>({id:row.id,title:row.title,position:row.position??null,mime:row.mime||'text/plain',sessionId:row.session_id||null,stateKey:row.state_key||null,filename:row.filename||'',pageStart:row.page_start??null,pageEnd:row.page_end??null,totalPages:row.source_total_pages??null,sha256:row.source_sha256||null,pages:pageList(row.source_pages),updatedAt:row.updated_at||null,translatedAt:row.translated_at||row.updated_at||null});
-export const publicPart=({stateKey,...part})=>part;
+// layoutVersion: the extractor stamp of the part's kept layout (null: none recorded). oldPdf: the part's PDF is another
+// layout's, an older part's that a range took over and keeps until that range's own export succeeds. layoutOutdated: the
+// pages the reader sees come from an older extractor than this code's (LAYOUT_VERSION), so headings, captions or lines
+// may still be printed Chinese; Thư viện riêng says "Bố cục cũ" and links to Xưởng dịch, where "Cập nhật bố cục" pays only
+// for the blocks it finds new. A layout saved before migration 0027 has no stamp and counts as older.
+const layoutPart=row=>Boolean(row.pdf_asset_id)||/\/pdf-layout\/[^/]+\/translated\.pdf$/u.test(row.file_key||'');
+const otherPdf=row=>Boolean(row.file_key&&row.pdf_asset_id)&&!String(row.file_key).includes(`/pdf-layout/${row.pdf_asset_id}/`);
+// assetId (never sent): the kept layout of the part's session, which a refreshed copy of it names (refreshedFrom).
+const partFromRow=row=>({id:row.id,title:row.title,position:row.position??null,mime:row.mime||'text/plain',sessionId:row.session_id||null,stateKey:row.state_key||null,assetId:row.pdf_asset_id||null,filename:row.filename||'',pageStart:row.page_start??null,pageEnd:row.page_end??null,totalPages:row.source_total_pages??null,sha256:row.source_sha256||null,pages:pageList(row.source_pages),updatedAt:row.updated_at||null,translatedAt:row.translated_at||row.updated_at||null,
+ layoutVersion:Number.isInteger(row.layout_version)?row.layout_version:null,oldPdf:otherPdf(row),layoutOutdated:Boolean(row.session_id)&&layoutPart(row)&&(!(row.layout_version>=LAYOUT_VERSION)||otherPdf(row))});
+export const publicPart=({stateKey,assetId,...part})=>part;
 export async function ownedBook(env,userId,id){
  if(typeof id!=='string'||!UUID.test(id))return null;
  return env.DB.prepare(`SELECT id,title FROM stories WHERE id=? AND owner_user_id=? AND ${STUDY_BOOK}`).bind(id,userId).first();
 }
 export async function listBooks(env,userId,bookId=null){
- const rows=(await env.DB.prepare(`SELECT s.id AS book_id,s.title AS book_title,s.cover_key,s.cover_page,s.cover_source_sha256,c.id,c.title,c.position,c.mime,ss.id AS session_id,ss.state_key,ss.filename,ss.page_start,ss.page_end,ss.source_total_pages,ss.source_sha256,ss.source_pages,ss.updated_at,ss.translated_at
+ const rows=(await env.DB.prepare(`SELECT s.id AS book_id,s.title AS book_title,s.cover_key,s.cover_page,s.cover_source_sha256,c.id,c.title,c.position,c.mime,c.file_key,ss.id AS session_id,ss.state_key,ss.filename,ss.page_start,ss.page_end,ss.source_total_pages,ss.source_sha256,ss.source_pages,ss.updated_at,ss.translated_at,ss.layout_version,ss.pdf_asset_id
   FROM stories s LEFT JOIN chapters c ON c.story_id=s.id LEFT JOIN study_sessions ss ON ss.library_chapter_id=c.id AND ss.user_id=s.owner_user_id
   WHERE s.owner_user_id=? AND ${STUDY_BOOK.replaceAll('source_url','s.source_url')}${bookId?' AND s.id=?':''}
   ORDER BY s.created_at DESC,s.id,CASE WHEN c.position IS NULL THEN 1 ELSE 0 END,c.position,c.created_at,c.id LIMIT 2000`).bind(...(bookId?[userId,bookId]:[userId])).all()).results;
+ // refresh: the unfinished range that will take a part over (a refreshed layout), the newest, and the blocks it still has
+ // to translate: Thư viện riêng links there instead of extracting the part once more.
+ const takers=(await env.DB.prepare('SELECT id,replaces_chapter_id,total_parts,translated_parts FROM study_sessions WHERE user_id=? AND replaces_chapter_id IS NOT NULL AND library_chapter_id IS NULL ORDER BY updated_at DESC,id DESC LIMIT 500').bind(userId).all()).results||[];
+ const refresh=new Map();for(const row of takers)if(!refresh.has(row.replaces_chapter_id))refresh.set(row.replaces_chapter_id,{sessionId:row.id,blocks:Math.max(0,(Number(row.total_parts)||0)-(Number(row.translated_parts)||0))});
  const books=new Map();
  for(const row of rows){
   // cover.page: the page of file cover.sha256 kept as the cover (0 = the student chose none); image: a cover is set.
   if(!books.has(row.book_id))books.set(row.book_id,{id:row.book_id,title:row.book_title,cover:{image:Boolean(row.cover_key),page:row.cover_page??null,sha256:row.cover_source_sha256||null},parts:[]});
-  const parts=books.get(row.book_id).parts;if(row.id&&!parts.some(part=>part.id===row.id))parts.push(partFromRow(row));
+  const parts=books.get(row.book_id).parts;if(row.id&&!parts.some(part=>part.id===row.id))parts.push({...partFromRow(row),refresh:refresh.get(row.id)||null});
  }
  return [...books.values()];
 }
@@ -327,6 +356,10 @@ async function deleteSession(env,userId,session){
  await releaseJobPages(env,userId,session,jobs);
  const removedBookId=chapter&&results[2]?.meta?.changes?chapter.story_id:null,own=`study/${userId}/`,folders=[`${own}${session.id}/`];
  let keys=[chapter?.file_key,chapter?.text_key].filter(key=>typeof key==='string'&&key.startsWith(own));
+ // The chapter may still show an older part's PDF (a range that took it over and has not exported yet): that file belongs
+ // to the older session, which keeps it while it exists.
+ const shown=/\/pdf-layout\/([a-f\d-]{36})\//iu.exec(chapter?.file_key||'')?.[1];
+ if(shown&&shown!==assetId&&await env.DB.prepare('SELECT 1 AS used FROM study_sessions WHERE user_id=? AND pdf_asset_id=?').bind(userId,shown).first())keys=keys.filter(key=>key!==chapter.file_key);
  if(assetId){
   const folder=assetFolder(userId,assetId),used=await env.DB.prepare(`SELECT 1 AS used WHERE EXISTS (SELECT 1 FROM study_sessions WHERE user_id=?1 AND pdf_asset_id=?2) OR EXISTS (SELECT 1 FROM chapters WHERE instr(file_key,?3)=1 AND story_id IN (SELECT id FROM stories WHERE owner_user_id=?1))`).bind(userId,assetId,folder).first();
   if(used)keys=keys.filter(key=>!key.startsWith(folder));else folders.push(folder);
@@ -378,7 +411,7 @@ export async function studyHistoryRoute(request,env,path,reader){
  if(request.method==='GET'&&!id){
   const before=new URL(request.url).searchParams.get('before'),after=before===null?null:readCursor(before);
   if(before!==null&&!after)return reply({error:'Vị trí trang Lịch sử dịch không hợp lệ. Hãy tải lại trang rồi thử lại.',code:'history_invalid'},400);
-  const rows=(await env.DB.prepare(`SELECT id,title,filename,COALESCE(subject,domain) AS domain,mode,engine,status,translated_parts,total_parts,source_characters,translation_characters,library_story_id,library_chapter_id,page_start,page_end,source_total_pages,source_sha256,created_at,updated_at,revision
+  const rows=(await env.DB.prepare(`SELECT id,title,filename,COALESCE(subject,domain) AS domain,mode,engine,status,translated_parts,total_parts,source_characters,translation_characters,library_story_id,library_chapter_id,page_start,page_end,source_total_pages,source_sha256,created_at,updated_at,revision,layout_version,replaces_chapter_id,refreshed_from
    FROM study_sessions WHERE user_id=?1${after?' AND updated_at<=?2 AND (updated_at<?2 OR id<?3)':''} ORDER BY updated_at DESC,id DESC LIMIT ${HISTORY_PAGE+1}`).bind(reader.id,...(after?[after.updatedAt,after.id]:[])).all()).results;
   const response=reply(rows.slice(0,HISTORY_PAGE).map(({engine,...row})=>({...row,mode:storedMode(row.mode,engine)})));
   if(rows.length>HISTORY_PAGE)response.headers.set('X-Next-Before',pageCursor(rows[HISTORY_PAGE-1]));
@@ -423,14 +456,20 @@ export async function studyHistoryRoute(request,env,path,reader){
  const sessionId=id||named||crypto.randomUUID(),filename=cleanFilename(body.filename),title=cleanTitle(body.title,filename),domain=Object.hasOwn(DOMAINS,body.domain)?body.domain:'general',checkedDomain=CHECKED_DOMAINS.has(domain)?domain:'general',mode=historyMode(body.mode),checkedMode=legacyMode(mode),state=normalizeState(body.state||{});
  // Of two parts translating the same page, the whole-book PDF uses the newer translation, so that time is kept apart
  // from renames and moves. A PDF range compares with its saved state; any other save counts as a change.
- let range=bodyRange(body.pageRange),sameTranslation=false;
+ // layoutVersion: the extractor stamp of a kept layout (its oldest page's), which Thư viện riêng compares with this code's.
+ // refreshedFrom: the kept layout a refreshed copy was made from (pdf-layout.js /refresh), recorded with the session.
+ let range=bodyRange(body.pageRange),sameTranslation=false,layoutVersion=null,refreshedFrom=null,superseded=null;
  // An extraction stores its asset (manifest and original) before any session names it (pdf-layout.js). One whose first
  // save never succeeds is named by no session and stays until the account is deleted, which clears study/<user>/;
  // deleteSession removes an asset once no session or part names it.
  if(state.pdfLayout){
   const asset=await env.FILES.get(`study/${reader.id}/pdf-layout/${state.pdfLayout.assetId}/manifest.json`);if(!asset)return reply({error:'Không tìm thấy PDF trong tài khoản của bạn.'},404);
-  const manifest=await storedShape(asset,MANIFEST_SHAPE),blocks=manifest.pages.flatMap(p=>p.blocks);range=manifestRange(manifest);
+  const manifest=await storedShape(asset,MANIFEST_SHAPE),blocks=manifest.pages.flatMap(p=>p.blocks);range=manifestRange(manifest);layoutVersion=layoutStamp(manifest);
+  if(typeof manifest.refreshedFrom==='string'&&UUID.test(manifest.refreshedFrom)&&manifest.refreshedFrom!==state.pdfLayout.assetId)refreshedFrom=manifest.refreshedFrom;
   if(blocks.length!==state.parts.length||blocks.some((b,i)=>b.source!==state.parts[i]))throw new Error('Lịch sử block không khớp PDF gốc.');
+  const ids=new Set(blocks.map(b=>b.id));if(state.pdfLayout.edited)state.pdfLayout.edited=state.pdfLayout.edited.filter(id=>ids.has(id));
+  if(state.pdfLayout.legacy){state.pdfLayout.legacy=state.pdfLayout.legacy.filter(id=>ids.has(id));if(!state.pdfLayout.legacy.length)delete state.pdfLayout.legacy;}
+  if(state.pdfLayout.review){state.pdfLayout.review=Object.fromEntries(Object.entries(state.pdfLayout.review).filter(([id])=>ids.has(id)));if(!Object.keys(state.pdfLayout.review).length)delete state.pdfLayout.review;}
   validateBlockTranslations(blocks,state.translationParts.map((translation,i)=>({id:blocks[i].id,translation})).filter(b=>b.translation.trim()),{complete:state.complete});
   // Through a function, so a $ in a formula's machine text is kept as written ($' would paste the rest of the block in).
   state.translation=blocks.map((b,i)=>{let value=state.translationParts[i];for(const inline of b.inlines||[])value=value.replace(inline.token,()=>inline.text);return value;}).filter(Boolean).join('\n\n');
@@ -443,6 +482,12 @@ export async function studyHistoryRoute(request,env,path,reader){
   if(body.bookId){book=await ownedBook(env,reader.id,body.bookId);if(!book)return reply({error:'Không tìm thấy sách đã chọn trong Thư viện riêng.'},404);}
   libraryStoryId=book?.id||null;
  }
+ // The part this range takes over once complete: the one this save names (Thay phần…, a refreshed layout), or, when the
+ // save says nothing (a page that never knew it: another tab or device), the one an earlier save of this draft named
+ // (replaces_chapter_id), so a draft continued elsewhere still replaces it instead of adding the same pages twice. An empty
+ // name is the student's choice to keep both. A draft records it only while it is a part of the draft's book.
+ const naming=typeof body.replaceChapterId==='string'?body.replaceChapterId:'',replacing=chapterId?'':Object.hasOwn(body,'replaceChapterId')?naming:existing?.replaces_chapter_id||'';
+ const replaces=replacing&&!state.complete&&libraryStoryId?(await env.DB.prepare(`SELECT id FROM chapters WHERE id=? AND story_id=? AND ${ownedChapter}`).bind(replacing,libraryStoryId,reader.id).first())?.id||null:null;
  const stateJson=JSON.stringify(state),storedBytes=utf8Length(stateJson)+(state.complete?utf8Length(state.translation):0);
  const room=await historyRoom(env,reader.id,existing,storedBytes);if(room)return room;
  // Counted once the save is valid and fits, so a refused save never uses up the day's new items.
@@ -456,20 +501,31 @@ export async function studyHistoryRoute(request,env,path,reader){
   if(libraryStoryId&&!book)book=await ownedBook(env,reader.id,libraryStoryId);
   const part={id:crypto.randomUUID(),title,position:null,sessionId,filename,pageStart:pages.start,pageEnd:pages.end,totalPages:pages.total,sha256:pages.sha256};
   if(book){
-   const parts=(await listBooks(env,reader.id,book.id))[0]?.parts||[],replaced=body.replaceChapterId?parts.find(item=>item.id===body.replaceChapterId):null;
-   if(body.replaceChapterId&&!replaced)return reply({error:'Phần cần thay không thuộc sách đã chọn.'},400);
+   // A refreshed copy takes over the part of the layout it was refreshed from (refreshedFrom), wherever that layout's
+   // session went on: a draft refreshed before it was complete still gives its pages one part. A layout whose refreshed
+   // copy is a part of this book already is not added again (superseded): it stays complete, outside the book.
+   const parts=(await listBooks(env,reader.id,book.id))[0]?.parts||[],named=replacing?parts.find(item=>item.id===replacing):null;
+   if(naming&&!named)return reply({error:'Phần cần thay không thuộc sách đã chọn.'},400);
+   const replaced=named||(refreshedFrom&&parts.find(item=>item.assetId===refreshedFrom))||null;
+   superseded=!replaced&&state.pdfLayout?await env.DB.prepare('SELECT id FROM study_sessions WHERE user_id=? AND refreshed_from=? AND library_story_id=? AND library_chapter_id IS NOT NULL AND id<>? LIMIT 1').bind(reader.id,state.pdfLayout.assetId,book.id,sessionId).first():null;
    part.title=partTitle(title,book.title,pages.start?pages:null);
-   if(replaced){
-    // A redone range takes over the old part (same place in the book); the superseded session leaves the library.
+   if(superseded)libraryStoryId=null;
+   else if(replaced){
+    // A redone range takes over the old part (same place in the book); the superseded session leaves the library. A kept
+    // layout of the same pages of the same file (a refreshed layout: its copy names the layout it was made from, whatever
+    // hashes older rows lack) keeps the old part's PDF linked until its own export succeeds (pdf-layout.js /render), so an
+    // export that fails or waits never leaves the book with the original's pages there. Other pages (Thay phần… over
+    // another range) never keep a PDF of pages they do not hold, and a text translation has no PDF to wait for.
     chapterId=replaced.id;
-    statements.push(env.DB.prepare(`UPDATE chapters SET title=?,content=?,text_key=?,file_key=NULL,mime=? WHERE id=? AND ${ownedChapter}`).bind(part.title,content,translatedKey,'text/plain',chapterId,reader.id));
+    const samePages=Boolean(state.pdfLayout)&&(Boolean(refreshedFrom)&&replaced.assetId===refreshedFrom||Boolean(pages.sha256)&&replaced.sha256===pages.sha256&&(replaced.pages&&pages.list?JSON.stringify(replaced.pages)===JSON.stringify(pageList(pages.list)):replaced.pageStart===pages.start&&replaced.pageEnd===pages.end));
+    statements.push(env.DB.prepare(`UPDATE chapters SET title=?1,content=?2,text_key=?3,file_key=CASE WHEN ?4 THEN file_key END,mime=CASE WHEN ?4 AND file_key IS NOT NULL THEN mime ELSE 'text/plain' END WHERE id=?5 AND story_id IN (SELECT id FROM stories WHERE owner_user_id=?6)`).bind(part.title,content,translatedKey,samePages?1:0,chapterId,reader.id));
     statements.push(env.DB.prepare('UPDATE study_sessions SET library_chapter_id=NULL,library_story_id=NULL WHERE library_chapter_id=? AND user_id=? AND id<>?').bind(chapterId,reader.id,sessionId));
    }else{
     statements.push(...await backfillRanges(env,reader.id,parts));
     const order=placeBookPart(parts,part);chapterId=part.id;newChapter=true;
     statements.push(env.DB.prepare('INSERT INTO chapters(id,story_id,title,content,text_key,mime,position) VALUES(?,?,?,?,?,?,?)').bind(chapterId,book.id,part.title,content,translatedKey,'text/plain',order.indexOf(part)+1),...arrangeStatements(env,book,order,part));
    }
-   libraryStoryId=book.id;statements.push(glossaryStatement(book.id));
+   if(!superseded){libraryStoryId=book.id;statements.push(glossaryStatement(book.id));}
   }else{
    // A new book: later ranges can join it, so it is not tied to this session's id.
    libraryStoryId=crypto.randomUUID();chapterId=part.id;newChapter=true;
@@ -481,13 +537,15 @@ export async function studyHistoryRoute(request,env,path,reader){
   if(libraryStoryId)statements.push(glossaryStatement(libraryStoryId));
   if(existing.title!==title)statements.push(...await renameStatements(env,reader.id,existing,title));
  }
+ // Only this session's own PDF goes when its translation changed; an older part's, which this range took over, stays
+ // linked until this range's export replaces it.
  if(state.pdfLayout&&!state.pdfLayout.exported&&chapterId&&!newChapter){
-  statements.push(env.DB.prepare(`UPDATE chapters SET file_key=NULL,mime=? WHERE id=? AND ${ownedChapter}`).bind('text/plain',chapterId,reader.id));
+  statements.push(env.DB.prepare(`UPDATE chapters SET file_key=NULL,mime=? WHERE id=? AND ${ownedChapter} AND (file_key IS NULL OR instr(file_key,?)=1)`).bind('text/plain',chapterId,reader.id,assetFolder(reader.id,state.pdfLayout.assetId)));
  }
  // The session references its book and chapter, so it is written after them in the transaction. A concurrent move changes
  // only the book of an existing chapter; keeping the stored book then avoids pointing back at a deleted story.
- statements.push(env.DB.prepare(`INSERT INTO study_sessions(id,user_id,title,filename,domain,subject,mode,engine,status,state_key,source_preview,translation_preview,translated_parts,total_parts,source_characters,translation_characters,library_story_id,library_chapter_id,page_start,page_end,source_total_pages,source_sha256,source_pages,pdf_asset_id,translated_at,stored_bytes,revision)
-  VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,CASE WHEN ? THEN NULL ELSE CURRENT_TIMESTAMP END,?,1) ON CONFLICT(id) DO UPDATE SET revision=study_sessions.revision+1,stored_bytes=excluded.stored_bytes,translated_at=COALESCE(excluded.translated_at,study_sessions.translated_at,CURRENT_TIMESTAMP), title=excluded.title,filename=excluded.filename,domain=excluded.domain,subject=excluded.subject,mode=excluded.mode,engine=excluded.engine,status=excluded.status,state_key=excluded.state_key,source_preview=excluded.source_preview,translation_preview=excluded.translation_preview,translated_parts=excluded.translated_parts,total_parts=excluded.total_parts,source_characters=excluded.source_characters,translation_characters=excluded.translation_characters,library_story_id=CASE WHEN study_sessions.library_chapter_id IS NOT NULL AND study_sessions.library_chapter_id=excluded.library_chapter_id THEN study_sessions.library_story_id ELSE excluded.library_story_id END,library_chapter_id=excluded.library_chapter_id,page_start=excluded.page_start,page_end=excluded.page_end,source_total_pages=excluded.source_total_pages,source_sha256=excluded.source_sha256,source_pages=excluded.source_pages,pdf_asset_id=excluded.pdf_asset_id,updated_at=CURRENT_TIMESTAMP WHERE user_id=excluded.user_id`).bind(sessionId,reader.id,title,filename,checkedDomain,domain,checkedMode,mode,status,key,state.source.slice(0,PREVIEW),state.translation.slice(0,PREVIEW),state.done,state.parts.length,state.source.length,state.translation.length,libraryStoryId,chapterId,pages.start,pages.end,pages.total,pages.sha256,pages.list,state.pdfLayout?.assetId||null,sameTranslation?1:0,storedBytes));
+ statements.push(env.DB.prepare(`INSERT INTO study_sessions(id,user_id,title,filename,domain,subject,mode,engine,status,state_key,source_preview,translation_preview,translated_parts,total_parts,source_characters,translation_characters,library_story_id,library_chapter_id,page_start,page_end,source_total_pages,source_sha256,source_pages,pdf_asset_id,translated_at,stored_bytes,revision,layout_version,replaces_chapter_id,refreshed_from)
+  VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,CASE WHEN ? THEN NULL ELSE CURRENT_TIMESTAMP END,?,1,?,?,?) ON CONFLICT(id) DO UPDATE SET revision=study_sessions.revision+1,stored_bytes=excluded.stored_bytes,layout_version=excluded.layout_version,replaces_chapter_id=excluded.replaces_chapter_id,refreshed_from=excluded.refreshed_from,translated_at=COALESCE(excluded.translated_at,study_sessions.translated_at,CURRENT_TIMESTAMP), title=excluded.title,filename=excluded.filename,domain=excluded.domain,subject=excluded.subject,mode=excluded.mode,engine=excluded.engine,status=excluded.status,state_key=excluded.state_key,source_preview=excluded.source_preview,translation_preview=excluded.translation_preview,translated_parts=excluded.translated_parts,total_parts=excluded.total_parts,source_characters=excluded.source_characters,translation_characters=excluded.translation_characters,library_story_id=CASE WHEN study_sessions.library_chapter_id IS NOT NULL AND study_sessions.library_chapter_id=excluded.library_chapter_id THEN study_sessions.library_story_id ELSE excluded.library_story_id END,library_chapter_id=excluded.library_chapter_id,page_start=excluded.page_start,page_end=excluded.page_end,source_total_pages=excluded.source_total_pages,source_sha256=excluded.source_sha256,source_pages=excluded.source_pages,pdf_asset_id=excluded.pdf_asset_id,updated_at=CURRENT_TIMESTAMP WHERE user_id=excluded.user_id`).bind(sessionId,reader.id,title,filename,checkedDomain,domain,checkedMode,mode,status,key,state.source.slice(0,PREVIEW),state.translation.slice(0,PREVIEW),state.done,state.parts.length,state.source.length,state.translation.length,libraryStoryId,chapterId,pages.start,pages.end,pages.total,pages.sha256,pages.list,state.pdfLayout?.assetId||null,sameTranslation?1:0,storedBytes,layoutVersion,chapterId?null:replaces,refreshedFrom));
  const guard=existing?null:roomGuard(env,reader.id,sessionId,storedBytes);if(guard)statements.unshift(guard);
  const written=[key,...(state.complete?[translatedKey]:[])];
  await env.FILES.put(key,stateJson,{httpMetadata:{contentType:'application/json; charset=utf-8'}});
@@ -510,5 +568,5 @@ export async function studyHistoryRoute(request,env,path,reader){
  if(!await accountKept(env,reader.id,written))return accountGone();
  // The save is done: an export that no longer matches is only removed on a best-effort basis, never failing the save.
  if(state.pdfLayout&&!state.pdfLayout.exported)await removeFile(env,`study/${reader.id}/pdf-layout/${state.pdfLayout.assetId}/translated.pdf`);
- return reply({id:sessionId,status,libraryStoryId,libraryChapterId:chapterId,updatedAt:new Date().toISOString(),revision},existing?200:201);
+ return reply({id:sessionId,status,libraryStoryId,libraryChapterId:chapterId,updatedAt:new Date().toISOString(),revision,...(superseded?{supersededBy:superseded.id}:{})},existing?200:201);
 }

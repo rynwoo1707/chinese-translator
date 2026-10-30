@@ -64,9 +64,9 @@ const REFUSALS={RECITATION:'Gemini không trả bản đọc vì trùng khớp n
 //   tex    TeX the page cannot draw (undrawableTex)
 //   glued  two or three stray marks stuck to a formula (",_;"): pieces of a subscript read apart
 //   hint   formula tokens set among other words than the machine hint has around them
-//   han    far fewer Chinese characters than the machine hint holds, or many times more
+//   han    far fewer Chinese characters than the strip shows (hanCells) or the machine hint holds, or many times more
 export const OCR_DOUBT_CODES=Object.freeze(['tex','glued','hint','han']);
-const DOUBT_REASONS={tex:'bản đọc của Gemini còn mã công thức chưa dựng được',glued:'bản đọc của Gemini có ký tự lạ dính vào công thức',hint:'bản đọc của Gemini đặt công thức giữa những chữ khác hẳn chữ OCR máy',han:'số chữ Hán trong bản đọc của Gemini khác xa chữ OCR máy'};
+const DOUBT_REASONS={tex:'bản đọc của Gemini còn mã công thức chưa dựng được',glued:'bản đọc của Gemini có ký tự lạ dính vào công thức',hint:'bản đọc của Gemini đặt công thức giữa những chữ khác hẳn chữ OCR máy',han:'số chữ Hán trong bản đọc của Gemini khác xa số chữ trong ảnh, có thể sót chữ hoặc dòng'};
 // Xưởng dịch names a block "Trang N · đoạn k", k counting the page's blocks from 1 (frontend/study.js blockLabel); the
 // IDs extract.py gives (p<N>-b<k>) say the same.
 export function ocrBlockLabel(id){const match=/^p(\d+)-b(\d+)$/u.exec(String(id));return match?`Trang ${match[1]} · đoạn ${match[2]}`:String(id);}
@@ -84,10 +84,10 @@ const plus=(a,b)=>Object.fromEntries(USAGE_KEYS.map(key=>[key,(a?.[key]||0)+(b?.
 const outputCap=(env,blocks)=>Math.min(32768,1024+4*blocks.reduce((n,b)=>n+hintOf(b).length,0))+thinkingHeadroom(env.GEMINI_THINKING);
 // The machine OCR text a block keeps, written as a reading would be (formula tokens once each).
 function keptReading(block){const text=unreadableFallback(block);try{return readOcrText(text,block);}catch{return text;}}
-// noteDoubts: the warnings also name the doubtful readings; the ocr-blocks route leaves that out where the mode will read
-// those blocks again anyway. noted: the IDs whose outcome the warnings name (every block when missing): a re-read names
-// those chosen to be read again, not the others of their sheets. A doubtful reading of a block that has a clean one is
-// never used (pdf-layout-apply.js), so it is not named either.
+// noteDoubts: the warnings also name the doubtful readings (true), none (false) or those of the codes listed; the ocr-blocks
+// route leaves out those the mode will read again anyway. noted: the IDs whose outcome the warnings name (every block when
+// missing): a re-read names those chosen to be read again, not the others of their sheets. A doubtful reading of a block
+// that has a clean one is never used (pdf-layout-apply.js), so it is not named either.
 export async function recognizePdfBlocks(env,blocks,sheets=[],{noteDoubts=true,noted=null}={}){
  const first=ocrRequest(blocks,sheets),byId=new Map(blocks.map(b=>[b.id,b])),tabs=new Map(sheets.flatMap(s=>s.strips.map(strip=>[strip.blockId,strip.label])));
  // An answer may name a strip by its tab label (#N) or re-case the ID; either still names exactly one block of this call.
@@ -140,7 +140,7 @@ export async function recognizePdfBlocks(env,blocks,sheets=[],{noteDoubts=true,n
    for(const [reason,{fresh,read}] of reasons){if(fresh.length)notes.push(keptNote(fresh,reason));if(read.length)notes.push(earlierNote(read,reason));}
   }
   const clean=b=>b.ocrCorrected===true&&typeof b.ocrKept!=='string'&&typeof b.ocrDoubt!=='string';
-  if(noteDoubts)for(const code of OCR_DOUBT_CODES){const ids=told.filter(b=>doubts.get(b.id)===code&&!clean(b)).map(b=>b.id);if(ids.length)notes.push(doubtNote(ids,DOUBT_REASONS[code]));}
+  for(const code of OCR_DOUBT_CODES.filter(code=>noteDoubts===true||Array.isArray(noteDoubts)&&noteDoubts.includes(code))){const ids=told.filter(b=>doubts.get(b.id)===code&&!clean(b)).map(b=>b.id);if(ids.length)notes.push(doubtNote(ids,DOUBT_REASONS[code]));}
   return {blocks:decided.map(b=>kept.has(b.id)?{id:b.id,text:keptReading(b),ocrKept:kept.get(b.id).code}:{id:b.id,text:readings.get(b.id),...(doubts.has(b.id)?{ocrDoubt:doubts.get(b.id)}:{})}),warnings:[...notes,...said].slice(0,30),usage,model:model||env.GEMINI_MODEL,...(stop?{pending:[...pending],stop:spentOn(stop,usage)}:{})};
  }catch(error){throw spentOn(error,usage);}
 }
@@ -190,7 +190,7 @@ export function readingDoubt(text,block){
  if(undrawableTex(text).length)return 'tex';
  if(gluedMarks(text))return 'glued';
  if(tokensMoved(text,hint,block?.inlines))return 'hint';
- if(hanFar(text,hint))return 'han';
+ if(hanFar(text,hint,block?.hanCells))return 'han';
  return null;
 }
 // The LaTeX environments frontend/math-text.js draws (its MATH_ENVIRONMENTS when it names them); the OCR prompt asks for
@@ -296,8 +296,19 @@ function tokensMoved(text,hint,inlines=[]){
 }
 const hanCount=value=>(String(value??'').match(/\p{Script=Han}/gu)||[]).length;
 // Tesseract misses Chinese far more often than it invents any, so a reading may hold many more characters than its hint;
-// far fewer means words were dropped (or read as a formula), many times more, a repetition.
-function hanFar(text,hint){const read=hanCount(text),machine=hanCount(hint);return machine>=8&&read<.6*machine||machine>=4&&!read||machine>=15&&read>4*machine+60;}
+// many times more is a repetition. Fewer is measured against the strip itself where the manifest says how many Han-sized
+// cells its ink holds (cells, extract.py hanCells): under three quarters of them, or none of two or more, lost words or a
+// row. That count errs low (a bold heading may show none, a panel half its glyphs), so the machine hint is a measure too,
+// as on an older manifest that has nothing else: under 60 % of a hint of 8 or more, or none of 4 or more. Only a reading
+// that shares no Han with its hint is not weighed against it where the strip's cells are known: the hint is then junk
+// read off a figure's dots or lines (一二三十…), and the cells already said the reading is whole.
+function hanFar(text,hint,cells){
+ const read=hanCount(text),machine=hanCount(hint);
+ if(machine>=15&&read>4*machine+60)return true;
+ if(Number.isInteger(cells)&&cells>=2&&read<.75*cells)return true;
+ const junk=Number.isInteger(cells)&&cells>=0&&read>0&&!(String(text??'').match(/\p{Script=Han}/gu)||[]).some(char=>String(hint).includes(char));
+ return !junk&&(machine>=8&&read<.6*machine||machine>=4&&!read);
+}
 // The model occasionally copies the visible @N label instead of its token; one unambiguous label is the token.
 function restoreLabels(text,inlines=[]){
  for(const inline of inlines){

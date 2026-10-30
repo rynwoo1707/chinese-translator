@@ -104,10 +104,12 @@ def build_scan():
     middle_end = han(page, end, 530, "向量的数量积", color=GREY)
     han(page, middle_end, 530, "，它的结果是一个数而不是向量。")
     marks["grey middle"] = (end, middle_end, 530)
-    # 6. A running footer and a folio in the bottom band: page furniture, not text to translate.
-    han(page, 60, 812, "第二章　细胞的结构", 9)
-    roman(page, 520, 812, "23", 9)
-    marks["footer"] = 812
+    # 6. A running footer and a folio in the bottom band: the footer is translated like any line, the folio stays as
+    #    printed.
+    end = han(page, 60, 812, "第二章　细胞的结构", 9)
+    marks["footer"] = fitz.Rect(59, 803, end + 1, 814)
+    end = roman(page, 520, 812, "23", 9)
+    marks["folio"] = fitz.Rect(519, 804, end + 1, 814)
     second = vector_doc.new_page(width=595, height=842)
     # 7. Grey paper, darker than the usual ink threshold, with black text on it.
     second.draw_rect(second.rect, color=None, fill=(.72, .72, .72))
@@ -218,8 +220,13 @@ class Objects(unittest.TestCase):
             self.assertEqual(len(found), 1, f"{name}: {[b['source'] for b in found]}")
             self.assertTrue(fitz.Rect(found[0]["box"]).contains(word), f"{name}: {found[0]['box']} covers the faint word {word}")
 
-    def test_running_footer_and_folio_stay(self):
-        self.assertEqual(self.on_baseline(self.marks["footer"]), [])
+    def test_running_footer_is_translated_and_folio_stays(self):
+        footer, folio = ink(self.scan[0], self.marks["footer"]), ink(self.scan[0], self.marks["folio"])
+        found = self.overlapping(footer)
+        self.assertEqual(len(found), 1, [b["source"] for b in found])
+        self.assertEqual(found[0].get("band"), "foot", "the footer is page furniture of the page's foot")
+        self.assertTrue(fitz.Rect(found[0]["box"]).contains(footer), f"{found[0]['box']} holds the footer {footer}")
+        self.assertEqual(self.overlapping(folio), [], "the folio stays as printed")
 
     def test_masks_take_the_paper_tone(self):
         for block in self.blocks:

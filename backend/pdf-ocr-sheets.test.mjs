@@ -6,7 +6,7 @@ import {fileURLToPath} from 'node:url';
 import {recognizePdfBlocks,ocrRequest,misassignedBlocks,SPLIT_CALLS} from './pdf-block-ocr.js';
 import {pdfLayoutRoute} from './pdf-layout.js';
 import {ocrImageBatches,validateLayoutDocument,OCR_LIMITS} from '../frontend/pdf-box-layout.js';
-import {MODES,modeProfile} from '../frontend/translation-modes.js';
+import {MODES,modeProfile,LAYOUT_VERSION} from '../frontend/translation-modes.js';
 import {classifyError} from '../frontend/whole-book.js';
 
 // OCR sheets: extract.py packs the OCR crops of a scanned page into a few images, one framed strip per block with a #N
@@ -195,12 +195,14 @@ test('Refreshing a sheet manifest renumbers sheets, strips and block references 
  const {env,FILES}=await stored();env.PDF_LAYOUT_SERVICE_URL='https://pdf.example.test/';env.PDF_LAYOUT_SERVICE_TOKEN='service-secret';
  await FILES.put(`study/${reader.id}/pdf-layout/${assetId}/original.pdf`,'%PDF-1.7 pages 7-8');
  t.mock.method(globalThis,'fetch',async()=>{
-  const fresh=sheetDocument();fresh.totalPages=2;
+  // This site's extractor stamps what it reads (an older one is refused: backend/pdf-layout.js).
+  const fresh=sheetDocument();fresh.totalPages=2;fresh.extractionVersion=LAYOUT_VERSION;
   for(const [i,page] of fresh.pages.entries()){const from=`p${page.number}-`,to=`p${i+1}-`;page.number=i+1;for(const b of page.blocks){b.id=b.id.replace(from,to);b.ocrSheet=b.ocrSheet.replace(from,to);}for(const s of page.ocrSheets){s.id=s.id.replace(from,to);for(const st of s.strips)st.blockId=st.blockId.replace(from,to);}}
   return Response.json({document:fresh,originalPdfBase64:btoa('%PDF-1.7 pages 7-8')});
  });
  const response=await pdfLayoutRoute(new Request(`https://example.test${base}/refresh`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({assetId,forceClone:true})}),env,base+'/refresh',reader),result=await response.json();
- assert.equal(response.status,201);assert.deepEqual(result.document,{...sheetDocument(),totalPages:88});
+ // The copy also names the layout it was made from (refreshedFrom), which takes that layout's part over once complete.
+ assert.equal(response.status,201);assert.deepEqual(result.document,{...sheetDocument(),extractionVersion:LAYOUT_VERSION,totalPages:88,refreshedFrom:assetId});
 });
 
 test('A call of several sheets that is refused or cut off is split by sheet, each half asked once more, before its blocks keep their machine text',async t=>{

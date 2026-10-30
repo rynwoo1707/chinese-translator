@@ -64,6 +64,8 @@ test('A blank page inside a whole-book part comes from the part but counts as ke
  const jobs=[{id:'j',storyId:'book-1',sourceSha256:SHA_A,pageStates:'cddbdd'},{id:'other',storyId:'book-2',sourceSha256:SHA_A,pageStates:'bbbbbb'},{id:'bad',storyId:'book-1',sourceSha256:'x',pageStates:'b'}];
  const blank=blankPages(jobs,'book-1');assert.deepEqual([...blank.keys()],[SHA_A]);assert.deepEqual([...blank.get(SHA_A)],[4]);
  assert.equal(blankPages(jobs,'').size,0);assert.equal(blankPages(null,'book-1').size,0);
+ // A page with no block but Chinese left as printed (in a figure, under a watermark: 'u') is kept the same way.
+ assert.deepEqual([...blankPages([{...jobs[0],pageStates:'cdubdd'}],'book-1').get(SHA_A)],[3,4]);
  const part={id:'p',title:'Trang 2–6',mime:'application/pdf',file:'/f/p',sha256:SHA_A,filename:'sach.pdf',totalPages:6,pages:[2,3,4,5,6]},{sources}=bookSources([part]);
  const plan=planBook(sources,new Map(),blank);
  assert.deepEqual(plan.entries.map(entry=>`${entry.page}:${entry.from}${entry.blank?':blank':''}`),['1:original','2:translated','3:translated','4:translated:blank','5:translated','6:translated']);

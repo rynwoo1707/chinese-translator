@@ -133,3 +133,23 @@ function fakeIndexedDB(keys){
  const db={transaction:(store,mode)=>{assert.equal(store,'keyval');assert.equal(mode,'readonly');return {objectStore:name=>{assert.equal(name,'keyval');return {count:key=>later(keys.includes(key)?1:0)};}};},close(){}};
  return {databases:async()=>keys?[{name:'keyval-store',version:1}]:[],open:name=>{assert.equal(name,'keyval-store');return later(db);}};
 }
+
+test('PaddleOCR that runs out of time on a page is tried again on the next page; two pages in a row leave Tesseract for the tab',async t=>{
+ // A worker that never answers: paddle-client.js's 180 s backstop ends each page.
+ const failing=globalThis.Worker;globalThis.Worker=class{constructor(url,options){workers.push({url,options});}postMessage(){}terminate(){}};
+ t.mock.timers.enable({apis:['setTimeout']});
+ try{
+  answer=page(200,'text/javascript');workers.length=0;
+  const ocr=await freshTab(),progress=[],tesseract=/Không tải được bộ nhận dạng chữ Tesseract/u;
+  const outOfTime=async started=>{
+   const reading=ocr.recognizeChinesePage(new Blob(['page']),message=>progress.push(message));
+   for(let i=0;i<50&&workers.length<started;i++)await new Promise(resolve=>setImmediate(resolve));
+   t.mock.timers.tick(180_000);await assert.rejects(reading,tesseract);
+  };
+  await outOfTime(1);assert.equal(workers.length,1);
+  await outOfTime(2);assert.equal(workers.length,2,'the next page tries PaddleOCR again');
+  await assert.rejects(ocr.recognizeChinesePage(new Blob(['page 3']),message=>progress.push(message)),tesseract);
+  assert.equal(workers.length,2,'after two pages in a row out of time, Tesseract reads the rest of the tab');
+  assert.deepEqual(progress.filter(message=>message.status==='fallback').map(message=>message.reason),['PaddleOCR quá thời gian xử lý trang.'],'said once');
+ }finally{t.mock.timers.reset();globalThis.Worker=failing;}
+});

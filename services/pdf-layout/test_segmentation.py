@@ -184,7 +184,7 @@ class Segmentation(unittest.TestCase):
         self.assertEqual(self.blocks_on(folio), [], "the folio is not text to translate")
 
     def test_contract_fields(self):
-        self.assertEqual(self.page["extractionVersion"], 3)
+        self.assertEqual(self.page["extractionVersion"], 4, "the coverage stamp of this extractor")
         for block in self.blocks:
             if "indent" in block:
                 self.assertTrue(0 < block["indent"] < block["box"][2] - block["box"][0])

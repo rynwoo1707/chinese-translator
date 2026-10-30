@@ -7,10 +7,11 @@ import {savePreparedPdfPage} from './pdf-page-upload.js';
 import {studyRoute,studyModelConfig,localTranslationReview} from './study-translation.js';
 import {extractDocxText} from './document-limits.js';
 import {PROMPT_VERSION,recognizeDocument,translateAndVerify,chunks,withThinking,USAGE_KEYS,spentOn} from './ai.js';
-import {cleanExtractedPdfText,cleanReaderText,readerText} from './pdf-cleaning.js';
+import {cleanExtractedPdfText,cleanReaderText,readerText,withoutEdgeMarks} from './pdf-cleaning.js';
 import {authRoute,currentReader} from './reader-auth.js';
 import {currentAdmin,adminAuthRoute,adminSetupRequired,adminTokenUsable,adminSignedOut} from './admin-auth.js';
 import {isMode,modeProfile,modeLabel,adminModeOf} from '../frontend/translation-modes.js';
+import {scanReading} from '../frontend/ocr-policy.js';
 import {nextBookTranslationPart,splitBookTranslation} from './book-sections.js';
 import {saveGeminiApiKey,clearGeminiApiKey,geminiKeyStatus,withRuntimeGeminiKey} from './runtime-config.js';
 import {listStudyModels} from './gemini-models.js';
@@ -89,6 +90,17 @@ export function webLink(value){
 }
 function validRequestFile(file){const ext=String(file?.name||'').split('.').pop().toLowerCase();const types={pdf:'application/pdf',epub:'application/epub+zip',azw3:'application/vnd.amazon.ebook',docx:'application/vnd.openxmlformats-officedocument.wordprocessingml.document',txt:'text/plain',png:'image/png',jpg:'image/jpeg',jpeg:'image/jpeg',webp:'image/webp'};return {ext,mime:types[ext]};}
 export async function sha256Hex(data){return [...new Uint8Array(await crypto.subtle.digest('SHA-256',data))].map(x=>x.toString(16).padStart(2,'0')).join('');}
+// What the browser's PDF analysis says of an admin's upload (pages read again from their pictures, Han drawn in a
+// figure; frontend/pdf-client.js analyzePdf notes), a JSON list kept as the job's first warnings: at most 200 lines of
+// 1000 characters (a line may name many pages), anything else ignored.
+export function pdfNotes(value){
+ try{const notes=JSON.parse(String(value||'[]'));return Array.isArray(notes)?notes.filter(note=>typeof note==='string'&&note.trim()).slice(0,200).map(note=>note.trim().slice(0,1000)):[];}catch{return [];}
+}
+// The text layer the browser sent with a page image for Gemini to read (pdf-page-upload.js hint: {text, reason}, the
+// reason being analyzePdf's: 'hidden', 'stamp' or 'pictured'), as scanReading takes it; null when missing or broken.
+async function pageHint(env,key){
+ try{const hint=JSON.parse(await (await env.FILES.get(key))?.text()??'null');return typeof hint?.text==='string'&&hint.text.trim()?{text:hint.text,reclassified:['hidden','stamp','pictured'].includes(hint.reason)?hint.reason:'hidden'}:null;}catch{return null;}
+}
 // mode: the "Cách dịch" chosen for every part, or null for the server's default.
 async function prepareJobRows(env,sid,{source,parts,filename,mime,fileKey,firstId,warnings=[],progress='',sha256=null,mode=null}){
  const units=parts?.length?parts.map((part,index)=>({source:part.content,filename:`${String(index+1).padStart(2,'0')} · ${part.title}`,progress:`Phần ${index+1}/${parts.length} · sẵn sàng dịch`})):[{source,filename,progress}];
@@ -118,9 +130,10 @@ export async function processJob(jobId,env){
  const job=await env.DB.prepare('SELECT * FROM jobs WHERE id=?').bind(jobId).first();
  const checkpointKey=`processing/${jobId}.json`;
  // The job's "Cách dịch" sets how hard Gemini works: the thinking of each step, the size of a translation step and
- // whether a dropped marker is repaired. GEMINI_THINKING, when it names a level, still decides every step.
+ // whether the places the checks find are corrected. GEMINI_THINKING, when it names a level, still decides every step.
  const mode=jobMode(job,env),profile=modeProfile(mode),override=thinkingOverride(env),thinking=level=>override||level;
- // Optional stronger model used only to repair a verified missing marker, never for routine translation.
+ // Optional stronger model used only for the one correction a part may need (translateAndVerify), never for routine
+ // translation.
  const qualityModel=env.GEMINI_QUALITY_MODEL&&env.GEMINI_QUALITY_MODEL!==(env.GEMINI_MODEL||'gemini-2.5-flash')?env.GEMINI_QUALITY_MODEL:null;
  const qualityEnv=qualityModel?new Proxy(env,{get(target,property){return property==='GEMINI_MODEL'?qualityModel:Reflect.get(target,property);}}):env;
  const translateEnv=withThinking(env,thinking(profile.translateThinking)),ocrEnv=withThinking(env,thinking(profile.ocrThinking)),repairEnv=withThinking(qualityEnv,thinking(profile.retryThinking));
@@ -138,10 +151,10 @@ export async function processJob(jobId,env){
    // take smaller ones, so each gets more of the model's attention.
    const selection=nextBookTranslationPart(cp.source,cp.translatedChars,profile.textChunk),part=selection.text;
    if(!part.trim())throw new Error('Phần sách không có nội dung để dịch.');
-   // Same missing-marker verification/repair safeguard used by the student study workspace, so published
-   // books get the identical accuracy check instead of a weaker, divergent pipeline. A configured
-   // GEMINI_QUALITY_MODEL only gets used for the rare repair/retry pass, never for routine translation.
-   const result=await translateAndVerify(translateEnv,part,{...story,previousSource:cp.source.slice(Math.max(0,cp.translatedChars-1500),cp.translatedChars),previousTranslation:cp.translations.slice(-2).join('\n\n').slice(-2000),context:cp.context||story.context,glossary:JSON.stringify(cp.glossary||JSON.parse(story.glossary))},{repairEnv,retryEnv:repairEnv,allowRepair:profile.allowRepair});
+   // The same line-by-line checks as the student's text mode, so a published book is checked as a study translation is:
+   // Chinese left, a heading, item, caption, verse line, label or marker missing are corrected once, in one request (by
+   // GEMINI_QUALITY_MODEL when set), and what is still lacking is named in the job's warnings.
+   const result=await translateAndVerify(translateEnv,part,{...story,previousSource:cp.source.slice(Math.max(0,cp.translatedChars-1500),cp.translatedChars),previousTranslation:cp.translations.slice(-2).join('\n\n').slice(-2000),context:cp.context||story.context,glossary:JSON.stringify(cp.glossary||JSON.parse(story.glossary))},{repairEnv,allowRepair:profile.allowRepair});
    cp.translations.push((selection.marker?selection.marker+'\n':'')+result.translation);cp.part++;cp.translatedChars+=selection.consumed;cp.context=result.context;cp.glossary=result.glossary;countUsage(cp,result.usage);
    // Books published for the whole school get the same omission / untranslated-Han checks as student translations.
    const partWarnings=[...result.warnings,...localTranslationReview(part,result.translation).warnings];
@@ -158,11 +171,21 @@ export async function processJob(jobId,env){
     total=manifest.totalPages;count=part.endPage-part.startPage+1;
    }
    const ocr=preparedPart?.kind==='text'?{text:await input.text(),warnings:[]}:await recognizeDocument(ocrEnv,input,mime);
+   const start=cp.page+1,end=cp.page+count,notes=preparedPart?.note?[String(preparedPart.note)]:[];
+   // A page Gemini read although the browser found a text layer on it (a searchable scan, a stamp over a scan, Han in
+   // pictures on a page of text) is weighed against that layer, sent along as its hint (scanReading): an empty or far
+   // poorer reading keeps the layer.
+   if(preparedPart?.hint&&typeof ocr.text==='string'&&Array.isArray(ocr.warnings)){const hint=await pageHint(env,preparedPart.hint);if(hint){const merged=scanReading(hint,ocr.text,start);ocr.text=merged.text;if(merged.note)notes.push(merged.note);}}
    // Gemini's reading is counted like a translation; one that cannot be used was billed all the same.
    if(typeof ocr.text!=='string'||!ocr.text.trim()||!Array.isArray(ocr.warnings))throw spentOn(new Error('Kết quả OCR không hợp lệ.'),ocr.__usage);
-   const start=cp.page+1,end=cp.page+count;countUsage(cp,ocr.__usage);
+   countUsage(cp,ocr.__usage);
+   // The marks a reading puts on running heads and feet tell the cleaning of a whole PDF where its page edges are; an image
+   // read on its own loses them, and its lines stay.
+   if(job.mime!=='application/pdf')ocr.text=withoutEdgeMarks(ocr.text);
    cp.source+=(cp.source?'\n\n':'')+`[Trang PDF ${start}–${end}]\n`+ocr.text;
-   cp.warnings.push(...ocr.warnings.map(w=>`Trang PDF ${start}–${end}: ${w}`));cp.page+=count;cp.totalPages=total;cp.ocrDone=cp.page>=total;if(cp.ocrDone&&job.mime==='application/pdf')cp.source=cleanExtractedPdfText(cp.source);
+   // A page whose text the browser cleaned from its text layer keeps its lines when the whole source is cleaned.
+   if(preparedPart?.cleaned)(cp.cleaned||=[]).push(start);
+   cp.warnings.push(...notes,...ocr.warnings.map(w=>`Trang PDF ${start}–${end}: ${w}`));cp.page+=count;cp.totalPages=total;cp.ocrDone=cp.page>=total;if(cp.ocrDone&&job.mime==='application/pdf')cp.source=cleanExtractedPdfText(cp.source,{cleaned:new Set(cp.cleaned||[])});
   }
   // Commit the checkpoint before updating the display; a retry can recover after a database error.
   await env.FILES.put(checkpointKey,JSON.stringify(cp));
@@ -359,7 +382,7 @@ async function route(request,env,ctx,url,path){
     if(file.size>25*1024*1024||file.size===0)throw new Error('Tài liệu phải từ 1 byte đến 25 MB.');filename=file.name;
     const ext=file.name.split('.').pop().toLowerCase();const types={epub:'application/epub+zip',azw3:'application/vnd.amazon.ebook',pdf:'application/pdf',png:'image/png',jpg:'image/jpeg',jpeg:'image/jpeg',webp:'image/webp',docx:'application/vnd.openxmlformats-officedocument.wordprocessingml.document',txt:'text/plain'};
     if(!types[ext])throw new Error('Định dạng chưa hỗ trợ. Với .doc cũ, hãy lưu thành .docx hoặc PDF.');mime=types[ext];const data=await file.arrayBuffer();sha256=await sha256Hex(data);
-    if(ext==='docx')source=await extractDocxText(data);if(ext==='txt')source=decodeText(data);if(ext==='epub'){const book=extractEpub(data);source=book.source;parts=book.parts;warnings=book.warnings;progress=`Đã đọc EPUB · ${book.chapterCount} phần theo thứ tự sách`;}if(ext==='azw3'){const book=await extractAzw3(data);source=book.source;parts=book.parts;warnings=book.warnings;progress=`Đã đọc AZW3/KF8 · ${book.chapterCount} phần theo thứ tự sách`;}if(ext==='pdf'&&form.get('parsed_text')){source=cleanExtractedPdfText(String(form.get('parsed_text')));progress=`Đã trích xuất và làm sạch lớp chữ · ${Number(form.get('pdf_pages'))||0} trang`;}if(ext==='pdf'&&form.get('pdf_mode')==='scan')progress=`Đã nhận diện PDF scan · đang nhận ${Number(form.get('pdf_pages'))||0} trang ảnh tối ưu`;
+    if(ext==='docx')source=await extractDocxText(data);if(ext==='txt')source=decodeText(data);if(ext==='epub'){const book=extractEpub(data);source=book.source;parts=book.parts;warnings=book.warnings;progress=`Đã đọc EPUB · ${book.chapterCount} phần theo thứ tự sách`;}if(ext==='azw3'){const book=await extractAzw3(data);source=book.source;parts=book.parts;warnings=book.warnings;progress=`Đã đọc AZW3/KF8 · ${book.chapterCount} phần theo thứ tự sách`;}if(ext==='pdf'&&form.get('parsed_text')){source=cleanExtractedPdfText(String(form.get('parsed_text')),{cleaned:true});progress=`Đã trích xuất và làm sạch lớp chữ · ${Number(form.get('pdf_pages'))||0} trang`;}if(ext==='pdf'&&form.get('pdf_mode')==='scan')progress=`Đã nhận diện PDF scan · đang nhận ${Number(form.get('pdf_pages'))||0} trang ảnh tối ưu`;if(ext==='pdf')warnings=pdfNotes(form.get('notes'));
     if(['txt','docx','epub','azw3'].includes(ext)&&!source.trim())throw new Error('Tài liệu không có văn bản để dịch.');if(new TextEncoder().encode(source).length>25*1024*1024)throw new Error('Văn bản trích xuất tối đa 25 MB.');
     key=`uploads/${firstId}`;await env.FILES.put(key,data,{httpMetadata:{contentType:mime}});
    }else if(!source.trim())throw new Error('Hãy chọn tài liệu hoặc nhập văn bản.');

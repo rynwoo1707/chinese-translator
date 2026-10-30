@@ -5,6 +5,8 @@ import {readFileSync} from 'node:fs';
 import {createRequire} from 'node:module';
 import {fileURLToPath} from 'node:url';
 import {extname,join,normalize} from 'node:path';
+// A manifest the extractor of this code made carries its stamp (an older one is offered "Cập nhật bố cục").
+import {LAYOUT_VERSION} from '../frontend/translation-modes.js';
 
 // Xưởng dịch in Microsoft Edge, for what reaches the student's device and browser: the notice an old browser gets, the
 // downloads (inside Zalo, Messenger… first the way to Chrome or Safari; an address that outlives a slow download), the
@@ -24,7 +26,7 @@ const ZALO_IPHONE='Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleW
 const TEXT_ID='5a1c2b3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d',PARTS=['第一段：学而时习之。','第二段：有朋自远方来。','第三段：人不知而不愠。'],DONE=['Đoạn một.','Đoạn hai.','Đoạn ba.'];
 const textItem=(over={})=>({id:TEXT_ID,title:'Luận ngữ',filename:'',domain:'history',mode:'economy',status:'complete',translated_parts:3,total_parts:3,library_story_id:null,library_chapter_id:null,created_at:'2026-10-20 07:00:00',updated_at:'2026-10-20 08:00:00',page_start:null,page_end:null,source_total_pages:null,source_sha256:null,revision:2,...over});
 const textState={source:PARTS.join('\n\n'),parts:PARTS,translationParts:DONE,done:3,context:'',glossary:{},manualGlossary:{},previousSource:'',previousTranslation:''};
-const MANIFEST={version:1,extractionVersion:3,engine:'pymupdf',totalPages:1,pages:[{number:1,width:400,height:560,original:PNG,background:PNG,blocks:[{id:'p1-b1',text:'第一段的内容。',source:'第一段的内容。',box:[40,60,260,92],fontSize:12}],images:[],drawings:[],ocr:false,protectedRegions:[],extractionVersion:3}],warnings:[]};
+const MANIFEST={version:1,extractionVersion:LAYOUT_VERSION,engine:'pymupdf',totalPages:1,pages:[{number:1,width:400,height:560,original:PNG,background:PNG,blocks:[{id:'p1-b1',text:'第一段的内容。',source:'第一段的内容。',box:[40,60,260,92],fontSize:12}],images:[],drawings:[],ocr:false,protectedRegions:[],extractionVersion:LAYOUT_VERSION}],warnings:[]};
 const LAYOUT_ITEM={id:'5d7c1f7e-1111-4c2b-9d1e-2a2f0c9b7a10',title:'Bài thử giữ bố cục',filename:'bai-thu.pdf',domain:'general',mode:'economy',status:'complete',translated_parts:1,total_parts:1,library_story_id:null,library_chapter_id:null,updated_at:'2026-10-20 08:00:00',page_start:1,page_end:1,source_total_pages:1,revision:2};
 
 const defaults=(path,method)=>path==='/api/me'?USER:path==='/api/my/study/history'&&method==='GET'?[]:path==='/api/my/study/books'?[]:path==='/api/my/study/book-jobs'?{jobs:[]}:path==='/api/my/study/pdf-layout/config'?{configured:true}:path==='/api/my/study/config'?{economy:'gemini-test',balanced:'gemini-test',quality:'gemini-test',pdf:'gemini-test'}:path==='/api/my/study/library-match'?{match:null}:path==='/api/my/study/pdf-layout/font'?{css:''}:undefined;

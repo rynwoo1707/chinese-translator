@@ -13,7 +13,7 @@ const {PDFDocument}=createRequire(import.meta.url)('@cantoo/pdf-lib');
 test('page states: cover, chosen pages, counts, updates and the next chunk',()=>{
  const states=book.initialPageStates(30,{cover:1,pages:new Set(Array.from({length:25},(_,i)=>i+3))});
  assert.equal(states,'cs'+'.'.repeat(25)+'sss');assert.equal(book.stateAt(states,1),'cover');assert.equal(book.stateAt(states,2),'skipped');
- assert.deepEqual(book.countStates(states),{total:30,pending:25,done:0,blank:0,cover:1,skipped:4,failed:0,wanted:25});
+ assert.deepEqual(book.countStates(states),{total:30,pending:25,done:0,blank:0,untranslated:0,cover:1,skipped:4,failed:0,wanted:25});
  assert.throws(()=>book.initialPageStates(0),/Số trang/u);
  const later=book.withStates(states,{3:'done',4:'blank',5:'failed',99:'done',6:'nonsense'});
  assert.equal(later.slice(0,7),'csdbf..');assert.equal(book.progressText(later),'Đã dịch 1/24 trang');assert.equal(book.progressNote(later),'bìa giữ nguyên · 1 trang trống · bỏ qua 4 trang · 1 trang lỗi');
@@ -26,7 +26,7 @@ test('page states: cover, chosen pages, counts, updates and the next chunk',()=>
  assert.deepEqual(book.rangeUpdates('c..s.d',new Set([2,4,6])),{3:'skipped',4:'pending',5:'skipped'});
  assert.deepEqual(book.rangeUpdates('c.s',null),{3:'pending'});
  assert.equal(book.pageList([7,1,2,3,9,10,3]),'1–3, 7, 9–10');
- assert.deepEqual(book.chunkPages({pages:[{number:21,blocks:[{}]},{number:22,blocks:[]},{number:23,blocks:[{},{}]}]}),{done:[21,23],blank:[22],processed:3});
+ assert.deepEqual(book.chunkPages({pages:[{number:21,blocks:[{}]},{number:22,blocks:[]},{number:23,blocks:[{},{}]}]}),{done:[21,23],blank:[22],untranslated:[],processed:3});
 });
 
 test('token estimate from measured page costs, and the projection from what the book has used',()=>{
@@ -117,6 +117,8 @@ test('history: a job owns the sessions of its original made after it started, an
  const later={...job,id:'job-2',createdAt:'2026-10-18T11:30:00.000Z'},groups=book.sessionsByJob([...items,{id:'after-2',source_sha256:'a'.repeat(64),library_story_id:'book-1',created_at:'2026-10-18 11:40:00',page_start:2,page_end:21,status:'draft'}],[{...job,id:'job-1'},later]);
  assert.deepEqual(groups.get('job-1').map(item=>item.id),['new-draft','done-1','local']);assert.deepEqual(groups.get('job-2').map(item=>item.id),['after-2']);
  assert.deepEqual(book.glossaryUpdates({史料:'sử liệu',明朝:'nhà Minh'},{史料:'sử liệu',明朝:'triều Minh',向量:'vectơ',__proto__x:'',长:'x'.repeat(101)}),{明朝:'triều Minh',向量:'vectơ'});
+ // A rendering that keeps Chinese, or repeats its term, is never learned for the book.
+ assert.deepEqual(book.glossaryUpdates({},{探究:'探究',张三:'Trương Tam (张三)',DNA:'DNA',思考:'suy nghĩ'}),{思考:'suy nghĩ'});
 });
 
 test('chunks are cut with pdf-lib from the original, page for page, and sent with their offset',async()=>{
@@ -139,7 +141,7 @@ test('chunks are cut with pdf-lib from the original, page for page, and sent wit
 const offline=()=>Object.assign(new Error('Không kết nối được máy chủ. Hãy kiểm tra mạng rồi thử lại sau vài giây.'),{status:0});
 // refuse({offset,count}): an error the PDF service answers instead of extracting that chunk, or nothing. capacity(): the
 // answer of GET pdf-layout/capacity (or it throws); without it the route is unknown, as on a server older than it.
-function fakeAccount({total=45,cover=1,blank=[],processedLimit=Infinity,badPages=[],translateErrors=[],pageBytes=1000,lose=()=>false,down=()=>false,refuse=()=>null,capacity=null}={}){
+function fakeAccount({total=45,cover=1,blank=[],untranslated=[],processedLimit=Infinity,badPages=[],translateErrors=[],pageBytes=1000,lose=()=>false,down=()=>false,refuse=()=>null,capacity=null}={}){
  const job={id:'0b7e2a43-0000-4000-8000-000000000001',sourceSha256:'d'.repeat(64),filename:'sach.pdf',title:'Sách thử',storyId:null,totalPages:total,pageStates:book.initialPageStates(total,{cover}),chunkSize:20,status:'ready',pauseReason:null,usage:{prompt:0,output:0,thinking:0,total:0,requests:0},glossary:{史料:'sử liệu'},createdAt:'2026-10-18T10:00:00.000Z',runner:null,leaseSeconds:0};
  const calls=[],patches=[],extracts=[],state={job,translateErrors:[...translateErrors],counted:new Set(),lease:{runner:null,until:0}};
  const view=()=>{const held=state.lease.runner&&state.lease.until>Date.now();return {...state.job,runner:held?state.lease.runner:null,leaseSeconds:held?Math.ceil((state.lease.until-Date.now())/1000):0};};
@@ -161,9 +163,11 @@ function fakeAccount({total=45,cover=1,blank=[],processedLimit=Infinity,badPages
    // The service names the page it cannot render, in pages of the original (the Worker shifts chunk page numbers).
    const refused=refuse({offset,count});if(refused)throw refused;
    const first=offset+1,bad=badPages.find(page=>page>offset&&page<=offset+count);if(bad)throw Object.assign(new Error(`Trang ${bad} quá lớn để render an toàn (2000×3000 pt).`),{status:400,data:{}});
-   const pages=Array.from({length:Math.min(count,processedLimit)},(_,i)=>offset+i+1).map(number=>({number,blocks:blank.includes(number)?[]:[{id:`p${number}-b1`}]}));
-   if(!pages.some(page=>page.blocks.length))throw Object.assign(new Error('Không tìm thấy block tiếng Trung cần dịch trong các trang đã chọn.'),{status:422,data:{code:'no_text',pages:pages.map(page=>page.number)}});
-   return {assetId:`asset-${first}`,document:{pages}};
+   // untranslated: pages without a block that still show Chinese (the extractor's page.untranslated, and its note).
+   const pages=Array.from({length:Math.min(count,processedLimit)},(_,i)=>offset+i+1).map(number=>({number,blocks:blank.includes(number)||untranslated.includes(number)?[]:[{id:`p${number}-b1`}],...(untranslated.includes(number)?{untranslated:{figure:12}}:{})}));
+   const warnings=pages.filter(page=>page.untranslated).map(page=>`Trang ${page.number}: khoảng 12 chữ Hán trong khung/hình vẫn giữ nguyên chữ gốc; hãy đối chiếu PDF gốc.`);
+   if(!pages.some(page=>page.blocks.length))throw Object.assign(new Error('Không tìm thấy block tiếng Trung cần dịch trong các trang đã chọn.'),{status:422,data:{code:'no_text',pages:pages.map(page=>page.number),untranslated:pages.filter(page=>page.untranslated).map(page=>page.number),warnings}});
+   return {assetId:`asset-${first}`,document:{pages,warnings}};
   }
   if(path==='pdf-layout/capacity'&&capacity)return capacity();
   throw new Error(`unexpected ${path}`);
@@ -232,6 +236,26 @@ test('a chunk with no Chinese is marked blank without Gemini, using the page num
  const partial=fakeAccount({total:30,cover:1,blank:Array.from({length:12},(_,i)=>i+2),processedLimit:12});
  assert.equal((await partial.create().run(partial.state.job)).status,'done');
  assert.deepEqual(partial.extracts.map(({offset,count})=>[offset,count]),[[1,20],[13,12],[25,5]]);assert.equal(partial.state.job.pageStates,'c'+'b'.repeat(12)+'d'.repeat(17));
+});
+
+test('a page without blocks that still shows Chinese (in a figure, under a tilted watermark) is never called blank: kept as printed, counted apart and named in the notes',async()=>{
+ // Whatever cause the extractor names (a figure, a footer, a rotated watermark), or a bare total; zero counts are blank.
+ assert.deepEqual(book.chunkPages({pages:[{number:1,blocks:[]},{number:2,blocks:[],untranslated:{rotated:40}},{number:3,blocks:[],untranslated:{figure:0,footer:0}},{number:4,blocks:[],untranslated:7},{number:5,blocks:[{}],untranslated:{footer:3}}]}),{done:[5],blank:[1,3],untranslated:[2,4],processed:5});
+ // One label for the state, whatever its cause; the page's own note ("Trang N: …") names the cause.
+ assert.equal(book.PAGE_LABELS.untranslated,'Còn chữ chưa dịch');assert.equal(book.stateAt('cu',2),'untranslated');
+ const states=book.withStates('c'+'.'.repeat(5),{2:'done',3:'untranslated',4:'blank'});assert.equal(states,'cdub..');
+ assert.deepEqual(book.countStates(states),{total:6,pending:2,done:1,blank:1,untranslated:1,cover:1,skipped:0,failed:0,wanted:3});
+ assert.equal(book.progressText(states),'Đã dịch 1/3 trang');assert.equal(book.progressNote(states),'bìa giữ nguyên · 1 trang trống · 1 trang còn chữ chưa dịch');
+ // A run: the first chunk has no block at all (page 2 under a watermark, 3-21 blank), the second has one such page among
+ // translated ones. Neither costs Gemini anything; the first chunk's note joins the book's notes.
+ const notes=[],account=fakeAccount({total:30,cover:1,blank:Array.from({length:19},(_,i)=>i+3),untranslated:[2,25]});
+ const outcome=await account.create({ui:{warn:note=>notes.push(note)}}).run(account.state.job);
+ assert.equal(outcome.status,'done');assert.equal(account.state.job.pageStates,'cu'+'b'.repeat(19)+'ddd'+'u'+'ddddd');
+ assert.deepEqual(notes,['Trang 2: khoảng 12 chữ Hán trong khung/hình vẫn giữ nguyên chữ gốc; hãy đối chiếu PDF gốc.']);
+ assert.equal(account.sessions.length,1,'only the chunk with blocks is a session');assert.deepEqual(account.sessions[0].pages,[22,23,24,25,26,27,28,29,30]);
+ assert.equal(book.progressNote(account.state.job.pageStates),'bìa giữ nguyên · 19 trang trống · 2 trang còn chữ chưa dịch');
+ const grid={children:[],ownerDocument:{createElement:()=>({className:'',dataset:{},title:''})},append(cell){this.children.push(cell);},setAttribute(name,value){this[name]=value;}};
+ book.renderPageGrid(grid,account.state.job.pageStates);assert.equal(grid.children[1].title,'Trang 2 · Còn chữ chưa dịch');assert.match(grid['aria-label'],/2 trang còn chữ chưa dịch(?! \()/u);
 });
 
 test('heavy chunks are cut smaller on the device; a page too heavy alone, or refused alone, is marked failed',async()=>{
@@ -443,6 +467,27 @@ test('a run waits while the PDF service is busy, in a hidden tab too, and pauses
  // An export refused as busy is tried again too, instead of being skipped.
  let exportRefusals=1;const exporting=fakeAccount({total:5,cover:0});const finish=exporting.steps.finish;exporting.steps.finish=async job=>{if(exportRefusals-->0)throw serviceBusy();return finish(job);};
  assert.equal((await exporting.create({random:()=>0}).run(exporting.state.job)).status,'done');assert.deepEqual(exporting.sleeps,[20]);
+});
+
+test('a PDF service of this machine that does not answer is waited for three times, then named; a database behind the code pauses at once',async()=>{
+ const LOCAL='Dịch vụ PDF trên máy này chưa chạy: hãy tắt Hoa Trí rồi khởi động lại bằng start.cmd (hoặc npm start). Nếu đã khởi động như vậy, xem các dòng [PDF] trong cửa sổ đó.',off=()=>pdfError(503,'pdf_local_off',LOCAL,10);
+ assert.deepEqual(book.classifyError(off(),'extract'),{reason:'pdf_local',wait:10,retries:3});
+ assert.equal(book.waitMessage('pdf_local',10),'Dịch vụ PDF trên máy này chưa trả lời (có thể còn đang khởi động). Tự thử lại sau 10 giây…');
+ // Still starting (start.cmd opens the page before a slow first start ends): it answers after a wait, the run goes on.
+ let starting=1;const late=fakeAccount({total:5,cover:0,refuse:()=>starting-->0?off():null});
+ assert.equal((await late.create().run(late.state.job)).status,'done');assert.deepEqual(late.sleeps,[10]);
+ // Never started (npm run dev): three short waits, then the server's words, never a lost connection.
+ const never=fakeAccount({total:5,cover:0,refuse:()=>off()}),paused=await never.create().run(never.state.job);
+ assert.deepEqual([paused.status,paused.reason],['paused','pdf_local']);assert.deepEqual(never.sleeps,[10,10,10]);
+ assert.equal(paused.message,`${LOCAL} Tiến độ đã lưu; bấm Tiếp tục dịch cả quyển khi dịch vụ PDF đã chạy.`);assert.doesNotMatch(paused.message,/Mất kết nối|mạng/u);
+ // A save refused by a database without the newest migration (backend/http.js; study.js passes its words on): no wait mends it.
+ const SCHEMA='Cơ sở dữ liệu cục bộ chưa cập nhật: hãy tắt Hoa Trí rồi chạy start.cmd (hoặc npm run db:local rồi khởi động lại). Mã 1a2b3c4d.';
+ const outdated=()=>Object.assign(new Error(SCHEMA),{code:'save_failed',status:500,data:{error:SCHEMA,code:'schema_outdated',ray:'1a2b3c4d'}});
+ assert.deepEqual(book.classifyError(outdated(),'save'),{reason:'schema'});
+ const behind=fakeAccount({total:5,cover:0,translateErrors:[outdated()]}),stopped=await behind.create().run(behind.state.job);
+ assert.deepEqual([stopped.status,stopped.reason],['paused','schema']);assert.deepEqual(behind.sleeps,[]);
+ assert.equal(stopped.message,`${SCHEMA} Các trang đã xong trước đó vẫn được giữ; bấm Tiếp tục dịch cả quyển sau khi cơ sở dữ liệu được cập nhật.`);
+ assert.match(book.pauseMessage('schema',Object.assign(outdated(),{keptInTab:true})),/^Cơ sở dữ liệu cục bộ chưa cập nhật: .* Phần đã dịch vẫn hiện trong tab này: đừng đóng tab\./u);
 });
 
 test('while the PDF service is busy a chunk is not uploaded again to find out: the run asks GET pdf-layout/capacity and sends it once a place is free, or at the last try',async()=>{

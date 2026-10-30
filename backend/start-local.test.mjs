@@ -72,6 +72,26 @@ test('npm start names each missing file and what creates it, instead of a generi
  for(const text of ['  - node_modules/wrangler: cài bằng "npm ci"\n','  - frontend/vendor/pdf.mjs: do bước 2 của cài đặt','  - .dev.vars: do bước 6 của cài đặt tạo ra ("npm run setup")\n','bấm đúp start.cmd'])assert.ok(all.text.includes(text),`${text}\n${all.text}`);
 });
 
+test('npm start does not start on a local database a migration behind the code, names it and how to apply it; once applied it starts',async()=>{
+ // As npm run dev's predev: backend/check-migrations.mjs (copied with what it imports) reads the local D1, read only.
+ const root=project({pdfPort:await freePort()}),repo=new URL('../',import.meta.url);
+ for(const file of ['backend/check-migrations.mjs','backend/deploy.mjs','backend/paddle-assets.mjs','services/pdf-layout/version.mjs','frontend/translation-modes.js'])write(join(root,file),readFileSync(new URL(file,repo),'utf8'));
+ write(join(root,'wrangler.jsonc'),'{\n  // test project\n  "name": "start-local-test",\n  "d1_databases": [{"binding": "DB", "database_name": "test", "database_id": "00000000-0000-4000-8000-000000000000", "preview_database_id": "start-local-test", "migrations_dir": "database/migrations"}]\n}\n');
+ for(const name of ['0001_first.sql','0002_second.sql'])write(join(root,'database/migrations',name),'SELECT 1;\n');
+ const {localDatabase}=await import('./check-migrations.mjs'),{DatabaseSync}=await import('node:sqlite'),{file,table}=localDatabase(root);mkdirSync(dirname(file),{recursive:true});
+ const applied=name=>{const db=new DatabaseSync(file);try{db.exec(`CREATE TABLE IF NOT EXISTS ${table}(id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT UNIQUE, applied_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL)`);db.prepare(`INSERT INTO ${table}(name) VALUES(?)`).run(name);}finally{db.close();}};
+ applied('0001_first.sql');
+ const stale=launch(root);
+ assert.equal(await ended(stale),1,stale.text);
+ assert.ok(stale.text.includes('LỖI: cơ sở dữ liệu cục bộ (.wrangler) chưa có 1 migration mà code này cần: 0002_second.sql.\n"npm start" không tự áp migration nên chưa khởi động. Chạy "npm run db:local" rồi chạy lại "npm start", hoặc bấm đúp start.cmd'),stale.text);
+ assert.doesNotMatch(stale.text,/\[(PDF|WEB)\]/u);
+ applied('0002_second.sql');
+ const run=launch(root);
+ assert.ok(await until(()=>run.text.includes('bấm Ctrl+C để tắt.')),run.text);
+ assert.doesNotMatch(run.text,/LỖI|migration/u);
+ await stopTree(run);
+});
+
 test('a PDF service that stops (its port is taken) leaves the web app running, with a warning and the banner',async()=>{
  const port=await freePort(),run=launch(project({pdfPort:port,pdf:FAKE.pdfPortBusy}));
  assert.ok(await until(()=>run.text.includes('bấm Ctrl+C để tắt.')),run.text);

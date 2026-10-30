@@ -55,12 +55,13 @@ test('a stray dollar before a long row of TeX commands is linear for every $…$
 
 const env={GEMINI_API_KEY:'student-key-long-enough',GEMINI_MODEL:'gemini-2.5-flash',GEMINI_THINKING:'minimal'};
 const gemini=value=>Response.json({usageMetadata:{promptTokenCount:20,candidatesTokenCount:10,totalTokenCount:30},candidates:[{finishReason:'STOP',content:{parts:[{text:JSON.stringify(value)}]}}]});
-test('math holding Chinese words is translated, other math stays shielded, and Chinese left in a translation is reported',async t=>{
+test('math holding Chinese words is translated, other math stays shielded, and Chinese left in a translation is asked for again once, then reported',async t=>{
  const blocks=[{id:'p1-b1',source:`速度 ${B}(v=${B}frac{路程}{时间}${B})，单位是 ${B}(m/s${B})。`},{id:'p1-b2',source:`密度 ${B}frac{质量}{体积}`}];
- let sent;t.mock.method(globalThis,'fetch',async(url,options)=>{sent=JSON.parse(JSON.parse(options.body).contents[0].parts[0].text);return gemini({blocks:[{id:'p1-b1',translation:`Vận tốc ${B}(v=${B}frac{quãng đường}{thời gian}${B}), đơn vị là @@MATH_0002@@.`},{id:'p1-b2',translation:`Khối lượng riêng ${B}frac{质量}{thể tích}`}],contextUpdate:'',glossaryUpdates:{}});});
+ const sent=[];t.mock.method(globalThis,'fetch',async(url,options)=>{const payload=JSON.parse(JSON.parse(options.body).contents[0].parts[0].text);sent.push(payload);return gemini({blocks:[{id:'p1-b1',translation:`Vận tốc ${B}(v=${B}frac{quãng đường}{thời gian}${B}), đơn vị là @@MATH_0002@@.`},{id:'p1-b2',translation:`Khối lượng riêng ${B}frac{质量}{thể tích}`}].filter(b=>payload.blocks.some(sentBlock=>sentBlock.id===b.id)),contextUpdate:'',glossaryUpdates:{}});});
  const result=await translatePdfBlocks(env,{blocks});
- assert.equal(sent.blocks[0].source,`速度 ${B}(v=${B}frac{路程}{时间}${B})，单位是 @@MATH_0002@@。`);
- assert.equal(sent.blocks[1].source,`密度 ${B}frac{质量}{体积}`);
+ assert.equal(sent[0].blocks[0].source,`速度 ${B}(v=${B}frac{路程}{时间}${B})，单位是 @@MATH_0002@@。`);
+ assert.equal(sent[0].blocks[1].source,`密度 ${B}frac{质量}{体积}`);
+ assert.deepEqual(sent.map(payload=>payload.blocks.map(b=>b.id)),[['p1-b1','p1-b2'],['p1-b2']],'only the block that kept Chinese is asked for again');
  assert.equal(result.blocks[0].translation,`Vận tốc ${B}(v=${B}frac{quãng đường}{thời gian}${B}), đơn vị là ${B}(m/s${B}).`);
  assert.ok(result.warnings.some(w=>/p1-b2.*质量/u.test(w)));assert.ok(!result.warnings.some(w=>/p1-b1/u.test(w)));
 });
@@ -141,4 +142,24 @@ test('a label among labels of one width is not held to their width: it may grow 
  // a heading over its column still stops at the column's edge
  const {elements:[column,heading]}=await prepared({boxes:[[60,100,300,200],[60,60,150,74],[320,100,560,200]],width:600});
  assert.ok(Number(heading.dataset.roomRight)<=300.01,heading.dataset.roomRight);
+});
+
+test('A scanned block Gemini could not read keeps the page pixels: no mask, no text box, its box protected; a translation typed for it is drawn as text',()=>{
+ // keepPixels (backend/pdf-layout-apply.js): the study page puts the source back as its translation (frontend/study.js).
+ const kept={id:'p1-b1',source:'[□][□]',fontSize:10,box:[50,100,550,160],keepPixels:true},other={id:'p1-b2',source:'原文',fontSize:10,box:[50,200,550,260]},waiting={id:'p1-b3',source:'等待',fontSize:10,box:[50,300,550,360]};
+ const html=pageMarkup(page([kept,other,waiting]),new Map([['p1-b1','[□][□]'],['p1-b2','Bản dịch']]));
+ assert.equal((html.match(/class="pdf-original-patch"/gu)||[]).length,1);
+ assert.match(html,/<div class="pdf-original-patch" data-block-id="p1-b1" aria-hidden="true" style="left:50pt;top:100pt;width:500pt;height:60pt"><\/div>/u);
+ assert.match(html,/<clipPath id="pdf-keep-1"><rect x="50" y="100" width="500" height="60"\/><\/clipPath><image href="data:image\/png;base64,QUJD" width="600" height="800" preserveAspectRatio="none" clip-path="url\(#pdf-keep-1\)"\/>/u);
+ // Two blocks kept on one page draw the original once, clipped to both boxes (a scan page is 1-3 MB of data URL).
+ const twice=pageMarkup(page([kept,{...waiting,keepPixels:true,source:'[□]'}]),new Map([['p1-b1','[□][□]'],['p1-b3','[□]']]));
+ assert.equal((twice.match(/class="pdf-original-patch"/gu)||[]).length,2);assert.equal((twice.match(/<image href="data:image\/png;base64,QUJD"/gu)||[]).length,1);
+ assert.equal((twice.match(/<rect /gu)||[]).length,2);
+ assert.doesNotMatch(html,/class="pdf-text-box" data-block-id="p1-b1"/u);
+ assert.equal((html.match(/class="pdf-text-mask"/gu)||[]).length,1);assert.match(html,/class="pdf-text-box" data-block-id="p1-b2"/u);
+ assert.match(html,/data-translated-blocks="2"/u);assert.match(html,/data-protected="\[\[50,100,550,160\]\]"/u);
+ // A translation the student typed for it is drawn like any other; so is a block read for good.
+ const typed=pageMarkup(page([kept,other]),new Map([['p1-b1','Chữ đã sửa'],['p1-b2','Bản dịch']]));
+ assert.doesNotMatch(typed,/pdf-original-patch/u);assert.match(typed,/class="pdf-text-box" data-block-id="p1-b1"/u);assert.match(typed,/data-protected="\[\]"/u);
+ assert.doesNotMatch(pageMarkup(page([{...kept,keepPixels:undefined}]),new Map([['p1-b1','[□][□]']])),/pdf-original-patch/u);
 });

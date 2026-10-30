@@ -8,13 +8,15 @@ import {isSubject} from './subject-glossaries.js';
 import {ownedBook,sourceKey,sourceInUse,removeKeys} from './study-history.js';
 // The modes of "Cách dịch" (book_jobs.mode has no CHECK, so a run stores its mode as it is, premium included). The
 // student may change a job's mode while no other device's run holds it (PATCH mode).
-import {isMode} from '../frontend/translation-modes.js';
+import {isMode,learnedTerm} from '../frontend/translation-modes.js';
 
 const base='/api/my/study/book-jobs';
 const reply=(data,status=200,headers={})=>Response.json(data,{status,headers:{'Cache-Control':'no-store','X-Content-Type-Options':'nosniff',...headers}});
 const SHA=/^[a-f\d]{64}$/u,UUID=/^[a-f\d-]{36}$/iu,CONTROL=/[\u0000-\u001f\u007f]/u;
-// One character per page of the original; requests may also name the states in words.
-const STATES={pending:'.',done:'d',blank:'b',cover:'c',skipped:'s',failed:'f'},CODES=new Set(Object.values(STATES));
+// One character per page of the original; requests may also name the states in words. untranslated ('u'): a page with no
+// block to translate that still shows Chinese outside every block (in a figure, a rotated watermark…: the extractor's
+// page.untranslated), kept as printed and named, never called blank.
+const STATES={pending:'.',done:'d',blank:'b',untranslated:'u',cover:'c',skipped:'s',failed:'f'},CODES=new Set(Object.values(STATES));
 const STATUSES=new Set(['ready','running','paused','done']);
 export const MAX_BOOK_PAGES=10000;
 // A chunk is one layout extraction, which takes at most 20 pages. The glossary goes with every chunk's request, so it is
@@ -58,14 +60,18 @@ function cleanReason(value){
  const reason=value.trim();if(reason.length>200||CONTROL.test(reason))throw bad('Lý do tạm dừng không hợp lệ.','bad_reason');return reason||null;
 }
 // The glossary in the form translate-blocks takes: Chinese term -> Vietnamese, each at most 100 characters. Invalid
-// entries are left out, as the history save does.
-function glossaryEntries(value){
+// entries are left out, as the history save does. learned: terms a chunk learned (a run's PATCH), which count only as
+// Vietnamese renderings, the Chinese in parentheses after a reading at most (translation-modes.js learnedTerm, the rule
+// of text mode and of every batch): one keeping Chinese bare, or repeating its term, would keep that Chinese for the
+// rest of the book.
+function glossaryEntries(value,{learned=false}={}){
  if(value===undefined)return null;
  if(!value||typeof value!=='object'||Array.isArray(value))throw bad('Bảng thuật ngữ phải là các cặp tiếng Trung – tiếng Việt.','bad_glossary');
  const entries=[];
  for(const [rawKey,rawValue] of Object.entries(value).slice(0,MAX_TERMS)){
   if(typeof rawValue!=='string')continue;
   const key=rawKey.normalize('NFC').trim(),translation=normalizeVietnameseText(rawValue.trim()).trim();
+  if(learned&&!learnedTerm(key,translation))continue;
   if(key&&translation&&key.length<=100&&translation.length<=100&&!['__proto__','constructor','prototype'].includes(key)&&!CONTROL.test(key+translation))entries.push([key,translation]);
  }
  return entries;
@@ -161,7 +167,7 @@ async function updateJob(request,env,reader,id){
  if(has('status')&&!STATUSES.has(body.status))throw bad('Trạng thái lượt dịch không hợp lệ.','bad_status');
  if(has('model')&&body.model!==null&&!isStudyModel(body.model))throw bad('Model Gemini không hợp lệ.','bad_model');
  if(has('mode')&&!isMode(body.mode))throw bad('Chế độ dịch không hợp lệ.','bad_mode');
- const reason=has('pauseReason')?cleanReason(body.pauseReason):undefined,usage=usageToAdd(body.addUsage),reports=usageReports(body.reports),runner=runnerOf(body.runner),entries=glossaryEntries(body.glossary);
+ const reason=has('pauseReason')?cleanReason(body.pauseReason):undefined,usage=usageToAdd(body.addUsage),reports=usageReports(body.reports),runner=runnerOf(body.runner),entries=glossaryEntries(body.glossary,{learned:true});
  const book=has('storyId')?await bookOf(env,reader,body.storyId):undefined;if(book===null)return missingBook();
  // Tokens are counted whoever reports them; every other change belongs to the run holding the job (runner), if any.
  const changes=['pages','status','pauseReason','model','storyId','glossary','mode'].some(has);

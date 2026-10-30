@@ -19,14 +19,15 @@ export function bookSources(parts){
  sources.forEach((source,index)=>{source.key=source.sha256||`tệp ${index+1}: ${source.filename}`;});
  return {sources,unplaced};
 }
-// The pages the whole-book runs of a book found without Chinese to translate (page state 'b' of GET
-// /api/my/study/book-jobs), by the sha256 of their original: they come from the part's PDF like its other pages but
-// count as kept, as Xưởng dịch counts them ("Đã dịch 4/4 trang" there, never 5 here).
+// The pages the whole-book runs of a book found without a block to translate (page state 'b' of GET
+// /api/my/study/book-jobs, or 'u' when Chinese stays printed on them outside every block), by the sha256 of their
+// original: they come from the part's PDF like its other pages but count as kept, as Xưởng dịch counts them ("Đã dịch
+// 4/4 trang" there, never 5 here).
 export function blankPages(jobs,storyId){
  const pages=new Map();
  for(const job of Array.isArray(jobs)?jobs:[]){
   if(!storyId||job?.storyId!==storyId||!/^[a-f\d]{64}$/u.test(job.sourceSha256||''))continue;
-  const found=pages.get(job.sourceSha256)||new Set();[...String(job.pageStates||'')].forEach((state,index)=>{if(state==='b')found.add(index+1);});pages.set(job.sourceSha256,found);
+  const found=pages.get(job.sourceSha256)||new Set();[...String(job.pageStates||'')].forEach((state,index)=>{if(state==='b'||state==='u')found.add(index+1);});pages.set(job.sourceSha256,found);
  }
  return pages;
 }

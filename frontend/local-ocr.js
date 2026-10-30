@@ -1,13 +1,16 @@
 import {assessLocalOcr} from './ocr-policy.js';
-import {normalizeOcrLayout,tesseractLayout} from './document-layout.js';
+import {normalizeOcrLayout,tesseractLayout,glyphRows,glyphRegions} from './document-layout.js';
 import {recognizePaddle,terminatePaddle} from './paddle-client.js';
 
 let workerPromise=null;
 let progressListener=()=>{};
 // paddleUnavailable: why PaddleOCR failed to run in this tab ('' until it does), so Tesseract reads the scans from then
-// on. installCheck: whether this install serves PaddleOCR at all, asked once per tab. announced: the reason the status
-// line already gave for the document being read (terminateLocalOcr ends a document).
-let paddleUnavailable='',installCheck=null,announced='';
+// on; a page it could not finish in time (paddle-client.js's backstop) is read by Tesseract and the next page tries
+// PaddleOCR again, until two pages in a row run out of time (paddleTimeouts). installCheck: whether this install serves
+// PaddleOCR at all, asked once per tab. announced: the reason the status line already gave for the document being read
+// (terminateLocalOcr ends a document).
+let paddleUnavailable='',paddleTimeouts=0,installCheck=null,announced='';
+const PADDLE_TIMEOUT='PaddleOCR quá thời gian xử lý trang.';
 let lastActivity=0,importFailures=0,downloading=false;
 // Tesseract says nothing while it downloads its core (3.9 MB) or the Chinese and English data (4.7 MB): during those
 // phases the page waits up to DOWNLOAD_STALL_MS, so a slow but working download is not cut off. Any other silence of
@@ -107,14 +110,22 @@ export async function recognizeChinesePage(blob,onProgress=()=>{}){
  let reason=paddleUnavailable||await paddleProblem();
  if(!reason){
   try{
-   const layout=normalizeOcrLayout(await recognizePaddle(blob,onProgress));
+   const layout=normalizeOcrLayout(await recognizePaddle(blob,onProgress));paddleTimeouts=0;
    return {...assessLocalOcr(layout,{preserveNumbers:true}),layout,engine:'paddle',metrics:layout.metrics};
-  }catch(error){terminatePaddle();reason=paddleUnavailable=String(error?.message||'').trim()||'PaddleOCR không chạy được.';}
+  }catch(error){
+   terminatePaddle();reason=String(error?.message||'').trim()||'PaddleOCR không chạy được.';
+   if(reason!==PADDLE_TIMEOUT||++paddleTimeouts>=2)paddleUnavailable=reason;
+  }
  }
  if(reason!==announced){announced=reason;onProgress({status:'fallback',engine:'tesseract',reason});}
  return {...await recognizeTesseractPage(blob,onProgress),fallbackReason:reason};
 }
 
+// Tesseract reads a page in one pass and may leave out a whole region (a white title on a band, a ruled table) or read
+// it as a few Latin letters while still scoring 84-90%. The page's own ink says where Han glyphs stand (glyphRows): each
+// region its lines do not read (unreadRegions) is read again on its own (light text on a dark band inverted first, a
+// single row as one line) and replaces the lines in it when it reads more Han. The Han of a region still unread
+// (missedCells) sends the page to Gemini where the Cách dịch allows (needsGemini) and is named in a note.
 export async function recognizeTesseractPage(blob,onProgress=()=>{}){
  progressListener=onProgress;
  const active=await worker();
@@ -123,10 +134,64 @@ export async function recognizeTesseractPage(blob,onProgress=()=>{}){
   preserve_interword_spaces:'1',
   tessedit_pageseg_mode:'3'
  },{blocks:true,text:true}),STALL_MS*2,'Bộ nhận dạng chữ Tesseract không phản hồi khi đọc trang này.');
- const bitmap=await createImageBitmap(blob),layout=tesseractLayout(result.data,bitmap.width,bitmap.height);bitmap.close();
- if(!layout.blocks.length)layout.text=result.data.text;
+ const bitmap=await createImageBitmap(blob);let layout=tesseractLayout(result.data,bitmap.width,bitmap.height),missedCells=0;
+ try{
+  if(!layout.blocks.length)layout.text=result.data.text;
+  const regions=await unreadRegions(bitmap,layout).catch(()=>[]),readings=[];
+  for(const region of regions){
+   // A reading counts when Tesseract trusts it, it holds Han for at least a third of the region's glyph cells (a
+   // photograph read as text gives neither) and more than the lines in the region; the cells the better of the two
+   // still lacks under three fifths of them count as missed.
+   const {text,confidence}=await readRegion(active,bitmap,region).catch(()=>({text:'',confidence:0})),han=confidence>=50?hanCount(text):0,before=region.inside.reduce((sum,index)=>sum+hanCount(layout.blocks[index].text),0);
+   if(han>before&&han>=Math.max(2,region.cells/3))readings.push({text,region});
+   if(Math.max(han,before)<region.cells*.6)missedCells+=region.cells-Math.max(han,before);
+  }
+  if(readings.length)layout=withReadings(layout,readings);
+ }finally{bitmap.close();}
  layout.confidence=result.data.confidence;layout.metrics={totalMs:performance.now()-started};
- return {...assessLocalOcr(layout,{preserveNumbers:true}),layout,engine:'tesseract',metrics:layout.metrics};
+ const assessment=assessLocalOcr(layout,{preserveNumbers:true});
+ return {...assessment,needsGemini:assessment.needsGemini||missedCells>0,missedCells,layout,engine:'tesseract',metrics:layout.metrics};
+}
+// What a note says of a page whose Han Tesseract could not read in places (missedCells), before what was done about it.
+export const missedNotice=cells=>`nhận dạng chữ trên thiết bị (Tesseract) bỏ sót khoảng ${cells} chữ ở dải màu, bảng hoặc tiêu đề lớn`;
+const surface=(width,height)=>typeof OffscreenCanvas==='function'?new OffscreenCanvas(width,height):Object.assign(document.createElement('canvas'),{width,height});
+const hanCount=text=>(String(text||'').match(/\p{Script=Han}/gu)||[]).length;
+// The regions of Han glyphs in a page image its layout does not read, at about 1000 px wide (about 1.7 px/pt for an A4
+// page drawn by uploadOptimizedScan): rows of glyph cells (glyphRows) over which its lines hold Han for under half the
+// cells (no line, a heading read as Latin letters, a few characters of a table row), grouped as OCR reads them, each
+// with the lines whose middle stands in it (inside: their indices).
+async function unreadRegions(bitmap,layout){
+ const ratio=Math.min(1,1000/bitmap.width),width=Math.max(1,Math.round(bitmap.width*ratio)),height=Math.max(1,Math.round(bitmap.height*ratio));
+ const canvas=surface(width,height),context=canvas.getContext('2d',{willReadFrequently:true});context.drawImage(bitmap,0,0,width,height);
+ const {data}=context.getImageData(0,0,width,height),gray=new Uint8Array(width*height);
+ for(let i=0,p=0;p<gray.length;i+=4,p++)gray[p]=(299*data[i]+587*data[i+1]+114*data[i+2])/1000|0;
+ const lines=layout.blocks.map(({box,text})=>({x0:box.x*width,x1:(box.x+box.width)*width,y0:box.y*height,y1:(box.y+box.height)*height,han:hanCount(text)}));
+ const read=row=>lines.filter(line=>line.x0<row.x1&&line.x1>row.x0&&Math.min(line.y1,row.y1)-Math.max(line.y0,row.y0)>=.5*Math.min(row.y1-row.y0,line.y1-line.y0)).reduce((sum,line)=>sum+line.han,0);
+ return glyphRegions(glyphRows(gray,width,height,{scale:width/600}).filter(row=>read(row)<row.cells/2),width,height).map(region=>{
+  const {x,y,width:w,height:h}=region.box;
+  return {...region,inside:lines.flatMap((line,index)=>{const cx=(line.x0+line.x1)/2/width,cy=(line.y0+line.y1)/2/height;return cx>=x&&cx<=x+w&&cy>=y&&cy<=y+h?[index]:[];})};
+ });
+}
+// One region read again by Tesseract from the full-size page: a single row as one line (PSM 7), several as a block.
+async function readRegion(active,bitmap,{box,light,em}){
+ const x=Math.floor(box.x*bitmap.width),y=Math.floor(box.y*bitmap.height),width=Math.max(1,Math.ceil(box.width*bitmap.width)),height=Math.max(1,Math.ceil(box.height*bitmap.height));
+ const canvas=surface(width,height),context=canvas.getContext('2d',{willReadFrequently:true});
+ context.fillStyle='#fff';context.fillRect(0,0,width,height);context.drawImage(bitmap,x,y,width,height,0,0,width,height);
+ if(light){const pixels=context.getImageData(0,0,width,height);for(let i=0;i<pixels.data.length;i+=4)for(let k=0;k<3;k++)pixels.data[i+k]=255-pixels.data[i+k];context.putImageData(pixels,0,0);}
+ const crop=canvas.convertToBlob?await canvas.convertToBlob({type:'image/png'}):await new Promise(resolve=>canvas.toBlob(resolve,'image/png'));
+ const result=await stallGuard(active.recognize(crop,{preserve_interword_spaces:'1',tessedit_pageseg_mode:box.height>em*2.6?'6':'7'},{text:true}),STALL_MS,'Bộ nhận dạng chữ Tesseract không phản hồi khi đọc trang này.');
+ return {text:String(result.data.text||'').trim(),confidence:Number(result.data.confidence)||0};
+}
+// The layout with the regions read again set in as lines of their own, each row in its share of its region, in place
+// of the lines that stood in them.
+function withReadings(layout,readings){
+ const corners=({x,y,width,height})=>[[x,y],[x+width,y],[x+width,y+height],[x,y+height]],replaced=new Set(readings.flatMap(({region})=>region.inside));
+ const items=layout.blocks.filter((block,index)=>!replaced.has(index)).map(block=>({text:block.text,score:block.confidence/100,poly:corners(block.box),...(block.sourceParagraph!==undefined?{sourceParagraph:block.sourceParagraph}:{})}));
+ readings.forEach(({text,region},index)=>{
+  const rows=text.split(/\r?\n/u).map(line=>line.trim()).filter(Boolean),step=region.box.height/rows.length;
+  rows.forEach((row,k)=>items.push({text:row,score:.7,sourceParagraph:`again-${index}`,poly:corners({...region.box,y:region.box.y+k*step,height:step})}));
+ });
+ return normalizeOcrLayout({image:{width:1,height:1},items},'tesseract');
 }
 
 // Never waits more than a few seconds: a worker still starting (or one whose wasm hung) is closed whenever it arrives,

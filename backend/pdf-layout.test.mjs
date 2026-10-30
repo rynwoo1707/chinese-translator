@@ -3,14 +3,15 @@ import assert from 'node:assert/strict';
 import {DatabaseSync} from 'node:sqlite';
 import {readdirSync,readFileSync} from 'node:fs';
 import {fileURLToPath} from 'node:url';
-import {pdfLayoutRoute,bodyDeadline} from './pdf-layout.js';
+import {pdfLayoutRoute,bodyDeadline,base64Value} from './pdf-layout.js';
+import {Buffer} from 'node:buffer';
 import {studyRoute} from './study-translation.js';
 import {studyHistoryRoute} from './study-history.js';
 import {errorResponse} from './http.js';
 import {holdLease,keepRenewed} from './pdf-slots.js';
 import {classifyError} from '../frontend/whole-book.js';
 import {overflowMessage} from '../services/pdf-layout/engine.mjs';
-import {MODES,modeProfile} from '../frontend/translation-modes.js';
+import {MODES,modeProfile,LAYOUT_VERSION} from '../frontend/translation-modes.js';
 
 const base='/api/my/study/pdf-layout',origin='https://example.test';
 const reader={id:'student-1',name:'Lan'},other={id:'student-2'};
@@ -220,23 +221,27 @@ test('Reopening an exported PDF as partially translated also clears the stale li
  assert.ok(batches.at(-1).some(item=>item.sql.startsWith('UPDATE chapters')&&item.sql.includes('file_key')&&item.args.includes('private-chapter')&&!item.sql.includes('WHERE story_id=')));
 });
 
-test('PDF refresh re-extracts saved selected pages into a new asset and restores their original page numbers and block IDs',async t=>{
+test('PDF refresh sends the stored original with the saved blocks as one JSON body, re-extracts the selected pages into a new asset and restores their original page numbers and block IDs',async t=>{
  const {env,FILES}=environment(),prior=document();prior.totalPages=88;
  const second=structuredClone(prior.pages[0]);second.number=5;second.blocks.forEach(b=>b.id=b.id.replace(/^p4-/u,'p5-'));prior.pages.push(second);
  await FILES.put(assetKey(reader,'manifest.json'),JSON.stringify(prior));await FILES.put(assetKey(reader,'original.pdf'),new TextEncoder().encode(pdf));
  const writesBefore=FILES.writes.length,oldManifest=FILES.values.get(assetKey(reader,'manifest.json')).value,oldOriginal=FILES.values.get(assetKey(reader,'original.pdf')).value.slice(),calls=[];
  t.mock.method(globalThis,'fetch',async(url,options)=>{
-  const selected=structuredClone(prior);selected.extractionVersion=2;selected.totalPages=2;
+  const selected=structuredClone(prior);selected.extractionVersion=LAYOUT_VERSION;selected.totalPages=2;
   selected.pages.forEach((page,i)=>{page.number=i+1;page.blocks.forEach(block=>block.id=block.id.replace(/^p\d+-/u,`p${i+1}-`));});
   calls.push({url:String(url),options,body:await new Response(options.body).text()});
   return Response.json({document:selected,originalPdfBase64:btoa(pdf)});
  });
  const response=await pdfLayoutRoute(jsonRequest(base+'/refresh',{assetId,apiKey:'student-key-must-not-be-sent'}),env,base+'/refresh',reader),result=await response.json();
  assert.equal(response.status,201);assert.notEqual(result.assetId,assetId);assert.match(result.assetId,/^[a-f\d-]{36}$/iu);
- assert.equal(result.document.extractionVersion,2);assert.equal(result.document.totalPages,88);assert.deepEqual(result.document.pages.map(p=>p.number),[4,5]);
+ assert.equal(result.document.extractionVersion,LAYOUT_VERSION);assert.equal(result.document.totalPages,88);assert.deepEqual(result.document.pages.map(p=>p.number),[4,5]);
  assert.deepEqual(result.document.pages.flatMap(p=>p.blocks.map(b=>b.id)),['p4-b0','p4-b1','p5-b0','p5-b1']);
- assert.equal(calls.length,1);assert.equal(calls[0].url,'https://pdf.example.test/v1/extract');assert.equal(calls[0].body,pdf);
- assert.equal(calls[0].options.headers['X-PDF-Pages'],'1-2');assert.equal(calls[0].options.headers.Authorization,'Bearer service-secret');assert.equal(calls[0].options.headers['Content-Type'],'application/pdf');
+ // extract.py's payload: the PDF as base64 and the page range in the body, the saved blocks of each page of the stored
+ // original (text layers: every block with its source); the headers say all pages or none.
+ assert.equal(calls.length,1);assert.equal(calls[0].url,'https://pdf.example.test/v1/extract');const sent=JSON.parse(calls[0].body);
+ assert.deepEqual(Object.keys(sent).sort(),['known','pages','pdfBase64','quality']);assert.equal(atob(sent.pdfBase64),pdf);assert.equal(sent.pages,'1-2');assert.equal(sent.quality,'standard');
+ assert.deepEqual(sent.known,[4,5].map((number,i)=>({page:i+1,ocr:false,blocks:prior.pages[i].blocks.map(b=>({id:b.id,box:b.box,source:b.source}))})));
+ assert.equal(calls[0].options.headers['X-PDF-All-Pages'],'1');assert.equal(calls[0].options.headers['X-PDF-Pages'],undefined);assert.equal(calls[0].options.headers.Authorization,'Bearer service-secret');assert.equal(calls[0].options.headers['Content-Type'],'application/json');
  assert.doesNotMatch(calls[0].body,/student-key/);assert.equal(response.headers.get('Cache-Control'),'no-store');
  const writes=FILES.writes.slice(writesBefore);assert.equal(writes.length,2);
  assert.ok(writes.every(w=>w.key.startsWith(`study/${reader.id}/pdf-layout/${result.assetId}/`)));
@@ -247,13 +252,20 @@ test('PDF refresh re-extracts saved selected pages into a new asset and restores
  assert.equal(result.originalUrl,`${base}/assets/${result.assetId}/original`);assert.doesNotMatch(JSON.stringify(result),/student-key|service-secret/);assert.doesNotMatch(writes.map(write=>storedText(write.value)).join('\n'),/student-key|service-secret/);
 });
 
-test('A current PDF extraction returns its existing asset without service calls or storage writes',async t=>{
- const {env,FILES}=environment(),prior=document();prior.extractionVersion=2;
+test('A layout this site\'s extractor read (its stamp, LAYOUT_VERSION) is answered as stored without service calls or storage writes; an older stamp is extracted again',async t=>{
+ const {env,FILES}=environment(),prior=document();prior.extractionVersion=LAYOUT_VERSION;
  await FILES.put(assetKey(reader,'manifest.json'),JSON.stringify(prior));const writesBefore=FILES.writes.length;let calls=0;
  t.mock.method(globalThis,'fetch',async()=>{calls++;throw new Error('Current extraction must not be sent to the service');});
  const response=await pdfLayoutRoute(jsonRequest(base+'/refresh',{assetId}),env,base+'/refresh',reader),result=await response.json();
  assert.equal(response.status,200);assert.equal(result.assetId,assetId);assert.deepEqual(result.document,prior);assert.equal(result.originalUrl,`${base}/assets/${assetId}/original`);
- assert.equal(calls,0);assert.equal(FILES.writes.length,writesBefore);assert.deepEqual(FILES.reads,[assetKey(reader,'manifest.json')]);
+ // The blocks are read once without the images, then the stored copy is sent on as storage streams it.
+ assert.equal(calls,0);assert.equal(FILES.writes.length,writesBefore);assert.deepEqual(FILES.reads,[assetKey(reader,'manifest.json'),assetKey(reader,'manifest.json')]);
+ // A page an older extractor read makes the whole copy older (the oldest page counts), and so does a manifest of no stamp.
+ for(const older of [{...prior,pages:[{...prior.pages[0],extractionVersion:LAYOUT_VERSION-1}]},document()]){
+  await FILES.put(assetKey(reader,'manifest.json'),JSON.stringify(older));
+  assert.equal((await pdfLayoutRoute(jsonRequest(base+'/refresh',{assetId}),env,base+'/refresh',reader)).status,410,'extracted again: the stored original is asked for');
+ }
+ assert.equal(calls,0);
 });
 
 test('PDF refresh cannot read or refresh another student asset and makes no network request',async t=>{
@@ -290,7 +302,7 @@ test('PDF refresh rejects a malformed asset ID before reading storage or calling
 
 test('PDF extraction records the uploaded file hash so ranges of one textbook can join one book, and refresh keeps it',async t=>{
  const {env,FILES}=environment(),hex=async text=>[...new Uint8Array(await crypto.subtle.digest('SHA-256',new TextEncoder().encode(text)))].map(x=>x.toString(16).padStart(2,'0')).join('');
- t.mock.method(globalThis,'fetch',async()=>Response.json({document:document(),originalPdfBase64:btoa(pdf)}));
+ t.mock.method(globalThis,'fetch',async()=>Response.json({document:{...document(),extractionVersion:LAYOUT_VERSION},originalPdfBase64:btoa(pdf)}));
  const extract=async sha256=>{const form=new FormData();form.set('file',new File([pdf],'lesson.pdf',{type:'application/pdf'}));form.set('pages','4');if(sha256!==undefined)form.set('sha256',sha256);const response=await pdfLayoutRoute(new Request(origin+base+'/extract',{method:'POST',body:form}),env,base+'/extract',reader);return (await response.json()).assetId;};
  const stored=async id=>JSON.parse(await (await FILES.get(`study/${reader.id}/pdf-layout/${id}/manifest.json`)).text()).sourceSha256;
  // The stored original is filed under this hash, so the Worker always hashes the upload itself: a browser value (or none,
@@ -300,12 +312,18 @@ test('PDF extraction records the uploaded file hash so ranges of one textbook ca
  const prior=document();prior.sourceSha256=fromBrowser;prior.totalPages=40;await FILES.put(assetKey(reader,'manifest.json'),JSON.stringify(prior));await FILES.put(assetKey(reader,'original.pdf'),new TextEncoder().encode(pdf));
  const response=await pdfLayoutRoute(jsonRequest(base+'/refresh',{assetId,forceClone:true}),env,base+'/refresh',reader),result=await response.json();
  assert.equal(response.status,201);assert.equal(result.document.sourceSha256,fromBrowser);assert.equal(await stored(result.assetId),fromBrowser);
+ // The copy names the layout it was made from, which a part without a file hash (saved by older code) is matched by.
+ const named=async id=>JSON.parse(await (await FILES.get(`study/${reader.id}/pdf-layout/${id}/manifest.json`)).text()).refreshedFrom;
+ assert.equal(result.document.refreshedFrom,assetId);assert.equal(await named(result.assetId),assetId);
+ delete prior.sourceSha256;await FILES.put(assetKey(reader,'manifest.json'),JSON.stringify(prior));
+ const unhashed=await (await pdfLayoutRoute(jsonRequest(base+'/refresh',{assetId,forceClone:true}),env,base+'/refresh',reader)).json();
+ assert.equal(unhashed.document.sourceSha256,undefined);assert.equal(await named(unhashed.assetId),assetId);
 });
 
 test('An extraction asks for fine OCR sheets when its mode cuts them finer, a refresh asks for what the stored copy has, and the manifest keeps what was made',async t=>{
  const {env,FILES}=environment(),asked=[];
  // As a service that knows the header: it records the sheets it made (an older one ignores the header and records nothing).
- t.mock.method(globalThis,'fetch',async(url,options)=>{asked.push(options.headers);await new Response(options.body).arrayBuffer();const made=document();made.sheetQuality=options.headers['X-PDF-Quality']==='fine'?'fine':'standard';return Response.json({document:made,originalPdfBase64:btoa(pdf)});});
+ t.mock.method(globalThis,'fetch',async(url,options)=>{asked.push(options.headers);await new Response(options.body).arrayBuffer();const made=document();made.extractionVersion=LAYOUT_VERSION;made.sheetQuality=options.headers['X-PDF-Quality']==='fine'?'fine':'standard';return Response.json({document:made,originalPdfBase64:btoa(pdf)});});
  const form=(fields={})=>{const data=new FormData();data.set('file',new File([pdf],'lesson.pdf',{type:'application/pdf'}));data.set('pages','4');for(const [key,value] of Object.entries(fields))data.set(key,value);return data;};
  const extract=async fields=>{const response=await pdfLayoutRoute(new Request(origin+base+'/extract',{method:'POST',body:form(fields)}),env,base+'/extract',reader);assert.equal(response.status,201);return response.json();};
  const kept=async id=>JSON.parse(await (await FILES.get(`study/${reader.id}/pdf-layout/${id}/manifest.json`)).text()).sheetQuality;
@@ -327,6 +345,101 @@ test('An extraction asks for fine OCR sheets when its mode cuts them finer, a re
  }
  delete prior.sheetQuality;await FILES.put(assetKey(reader,'manifest.json'),JSON.stringify(prior));
  assert.equal((await pdfLayoutRoute(jsonRequest(base+'/refresh',{assetId,forceClone:true}),env,base+'/refresh',reader)).status,201);assert.equal(asked.at(-1)['X-PDF-Quality'],undefined,'an older copy has standard sheets');
+});
+
+// "Cập nhật bố cục" of a part an older extractor read: a scanned page 7 and a text-layer page 8 of the book.
+const scanBlock=(id,fields={})=>({id,source:`（扫描）${id}`,text:`（扫描）${id}`,box:[40,20+Number(id.split('-b')[1])*60,500,60+Number(id.split('-b')[1])*60],fontSize:12,...fields});
+function olderPart(){
+ return {version:1,extractionVersion:2,totalPages:120,pages:[
+  {number:7,width:600,height:800,ocr:true,background:png,original:png,blocks:[
+   scanBlock('p7-b1',{source:'第一节 向量',text:'第一节 向量',ocrCorrected:true,ocrHint:'笫一节 向虽',kind:'heading',bold:true}),
+   // An older extractor numbered formula tokens from 0; the new one numbers them from 1.
+   scanBlock('p7-b2',{source:'若 @@PDF_INLINE_0@@，则成立。',text:'若 a+b，则成立。',ocrCorrected:true,inlines:[{token:'@@PDF_INLINE_0@@',box:[100,140,160,152],text:'a+b',image:png,width:60,height:12}]}),
+   scanBlock('p7-b3',{ocrCorrected:true,ocrKept:'refused'}),
+   scanBlock('p7-b4',{ocrCorrected:true,keepPixels:true,source:'[□]',text:'[□]'}),
+   scanBlock('p7-b5',{source:'某段',text:'某段',ocrCorrected:true,ocrDoubt:'han'}),
+   scanBlock('p7-b6',{source:'例题',text:'例题',ocrCorrected:true,ocrDoubt:'tex',ocrRereads:1}),
+   scanBlock('p7-b7',{image:png})
+  ]},
+  {number:8,width:600,height:800,ocr:false,background:png,original:png,blocks:[
+   {id:'p8-b1',source:'第二节 平面',text:'第二节 平面',box:[40,40,300,70],fontSize:16},
+   {id:'p8-b2',source:'正文一行。',text:'正文一行。',box:[40,90,500,120],fontSize:12}
+  ]}
+ ]};
+}
+test('A refresh names only the scanned blocks whose reading is final; those found again keep that reading, under the new formula tokens, while only new or grown blocks are left on OCR sheets',async t=>{
+ const {env,FILES}=environment(),prior=olderPart();
+ await FILES.put(assetKey(reader,'manifest.json'),JSON.stringify(prior));await FILES.put(assetKey(reader,'original.pdf'),new TextEncoder().encode(pdf));
+ let sent=null;
+ // As extract.py answers: pages numbered in the PDF it was sent, a matched block named by its saved id and given no crop,
+ // the rest on a sheet of their own.
+ t.mock.method(globalThis,'fetch',async(url,options)=>{
+  sent=JSON.parse(await new Response(options.body).text());
+  const tess=(id,fields={})=>({id,source:`Tesseract ${id}`,text:`Tesseract ${id}`,box:[40,40,500,70],fontSize:12,...fields});
+  return Response.json({originalPdfBase64:btoa(pdf),document:{version:1,extractionVersion:LAYOUT_VERSION,totalPages:2,warnings:[],pages:[
+   {number:1,width:600,height:800,ocr:true,extractionVersion:LAYOUT_VERSION,background:png,original:png,blocks:[
+    tess('p1-b1',{known:'p7-b1',box:[40,80,500,120]}),
+    tess('p1-b2',{known:'p7-b2',source:'Tesseract @@PDF_INLINE_1@@',text:'Tesseract a + b',box:[40,140,500,180],inlines:[{token:'@@PDF_INLINE_1@@',box:[100,140,160,152],text:'a + b',image:png,width:60,height:12}]}),
+    tess('p1-b3',{box:[40,200,500,260],ocrSheet:'p1-s1',ocrLabel:'#1'}),
+    tess('p1-b4',{box:[40,20,500,40],ocrSheet:'p1-s1',ocrLabel:'#2'}),
+    tess('p1-b5',{known:'p7-b6',box:[40,380,500,420]})
+   ],ocrSheets:[{id:'p1-s1',image:png,strips:[{blockId:'p1-b3',label:'#1',box:[0,0,400,60]},{blockId:'p1-b4',label:'#2',box:[0,64,400,84]}]}]},
+   {number:2,width:600,height:800,ocr:false,extractionVersion:LAYOUT_VERSION,background:png,original:png,blocks:[
+    {id:'p2-b1',known:'p8-b1',source:'第二节 平面',text:'第二节 平面',box:[40,40,300,70],fontSize:16},
+    {id:'p2-b2',known:'p8-b2',source:'正文一行。',text:'正文一行。',box:[40,90,500,120],fontSize:12},
+    {id:'p2-b3',source:'第 2 页 页脚',text:'第 2 页 页脚',box:[40,760,500,780],fontSize:9},
+    {id:'p2-b4',known:'p8-b9',source:'旁注',text:'旁注',box:[520,300,590,330],fontSize:9}
+   ]}
+  ]}});
+ });
+ const response=await pdfLayoutRoute(jsonRequest(base+'/refresh',{assetId,forceClone:true}),env,base+'/refresh',reader),result=await response.json();
+ assert.equal(response.status,201);
+ // Named: the scanned blocks Gemini read for good (a doubt only once read again), every text-layer block with its source.
+ assert.deepEqual(sent.known,[
+  {page:1,ocr:true,blocks:[{id:'p7-b1',box:prior.pages[0].blocks[0].box,inlines:[]},{id:'p7-b2',box:prior.pages[0].blocks[1].box,inlines:[[100,140,160,152]]},{id:'p7-b6',box:prior.pages[0].blocks[5].box,inlines:[]}]},
+  {page:2,ocr:false,blocks:[{id:'p8-b1',box:[40,40,300,70],source:'第二节 平面'},{id:'p8-b2',box:[40,90,500,120],source:'正文一行。'}]}
+ ]);
+ const blocks=Object.fromEntries(result.document.pages.flatMap(page=>page.blocks).map(b=>[b.id,b]));
+ assert.deepEqual(Object.keys(blocks),['p7-b1','p7-b2','p7-b3','p7-b4','p7-b5','p8-b1','p8-b2','p8-b3','p8-b4']);
+ // Found again: the saved reading and its marks, the machine text it replaced kept as the hint.
+ assert.deepEqual([blocks['p7-b1'].known,blocks['p7-b1'].source,blocks['p7-b1'].text,blocks['p7-b1'].ocrCorrected,blocks['p7-b1'].ocrHint,blocks['p7-b1'].kind,blocks['p7-b1'].bold],['p7-b1','第一节 向量','第一节 向量',true,'笫一节 向虽','heading',true]);
+ assert.deepEqual([blocks['p7-b2'].source,blocks['p7-b2'].text,blocks['p7-b2'].ocrHint],['若 @@PDF_INLINE_1@@，则成立。','若 a + b，则成立。','Tesseract @@PDF_INLINE_1@@'],'the saved reading under the new token, with the new crop\'s machine text');
+ assert.deepEqual([blocks['p7-b5'].known,blocks['p7-b5'].source,blocks['p7-b5'].ocrDoubt,blocks['p7-b5'].ocrRereads],['p7-b6','例题','tex',1]);
+ for(const id of ['p7-b1','p7-b2','p7-b5'])assert.equal(blocks[id].ocrSheet,undefined,id);
+ // New or grown: their own machine text, on the one sheet, to be read.
+ for(const id of ['p7-b3','p7-b4'])assert.deepEqual([blocks[id].known,blocks[id].ocrCorrected,blocks[id].ocrSheet],[undefined,undefined,'p7-s1'],id);
+ assert.deepEqual(result.document.pages[0].ocrSheets.map(sheet=>[sheet.id,sheet.strips.map(strip=>strip.blockId)]),[['p7-s1',['p7-b3','p7-b4']]]);
+ assert.equal(result.document.ocrCorrectedVersion,0,'two blocks still to read');
+ // A text layer keeps its own text; a mark naming a block that was not sent is dropped.
+ assert.deepEqual([blocks['p8-b1'].known,blocks['p8-b2'].known,blocks['p8-b3'].known,blocks['p8-b4'].known],['p8-b1','p8-b2',undefined,undefined]);
+ const stored=JSON.parse(storedText(FILES.values.get(`study/${reader.id}/pdf-layout/${result.assetId}/manifest.json`).value));assert.deepEqual(stored.pages.flatMap(p=>p.blocks.map(b=>b.known??null)),['p7-b1','p7-b2',null,null,'p7-b6','p8-b1','p8-b2',null,null]);
+ // Every saved block found again and read for good: nothing is left to read.
+ t.mock.method(globalThis,'fetch',async()=>Response.json({originalPdfBase64:btoa(pdf),document:{version:1,extractionVersion:LAYOUT_VERSION,totalPages:1,warnings:[],pages:[{number:1,width:600,height:800,ocr:true,background:png,original:png,blocks:[{id:'p1-b1',known:'p7-b1',source:'x',text:'x',box:[40,80,500,120],fontSize:12}]}]}}));
+ const single=olderPart();single.pages.pop();single.pages[0].blocks=[single.pages[0].blocks[0]];await FILES.put(assetKey(reader,'manifest.json'),JSON.stringify(single));
+ const done=await (await pdfLayoutRoute(jsonRequest(base+'/refresh',{assetId,forceClone:true}),env,base+'/refresh',reader)).json();
+ assert.equal(done.document.ocrCorrectedVersion,1);assert.equal(done.document.pages[0].blocks[0].source,'第一节 向量');
+});
+
+test('A refresh streams the stored original as base64 whatever the sizes of the chunks storage reads, with no byte lost or added',async()=>{
+ const encode=async(bytes,size)=>{let at=0;const body=new ReadableStream({pull(controller){if(at>=bytes.length)return controller.close();controller.enqueue(bytes.slice(at,at+size));at+=size;}});return new Response(base64Value(body)).text();};
+ for(const length of [0,1,2,3,4,5,64,1000,1001,1002])for(const size of [1,2,3,4,5,7,64,4096]){
+  const bytes=Uint8Array.from({length},(_,i)=>(i*37+11)%256);assert.equal(await encode(bytes,size),JSON.stringify(Buffer.from(bytes).toString('base64')),`${length} bytes in chunks of ${size}`);
+ }
+ // Bytes rather than a stream (a test double's body) read the same way.
+ assert.equal(await new Response(base64Value(new TextEncoder().encode(pdf))).text(),JSON.stringify(btoa(pdf)));
+});
+
+test('A whole-book chunk with no block to translate names the pages that still show Chinese outside every block, with the extractor\'s notes',async t=>{
+ const {env,FILES}=environment(),sha='f'.repeat(64);await FILES.put(`study/${reader.id}/sources/${sha}.pdf`,pdf,{customMetadata:{pages:'40',filename:'book.pdf'}});
+ t.mock.method(globalThis,'fetch',async(url,options)=>{await new Response(options.body).arrayBuffer();return Response.json({originalPdfBase64:btoa(pdf),document:{version:1,extractionVersion:LAYOUT_VERSION,totalPages:3,warnings:['Trang 1: khoảng 30 chữ Hán trong khung/hình vẫn giữ nguyên chữ gốc; hãy đối chiếu PDF gốc.'],pages:[
+  {number:1,width:600,height:800,ocr:true,background:png,original:png,blocks:[],untranslated:{figure:30,footer:0}},
+  {number:2,width:600,height:800,ocr:true,background:png,original:png,blocks:[],untranslated:{}},
+  {number:3,width:600,height:800,ocr:false,background:png,original:png,blocks:[]}
+ ]}});});
+ const form=new FormData();form.set('file',new File([pdf],'chunk.pdf',{type:'application/pdf'}));form.set('pages','1-3');form.set('sourceSha256',sha);form.set('pageOffset','10');
+ const response=await pdfLayoutRoute(new Request(origin+base+'/extract',{method:'POST',body:form}),env,base+'/extract',reader);
+ assert.equal(response.status,422);
+ assert.deepEqual(await response.json(),{error:'Không tìm thấy block tiếng Trung cần dịch trong các trang đã chọn.',code:'no_text',pages:[11,12,13],untranslated:[11],warnings:['Trang 11: khoảng 30 chữ Hán trong khung/hình vẫn giữ nguyên chữ gốc; hãy đối chiếu PDF gốc.']});
 });
 
 // The same routes over a real SQLite database (every migration), for the per-account lease and the daily caps.
@@ -794,16 +907,16 @@ test('A refresh too heavy for one job keeps the old copy, says how to go on, and
  for(const number of [5,9]){const page=structuredClone(prior.pages[0]);page.number=number;page.blocks.forEach(b=>b.id=b.id.replace(/^p4-/u,`p${number}-`));prior.pages.push(page);}
  await env.FILES.put(assetKey(reader,'manifest.json'),JSON.stringify(prior));await env.FILES.put(assetKey(reader,'original.pdf'),new TextEncoder().encode(pdf));
  const writes=env.FILES.writes.length,asked=[];let answer;
- t.mock.method(globalThis,'fetch',async(url,options)=>{asked.push(options.headers);await new Response(options.body).arrayBuffer();return answer();});
+ t.mock.method(globalThis,'fetch',async(url,options)=>{asked.push({...options.headers,pages:JSON.parse(await new Response(options.body).text()).pages});return answer();});
  const refresh=()=>browserError(()=>pdfLayoutRoute(jsonRequest(base+'/refresh',{assetId,forceClone:true}),env,base+'/refresh',reader));
  // As the service numbers them: pages 1-3 of the stored range.
- const selected=count=>{const doc=structuredClone(prior);doc.pages=doc.pages.slice(0,count).map((page,i)=>{page.number=i+1;page.blocks.forEach(b=>b.id=b.id.replace(/^p\d+-/u,`p${i+1}-`));return page;});doc.extractionVersion=3;doc.totalPages=3;return doc;};
+ const selected=count=>{const doc=structuredClone(prior);doc.pages=doc.pages.slice(0,count).map((page,i)=>{page.number=i+1;page.blocks.forEach(b=>b.id=b.id.replace(/^p\d+-/u,`p${i+1}-`));return page;});doc.extractionVersion=LAYOUT_VERSION;doc.totalPages=3;return doc;};
  const advice='Chưa cập nhật được bố cục của bản dịch này: 3 trang của nó (trang 4-5, 9) quá nặng để dịch vụ PDF xử lý hết trong một lượt. Bản dịch cũ vẫn còn nguyên trong Lịch sử dịch. Hãy chọn lại PDF gốc rồi dịch lại các trang đó thành nhiều lượt nhỏ hơn, ví dụ 3–5 trang mỗi lượt.';
  // The service stopped after the first page (its time budget, or its size limits): the pages it did cannot replace the range.
  answer=()=>{const doc=selected(1);doc.warnings=['Lượt này xử lý 1/3 trang đã chọn (trang 1) vì đã dùng hết thời gian xử lý của một lượt. Hãy dịch tiếp trang 2-3 ở lượt sau.'];return Response.json({document:doc,originalPdfBase64:btoa(pdf)});};
  const short=await refresh();
  assert.equal(short.status,413);assert.deepEqual(short.data,{error:advice,code:'pdf_too_large'});
- assert.equal(asked[0]['X-PDF-All-Pages'],'1','the service may give this job its whole time limit');assert.equal(asked[0]['X-PDF-Pages'],'1-3');
+ assert.equal(asked[0]['X-PDF-All-Pages'],'1','the service may give this job its whole time limit');assert.equal(asked[0].pages,'1-3','the range goes in the JSON body beside the saved blocks');
  // Out of time even so: the same advice, with the service's kind of failure.
  answer=()=>Response.json({error:'Tách PDF vượt thời gian cho phép. Hãy chọn ít trang hơn cho mỗi lượt.',code:'timeout'},{status:422});
  const late=await refresh();assert.equal(late.status,413);assert.deepEqual(late.data,{error:advice,code:'pdf_timeout'});
@@ -812,6 +925,22 @@ test('A refresh too heavy for one job keeps the old copy, says how to go on, and
  answer=()=>Response.json({document:selected(3),originalPdfBase64:btoa(pdf)});
  const done=await pdfLayoutRoute(jsonRequest(base+'/refresh',{assetId,forceClone:true}),env,base+'/refresh',reader);
  assert.equal(done.status,201);assert.deepEqual((await done.json()).document.pages.map(page=>page.number),[4,5,9]);assert.equal(count(sqlite,`pdf-extract:${reader.id}`),1);
+});
+
+// The deploy notes put the Worker first: until the service image is rebuilt, its extractor stamps pages as before and
+// tells no saved block apart, so a refresh would offer every block as new and pay for the whole part again.
+test('A refresh the PDF service answers with its older extractor keeps nothing, names the older service and gives the day\'s extraction back',async t=>{
+ const {sqlite,env}=sqliteEnvironment(t),prior=document();prior.extractionVersion=2;
+ await env.FILES.put(assetKey(reader,'manifest.json'),JSON.stringify(prior));await env.FILES.put(assetKey(reader,'original.pdf'),new TextEncoder().encode(pdf));
+ const writes=env.FILES.writes.length;
+ t.mock.method(globalThis,'fetch',async(url,options)=>{
+  await new Response(options.body).text();const doc=document();doc.extractionVersion=LAYOUT_VERSION-1;
+  doc.pages.forEach((page,i)=>{page.number=i+1;page.blocks.forEach(b=>b.id=b.id.replace(/^p\d+-/u,`p${i+1}-`));});
+  return Response.json({document:doc,originalPdfBase64:btoa(pdf)});
+ });
+ const answer=await browserError(()=>pdfLayoutRoute(jsonRequest(base+'/refresh',{assetId,forceClone:true}),env,base+'/refresh',reader));
+ assert.equal(answer.status,503);assert.equal(answer.data.code,'pdf_service_outdated');assert.match(answer.data.error,/bộ tách trang cũ/u);
+ assert.equal(env.FILES.writes.length,writes,'nothing stored');assert.equal(count(sqlite,`pdf-extract:${reader.id}`),0,'the day\'s extraction is given back');
 });
 
 test('A PDF service that refuses the Worker (another token or URL) is out of reach for students, logged for the operator, and costs no daily call',async t=>{
@@ -838,4 +967,18 @@ test('A PDF service that refuses the Worker (another token or URL) is out of rea
  assert.equal(count(sqlite,`pdf-extract:${reader.id}`),0,'none of these used up a daily call');
  t.mock.method(globalThis,'fetch',async()=>Response.json({document:document(),originalPdfBase64:btoa(pdf)}));
  assert.equal((await extract(env)).status,201);assert.equal(count(sqlite,`pdf-extract:${reader.id}`),1,'a call the service did is counted');
+});
+
+test('The PDF service of the machine running Hoa Trí that does not answer is waited for briefly, then named with start.cmd; it costs no daily call',async t=>{
+ const {sqlite,env}=sqliteEnvironment(t),local={...env,PDF_LAYOUT_SERVICE_URL:'http://127.0.0.1:18191'};
+ t.mock.method(globalThis,'fetch',async()=>{throw new TypeError('fetch failed');});
+ const error=await browserError(()=>extract(local));
+ assert.equal(error.status,503);assert.equal(error.retryAfter,10);
+ assert.deepEqual(error.data,{error:'Dịch vụ PDF trên máy này chưa chạy: hãy tắt Hoa Trí rồi khởi động lại bằng start.cmd (hoặc npm start). Nếu đã khởi động như vậy, xem các dòng [PDF] trong cửa sổ đó.',code:'pdf_local_off',retryAfter:10});
+ // It may still be starting (start.cmd opens the page before a slow first start ends): a whole-book run waits a little,
+ // never as for a lost connection, then pauses with these words.
+ assert.deepEqual(classifyError(error,'extract'),{reason:'pdf_local',wait:10,retries:3});
+ assert.equal(count(sqlite,`pdf-extract:${reader.id}`),0,'the day\'s extraction is given back');
+ // Elsewhere the same failure is the shared service out of reach: students only wait.
+ assert.equal((await browserError(()=>extract(env))).data.code,'pdf_unavailable');
 });

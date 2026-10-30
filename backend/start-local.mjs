@@ -50,6 +50,9 @@ if(launcher){
 const missing=[['node_modules/wrangler','cài bằng "npm ci"'],['frontend/vendor/pdf.mjs','do bước 2 của cài đặt tạo ra (chạy riêng bước này: "npm run prepare:vendor")'],['.dev.vars','do bước 6 của cài đặt tạo ra ("npm run setup")']].filter(([file])=>!existsSync(file));
 if(missing.length)fail(`Chưa khởi động được vì còn thiếu:\n${missing.map(([file,source])=>`  - ${file}: ${source}`).join('\n')}\n${setupFailed?'Nguyên nhân nằm ở các dòng LỖI của phần cài đặt phía trên: sửa theo hướng dẫn ở đó rồi chạy lại.':'Chạy lệnh ghi bên cạnh trong thư mục dự án (trên Windows có thể bấm đúp start.cmd để làm tất cả) rồi chạy lại.'}`);
 if(setupFailed)console.log('\nApp vẫn khởi động; phần liên quan đến các LỖI ở trên có thể chưa dùng được.\n');
+// npm start runs no setup: like npm run dev (predev), it does not start on a local database a migration behind the code.
+// The check reads only and prints its own LỖI line; start.cmd's setup applies the migrations first.
+if(!launcher&&existsSync('backend/check-migrations.mjs')&&run(process.execPath,['--no-warnings','backend/check-migrations.mjs','--command','npm start']).status===1)process.exit(1);
 
 const children=[];let webUrl='',pdfState='starting',stopping=false,announced=false,portBusy=false;
 function stop(code=0){

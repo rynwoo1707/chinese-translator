@@ -25,6 +25,7 @@
 .pdf-block-editor{background:#fffdf7;border-top:1px solid #d9e0d1;padding:14px 18px}.pdf-block-editor summary{font-size:12px;font-weight:700;cursor:pointer}.pdf-block-editor>div{padding-top:12px}.pdf-block-editor label{display:block;font-size:12px;font-weight:600}.pdf-block-editor [data-pdf-edit-source]{padding:10px 12px;background:#f0f3e9;font-size:12px;line-height:1.7;white-space:pre-wrap}.pdf-block-editor textarea{font:14px/1.8 'Times New Roman',serif;resize:vertical}.pdf-block-editor small{display:block;margin:8px 0;color:#656c5e;font-size:12px;line-height:1.7}
 .content-title-field{margin-bottom:22px}.content-title-field>label{font-size:12px;font-weight:700}.content-title-line{display:flex;align-items:start;gap:8px}.content-title-line input{min-width:0}.content-title-line button{flex:none;margin-top:8px;white-space:nowrap}.content-title-line button[hidden]{display:none}#content-title[aria-invalid=true]{border-color:#b64a3b;box-shadow:0 0 0 4px rgba(182,74,59,.12)}.history-card{grid-template-columns:minmax(0,1fr);align-content:start}.history-card-main strong{display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;white-space:normal;overflow-wrap:anywhere}.history-card-main .history-source{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px;color:#656c60}.history-card-main time{display:block;margin-top:6px;color:#666a62;font-size:12px}.history-library{justify-self:start}.history-card-main:hover:not(:disabled){transform:none;box-shadow:none;background:none}
 .library-match{margin:4px 2px 14px;padding:13px 15px;border:1px solid #c9d6b8;border-left:3px solid var(--green);border-radius:10px;background:#f1f6ea;color:#40553c;font-size:12px;line-height:1.7}.library-match p{margin:0 0 4px}.library-match-actions{display:flex;flex-wrap:wrap;gap:8px;margin-top:10px}.library-match-actions a{padding:9px 14px;border-radius:9px;background:var(--green);color:#fff;font-weight:700}.library-match-actions button{padding:8px 14px}
+.library-match.layout-refresh{border-color:#e3cfa9;border-left-color:#d9a441;background:#fff8ea;color:#4d4130}
 
 .study-history>summary{list-style:none;cursor:pointer;margin-bottom:0}.study-history>summary::-webkit-details-marker{display:none}.study-history>summary h2:before{content:'▸';display:inline-block;margin-right:8px;color:var(--green);transition:transform .2s ease}.study-history[open]>summary h2:before{transform:rotate(90deg)}.study-history[open]>summary{margin-bottom:14px}.study-history{padding-block:16px}.history-count{color:#5f6758;font:500 13px 'Be Vietnam Pro',sans-serif}
 /* backwards, not both: a transform kept after the animation would hold the phone's fixed action bar inside the panel. */
@@ -69,6 +70,7 @@
 .book-order button{min-height:44px;padding:0;font-size:16px}
 .book-dialog-actions{display:flex;justify-content:flex-end;gap:8px;margin-top:4px}
 .book-dialog-actions button{min-height:44px}
+.book-dialog-secondary{min-height:44px}
 @media(max-width:680px){.study-book{flex-direction:column;align-items:stretch}.study-book-actions>*{flex:1;text-align:center}.history-actions{flex-direction:row;flex-wrap:wrap;align-items:center;justify-content:flex-start}.book-dialog form{padding:16px}.book-dialog-actions>*{flex:1}}
 .book-dialog input:focus,.book-dialog select:focus{border-color:#758f5e;outline:none;box-shadow:0 0 0 4px rgba(117,143,94,.12)}
 .book-dialog h2:focus{outline:none}
@@ -122,6 +124,7 @@
 .page-grid [data-state=nopdf],.page-legend [data-state=nopdf]:before{background:repeating-linear-gradient(135deg,#6f8f55 0 3px,#e0b052 3px 6px)}
 .page-legend li[hidden]{display:none}
 .page-grid [data-state=blank],.page-legend [data-state=blank]:before{background:#fff;box-shadow:inset 0 0 0 1px #c3cab8}
+.page-grid [data-state=untranslated],.page-legend [data-state=untranslated]:before{background:repeating-linear-gradient(135deg,#fff 0 2px,#e0b052 2px 4px);box-shadow:inset 0 0 0 1px #c3cab8}
 .page-grid [data-state=cover],.page-legend [data-state=cover]:before{background:#9b7a45}
 .page-grid [data-state=skipped],.page-legend [data-state=skipped]:before{background:repeating-linear-gradient(135deg,#e3e5dc 0 2px,#fff 2px 4px)}
 .page-grid [data-state=failed],.page-legend [data-state=failed]:before{background:var(--red)}

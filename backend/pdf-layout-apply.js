@@ -10,7 +10,16 @@
 // (every block of the call when missing). Their ocrRereads grows; the others of their sheets only came along, since a
 // sheet is read whole. A re-read that failed leaves a block already handled as it was, and a good one replaces the text
 // and its marks.
+// keepPixels: the text stored holds nothing to translate though the strip shows Chinese: only unreadable marks ([□]),
+// or no Han character where the strip shows two or more Han-sized cells (hanCells, on newer manifests). Such a block is
+// not sent for translation; the page keeps its original pixels there (no mask, no [□] printed) and the student is told
+// (frontend/study.js). A later reading with text clears it. A reading of formulas alone is no such block: its crops are
+// the strip's own pixels.
 const rank=value=>typeof value.ocrKept==='string'?0:typeof value.ocrDoubt==='string'?1:2;
+export function unreadable(text,hanCells){
+ const value=String(text??''),plain=value.replace(/@@PDF_INLINE_\d+@@/gu,' '),formulas=plain!==value&&!/[\p{L}\p{N}□]/u.test(plain);
+ return /□/u.test(plain)&&!/[\p{L}\p{N}]/u.test(plain.replace(/\[□\]|□/gu,''))||!formulas&&Number.isInteger(hanCells)&&hanCells>=2&&!/\p{Script=Han}/u.test(plain);
+}
 export function applyOcrReadings(document,{blocks=[],warnings=[]}={},{reread=false,chosen=null}={}){
  const all=document.pages.filter(p=>p.ocr).flatMap(p=>p.blocks),byId=new Map(all.map(b=>[b.id,b])),counted=chosen?new Set(chosen):null;
  // Every ID is checked before any block changes, so a bad reading never leaves a half-updated manifest.
@@ -24,6 +33,7 @@ export function applyOcrReadings(document,{blocks=[],warnings=[]}={},{reread=fal
   block.source=value.text;let text=value.text;for(const inline of block.inlines||[])text=text.replace(inline.token,()=>inline.text);block.text=text;block.ocrCorrected=true;
   if(failed)block.ocrKept=value.ocrKept;else delete block.ocrKept;
   if(!failed&&typeof value.ocrDoubt==='string')block.ocrDoubt=value.ocrDoubt;else delete block.ocrDoubt;
+  if(unreadable(value.text,block.hanCells))block.keepPixels=true;else delete block.keepPixels;
   if(/^\d+(?:\.\d+){1,4}\s*[㐀-鿿]/u.test(text)&&text.length<100){block.kind='heading';block.bold=true;}
  }
  document.ocrCorrectedVersion=all.every(b=>b.ocrCorrected)?1:0;document.ocrWarnings=[...(document.ocrWarnings||[]),...warnings];

@@ -169,6 +169,8 @@ test('the listing and template carry every block field a translator needs and no
 test('texts.json goes through the same OCR and translation checks as Gemini output and corrects the manifest like the route',()=>{
  const result=importTexts(manifest(),goodTexts(),{slug:'demo',chunk:'c01'});
  assert.deepEqual(result.errors,[]);assert.deepEqual(result.warnings,[]);assert.deepEqual(result.info,['Khi tách trang: Trang 8: dùng OCR; hãy đối chiếu công thức với PDF gốc.']);
+ // A note that Chinese stays printed on a page (extract.py's count by cause, or an older manifest's wording) is a warning.
+ for(const note of ['Trang 8: khoảng 12 chữ Hán ở mép trang vẫn giữ nguyên chữ gốc trong bản xuất; hãy đối chiếu với PDF gốc.','Trang 8: có 3 chữ Hán không thuộc đoạn nào.']){const left=importTexts({...manifest(),warnings:[note]},goodTexts(),{slug:'demo',chunk:'c01'});assert.deepEqual(left.warnings,[{id:null,message:`Khi tách trang: ${note}`}]);assert.deepEqual(left.info,[]);}
  const expected=applyOcrReadings(manifest(),{blocks:[{id:'p8-b1',text:'1.3 平行向量'},{id:'p8-b2',text:'两个向量所在的直线平行或重合，这些向量叫做平行向量。'},{id:'p8-b3',text:'公式 @@PDF_INLINE_1@@ 成立。'}]});
  assert.deepEqual(result.document,expected);assert.equal(result.document.ocrCorrectedVersion,1);assert.equal(result.document.pages[1].blocks[0].kind,'heading');
  assert.doesNotThrow(()=>validateLayoutDocument(result.document));

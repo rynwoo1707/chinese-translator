@@ -2,8 +2,8 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {recognizePdfBlocks,normalizeOcrMath,readingDoubt,undrawableTex} from './pdf-block-ocr.js';
 import {pdfLayoutRoute} from './pdf-layout.js';
-import {applyOcrReadings} from './pdf-layout-apply.js';
-import {MODES,modeProfile} from '../frontend/translation-modes.js';
+import {applyOcrReadings,unreadable} from './pdf-layout-apply.js';
+import {MODES,modeProfile,LAYOUT_VERSION} from '../frontend/translation-modes.js';
 import {renderMathText,unsupportedMath} from '../frontend/math-text.js';
 
 const png='data:image/png;base64,AA==';
@@ -286,7 +286,7 @@ test('OCR route recovers an unavailable Flash model using only the supplied stud
  assert.doesNotMatch(JSON.stringify(calls),/server-key/u);assert.doesNotMatch(FILES.writes.map(write=>storedText(write.value)).join('\n'),/student-ocr-key|server-key/u);
 });
 
-test('Force-cloning a current extraction gives OCR correction a new private asset without altering saved history assets',async t=>{
+test('Force-cloning a current extraction gives OCR correction a new private asset without altering saved history assets, sending the stored original beside the blocks read for good',async t=>{
  const {env,FILES}=environment();env.PDF_LAYOUT_SERVICE_URL='https://pdf.example.test/v1/';env.PDF_LAYOUT_SERVICE_TOKEN='service-secret';
  const prior=document();prior.ocrCorrectedVersion=1;prior.pages[0].blocks.forEach(block=>{block.ocrCorrected=true;});
  const oldManifest=JSON.stringify(prior),original='%PDF-1.7\nselected pages 4 and 5';
@@ -294,7 +294,7 @@ test('Force-cloning a current extraction gives OCR correction a new private asse
  await FILES.put(manifestKey(reader),oldManifest);await FILES.put(originalKey,original);const writesBefore=FILES.writes.length,calls=[];
  t.mock.method(globalThis,'fetch',async(url,options)=>{
   calls.push({url:String(url),options,body:await new Response(options.body).text()});
-  const fresh=document();fresh.totalPages=2;
+  const fresh=document();fresh.totalPages=2;fresh.extractionVersion=LAYOUT_VERSION;
   fresh.pages.forEach((page,i)=>{page.number=i+1;page.blocks.forEach(block=>{block.id=block.id.replace(/^p\d+-/u,`p${i+1}-`);});});
   return Response.json({document:fresh,originalPdfBase64:btoa(original)});
  });
@@ -304,7 +304,10 @@ test('Force-cloning a current extraction gives OCR correction a new private asse
  assert.equal(result.document.ocrCorrectedVersion,undefined);assert.ok(result.document.pages[0].blocks.every(block=>block.ocrCorrected===undefined));
  assert.equal(FILES.values.get(manifestKey(reader)),oldManifest);assert.equal(FILES.values.get(originalKey),original);
  const writes=FILES.writes.slice(writesBefore);assert.equal(writes.length,2);assert.ok(writes.every(write=>write.key.startsWith(`study/${reader.id}/pdf-layout/${result.assetId}/`)));
- assert.equal(calls.length,1);assert.equal(calls[0].options.headers['X-PDF-Pages'],'1-2');assert.equal(calls[0].body,original);
+ // The stored original goes as base64 in a JSON body with the range and the blocks Gemini read for good (extract.py
+ // known): a service that finds them again keeps their reading; this one finds none, so every block is read again.
+ assert.equal(calls.length,1);assert.equal(calls[0].options.headers['X-PDF-All-Pages'],'1');const sent=JSON.parse(calls[0].body);assert.equal(atob(sent.pdfBase64),original);assert.equal(sent.pages,'1-2');
+ assert.deepEqual(sent.known,[{page:1,ocr:true,blocks:[{id:'p4-b0',box:[20,20,220,80],inlines:[]},{id:'p4-b1',box:[20,100,220,160],inlines:[[80,110,110,125]]}]},{page:2,ocr:false,blocks:[{id:'p5-b0',box:[20,20,220,80],source:'原生 PDF 文本。'}]}]);
  assert.doesNotMatch(JSON.stringify(result),/student-ocr-key|service-secret/u);assert.doesNotMatch(writes.map(write=>storedText(write.value)).join('\n'),/student-ocr-key|service-secret/u);
 });
 
@@ -481,7 +484,7 @@ test('Block OCR gives a call that thinks more room for its answer: the output ca
  assert.deepEqual(calls.map(call=>call.body.generationConfig.thinkingConfig),['minimal','low','medium','high'].map(thinkingLevel=>({thinkingLevel})));
 });
 
-test('The OCR route reasons as the session\'s mode says and reads blocks again only in a mode that does so',async t=>{
+test('The OCR route reasons as the session\'s mode says, and every mode, Tiết kiệm included, reads blocks again with its own reasoning',async t=>{
  const {env,FILES}=environment();await FILES.put(manifestKey(reader),JSON.stringify(document()));
  const calls=mockGeneration(t),cap=1024+4*blocks().reduce((n,b)=>n+b.source.length,0),config=()=>calls.at(-1).body.generationConfig;
  // Thinking tokens count against the cap (ai.js thinkingHeadroom); the levels are the modes' own (translation-modes.js).
@@ -489,20 +492,16 @@ test('The OCR route reasons as the session\'s mode says and reads blocks again o
  // The hint stays the machine text once a block is read, so every call below has the same cap before thinking.
  for(const mode of [undefined,'turbo',...MODES]){assert.equal((await ocrRoute(env,body({mode,slim:true}))).status,200,String(mode));expect(modeProfile(mode).ocrThinking,String(mode));}
  assert.equal(modeProfile('turbo').ocrThinking,modeProfile('economy').ocrThinking,'an unknown mode is economy');
- // A re-read is refused before any call or write where the mode has none (economy, or no or an unknown mode).
- const made=calls.length,writes=FILES.writes.length;
- for(const mode of [undefined,'turbo',...MODES.filter(mode=>!modeProfile(mode).reread)])await assert.rejects(()=>ocrRoute(env,body({mode,reread:true})),error=>error.code==='bad_mode'&&error.status===400,String(mode));
- assert.equal(calls.length,made);assert.equal(FILES.writes.length,writes);
- const rereading=MODES.filter(mode=>modeProfile(mode).reread);assert.ok(rereading.includes('premium'));
- for(const mode of rereading){assert.equal((await ocrRoute(env,body({mode,reread:true,slim:true}))).status,200,mode);expect(modeProfile(mode).reread.thinking,mode);}
+ // A reading again costs tokens only where a block needs it, so every mode has one (no mode, or an unknown one, is economy).
+ for(const mode of [undefined,'turbo',...MODES]){assert.ok(modeProfile(mode).reread,String(mode));assert.equal((await ocrRoute(env,body({mode,reread:true,slim:true}))).status,200,String(mode));expect(modeProfile(mode).reread.thinking,String(mode));}
 });
 
 test('A re-read is sent the machine text as its hint, never replaces a reading with a failed one, and counts itself; a good one replaces text and marks',async t=>{
  const {env,FILES}=environment();await FILES.put(manifestKey(reader),JSON.stringify(document()));
  let answer;const calls=mockGeneration(t,()=>({blocks:answer,warnings:[]}));
  const stored=()=>JSON.parse(storedText(FILES.values.get(manifestKey(reader)))).pages[0].blocks;
- // A mode that reads doubtful blocks again (Kỹ nhất does).
- const mode=MODES.find(id=>modeProfile(id).reread?.doubt);assert.ok(modeProfile('premium').reread?.doubt);
+ // A mode that reads every doubtful block again (Kỹ hơn and Kỹ nhất do; the others only those far from the strip's Chinese).
+ const mode=MODES.find(id=>modeProfile(id).reread?.doubt===true);assert.equal(modeProfile('premium').reread?.doubt,true);
  const read=async extra=>(await (await ocrRoute(env,body({mode,slim:true,...extra}))).json());
  const marks=result=>result.blocks.map(b=>[b.source,b.ocrDoubt,b.ocrKept,b.ocrRereads]);
  // The first reading of p4-b1 has ",_;" stuck to its formula: used, and doubtful; the mode reads it again, so no note yet.
@@ -578,4 +577,54 @@ test('A formula whose machine text holds a $ (OCR often reads S as $) goes into 
  const document={version:1,pages:[{number:4,width:600,height:800,ocr:true,background:png,original:png,blocks:[{id:'p4-b0',source:'Tesseract 猜错',image:png,box:[20,20,220,80],fontSize:12,inlines:[inline]}]}]};
  applyOcrReadings(document,{blocks:[{id:'p4-b0',text:'函数 @@PDF_INLINE_0@@ 的导数。'}]});
  assert.equal(document.pages[0].blocks[0].text,"函数 $'(x) = $$ + $& - $` 的导数。");assert.equal(document.pages[0].blocks[0].source,'函数 @@PDF_INLINE_0@@ 的导数。');
+});
+
+// A strip's ink says how much Chinese it holds (extract.py hanCells): three rows of 12 characters each.
+const rows=['向量是既有大小又有方向的','量我们用有向线段表示向量','箭头所指的方向表示其方向'];
+test('A reading with far fewer Chinese characters than its strip shows or its machine hint holds is doubted (han); junk Han it shares nothing with is no measure',()=>{
+ const strip=(hint,hanCells)=>({id:'p4-b1',source:hint,...(hanCells===undefined?{}:{hanCells})});
+ // The strip's cells err low (a bold heading shows none, a framed panel half its glyphs): the hint is weighed too. A
+ // heading read with no Chinese, or a paragraph a row short, is doubted although the cells alone would pass it.
+ for(const cells of [0,undefined])assert.equal(readingDoubt('Section 2 Water cycle',strip('第二节 水的循环',cells)),'han',`hanCells ${cells}`);
+ assert.equal(readingDoubt('汉'.repeat(40),strip('汉'.repeat(75),34)),'han');assert.equal(readingDoubt('汉'.repeat(70),strip('汉'.repeat(75),34)),null);
+ // One row of three lost: 24 of 36. Measured against the hint alone (a manifest without hanCells) that passes (two thirds).
+ assert.equal(readingDoubt(`${rows[0]}\n${rows[2]}`,strip(rows.join('\n'),36)),'han');assert.equal(readingDoubt(`${rows[0]}\n${rows[2]}`,strip(rows.join('\n'))),null);
+ // A heading strip of two characters read as a digit, or as nothing Chinese: the hint ("7)") could not tell.
+ for(const reading of ['1','—','[□][□]'])assert.equal(readingDoubt(reading,strip('7)',2)),'han',reading);
+ assert.equal(readingDoubt('1',strip('7)')),null);assert.equal(readingDoubt('A',strip('A',1)),null,'one cell is no text');
+ // Tesseract junk full of Chinese (a figure's dots read as 一二三…) no longer makes a good reading doubtful: the strip is the
+ // measure. Without hanCells that junk made the same reading doubtful.
+ assert.equal(readingDoubt('探究',strip('一二三四五六七八九十十一',2)),null);assert.equal(readingDoubt('探究',strip('一二三四五六七八九十十一')),'han');
+ assert.equal(readingDoubt('点',strip('一二三四五六七八九十十一',2)),'han');
+ // A repetition is still doubted against the hint.
+ assert.equal(readingDoubt('向量'.repeat(120),strip(rows.join(''),36)),'han');
+});
+
+test('Tiết kiệm reads once more a strip Gemini returned empty and one that lost a row; a block still unreadable keeps the page\'s pixels (keepPixels)',async t=>{
+ const scan=()=>({version:1,extractionVersion:3,totalPages:88,pages:[{number:4,width:600,height:800,ocr:true,background:png,original:png,blocks:[
+  {id:'p4-b1',source:'7)',image:png,box:[20,20,120,50],fontSize:14,hanCells:2},
+  {id:'p4-b2',source:rows.join('\n'),image:png,box:[20,60,520,160],fontSize:12,hanCells:36}]}]});
+ const {env,FILES}=environment();await FILES.put(manifestKey(reader),JSON.stringify(scan()));
+ let answer;const calls=mockGeneration(t,()=>({blocks:answer,warnings:[]}));
+ const read=async extra=>(await (await ocrRoute(env,body({mode:'economy',slim:true,blockIds:['p4-b1','p4-b2'],...extra}))).json());
+ const marks=result=>result.blocks.map(b=>[b.source,b.ocrKept,b.ocrDoubt,b.keepPixels,b.ocrRereads]);
+ // The heading comes back empty: it keeps the machine text "7)", nothing Chinese, so the page keeps its pixels there. The
+ // paragraph lost a row: used, and doubtful; Tiết kiệm reads it again, so it is not named yet.
+ answer=[{id:'p4-b1',text:''},{id:'p4-b2',text:`${rows[0]}\n${rows[2]}`}];let result=await read();
+ assert.deepEqual(marks(result),[['7)','empty',undefined,true,undefined],[`${rows[0]}\n${rows[2]}`,undefined,'han',undefined,undefined]]);
+ assert.deepEqual(result.warnings,['Trang 4 · đoạn 1: Gemini không thấy chữ trong ảnh. Đoạn này giữ chữ OCR máy, có thể sai; hãy đối chiếu với trang gốc.']);
+ // The reading again (low thinking) reads both: the heading is text again, the paragraph whole.
+ answer=[{id:'p4-b1',text:'探究'},{id:'p4-b2',text:rows.join('\n')}];result=await read({reread:true,rereadIds:['p4-b1','p4-b2']});
+ assert.deepEqual(calls.at(-1).body.generationConfig.thinkingConfig,{thinkingLevel:modeProfile('economy').reread.thinking});
+ assert.deepEqual(marks(result),[['探究',undefined,undefined,undefined,1],[rows.join('\n'),undefined,undefined,undefined,1]]);assert.deepEqual(result.warnings,[]);
+ // Still empty when read again: the heading keeps its pixels and says so; it is never read again by the browser (ocrRereads).
+ await FILES.put(manifestKey(reader),JSON.stringify(scan()));answer=[{id:'p4-b1',text:''},{id:'p4-b2',text:rows.join('\n')}];await read();
+ answer=[{id:'p4-b1',text:'[□][□]'},{id:'p4-b2',text:rows.join('\n')}];result=await read({reread:true,rereadIds:['p4-b1']});
+ assert.deepEqual(marks(result)[0],['[□][□]',undefined,'han',true,1],'a reading of only unreadable marks keeps the pixels too');
+ const stored=JSON.parse(storedText(FILES.values.get(manifestKey(reader)))).pages[0].blocks;
+ assert.deepEqual(stored.map(b=>[b.source,b.keepPixels]),[['[□][□]',true],[rows.join('\n'),undefined]]);
+ assert.deepEqual(applyOcrReadings(scan(),{blocks:[{id:'p4-b1',text:'探究'}]}).pages[0].blocks[0].keepPixels,undefined,'a reading with Chinese clears it');
+ // Nothing to translate is told by the strip's cells where the manifest has them, by [□] alone where it does not; a reading
+ // of formulas alone keeps its crops, which are the strip's own pixels.
+ assert.deepEqual([['[□]',undefined],['7)',undefined],['7)',2],['—',2],['1',1],['@@PDF_INLINE_0@@',4],['@@PDF_INLINE_0@@，',4],['@@PDF_INLINE_0@@ [□]',4]].map(([text,cells])=>unreadable(text,cells)),[true,false,true,true,false,false,false,true]);
 });

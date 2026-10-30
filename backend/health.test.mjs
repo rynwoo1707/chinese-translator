@@ -1,9 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import {readdirSync} from 'node:fs';
 import worker from './worker.js';
+import {MIGRATIONS} from './health.js';
 
 const secrets={ADMIN_TOKEN:'a1'.repeat(32),PDF_LAYOUT_SERVICE_URL:'https://pdf.private-host.example',PDF_LAYOUT_SERVICE_TOKEN:'pdf-service-token-never-shown',GEMINI_API_KEY:'gemini-key-never-shown-000000',GOOGLE_CLIENT_SECRET:'google-secret-never-shown'};
-const database=first=>({prepare(sql){return {bind(){return this;},async first(){return first(sql);}};}});
+// all: the names `wrangler d1 migrations apply` recorded (every migration unless a test says otherwise).
+const database=(first,all=async()=>({results:MIGRATIONS.map(name=>({name}))}))=>({prepare(sql){return {bind(){return this;},async first(){return first(sql);},all};}});
 const health=(env,init)=>worker.fetch(new Request('https://hoa-tri.example/api/health',init),env,{});
 
 test('Health reports the database, the deployed version and the PDF service state, never a secret',async()=>{
@@ -65,6 +68,34 @@ test('Health ?deep=1 answers 503 when the PDF service refuses the token, fails o
  // Without a PDF service the deep check has nothing to ask and stays healthy.
  const off=await worker.fetch(new Request('https://hoa-tri.example/api/health?deep=1'),{DB:database(()=>({ok:1}))},{});
  assert.equal(off.status,200);assert.deepEqual((await off.json()).pdfService,{status:'off'});
+});
+
+test('MIGRATIONS is database/migrations: a new migration is added to backend/health.js too',()=>{
+ const files=readdirSync(new URL('../database/migrations/',import.meta.url)).filter(name=>name.endsWith('.sql')).sort();
+ assert.deepEqual([...MIGRATIONS],files,'add the new file name to MIGRATIONS in backend/health.js');
+});
+
+test('Health ?deep=1 names the migrations the database lacks and answers 503 until they are applied',async t=>{
+ const {sqliteEnvironment}=await import('./test-support/sqlite-d1.mjs'),{sqlite,env}=sqliteEnvironment(t,{before:'0025'});
+ // What `wrangler d1 migrations apply` records beside the tables (sqliteEnvironment runs the files without it).
+ sqlite.exec('CREATE TABLE d1_migrations(id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT UNIQUE, applied_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL)');
+ const record=names=>{for(const name of names)sqlite.prepare('INSERT INTO d1_migrations(name) VALUES(?)').run(name);},later=MIGRATIONS.filter(name=>name>='0025');
+ record(MIGRATIONS.filter(name=>name<'0025'));
+ const deepGet=(init={})=>worker.fetch(new Request('http://127.0.0.1:8787/api/health?deep=1',init),env,{});
+ const behind=await deepGet(),body=await behind.json();
+ assert.equal(behind.status,503);assert.equal(body.ok,false);assert.equal(body.database,'ok');assert.deepEqual(body.pdfService,{status:'off'});
+ assert.deepEqual(body.migrations,{status:'pending',pending:later});assert.ok(later.includes('0025_admin_accounts.sql')&&later.includes('0026_study_engine.sql'));
+ assert.equal((await deepGet({method:'HEAD'})).status,503);
+ // The plain check stays what uptime checks and start.cmd ask: is the database reachable.
+ const plain=await worker.fetch(new Request('http://127.0.0.1:8787/api/health'),env,{});assert.equal(plain.status,200);assert.equal((await plain.json()).migrations,undefined);
+ record(later);const current=await deepGet();assert.equal(current.status,200);assert.deepEqual((await current.json()).migrations,{status:'ok'});
+ // A database never migrated has no table of names: everything is pending.
+ sqlite.exec('DROP TABLE d1_migrations');assert.deepEqual((await (await deepGet()).json()).migrations,{status:'pending',pending:[...MIGRATIONS]});
+ // A table that cannot be read fails the deep check without its error text; the operator finds it in the log.
+ const logs=[];t.mock.method(console,'error',line=>logs.push(JSON.parse(line).event));
+ const failing=await worker.fetch(new Request('https://hoa-tri.example/api/health?deep=1'),{DB:database(()=>({ok:1}),async()=>{throw new Error('D1_ERROR: storage reset: SQLITE_IOERR');})},{});
+ assert.equal(failing.status,503);const failed=await failing.json();assert.deepEqual(failed.migrations,{status:'error'});assert.doesNotMatch(JSON.stringify(failed),/D1_ERROR|SQLITE/u);
+ assert.deepEqual(logs,['health_migrations_error']);
 });
 
 test('Health needs no login or Origin and only answers GET and HEAD',async()=>{

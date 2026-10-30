@@ -4,6 +4,8 @@ import {readFile} from 'node:fs/promises';
 import {createRequire} from 'node:module';
 import {fileURLToPath} from 'node:url';
 import {extname,join,normalize} from 'node:path';
+// A manifest the extractor of this code made carries its stamp (an older one is offered "Cập nhật bố cục").
+import {LAYOUT_VERSION} from '../frontend/translation-modes.js';
 
 // The study page's states in Microsoft Edge: the real study.html, study.css and study.js, with /api answered here and
 // every other host blocked. Signed out, the start-up requests, a history that fails to load, saves that keep failing, an
@@ -18,7 +20,7 @@ const ORIGIN='http://localhost:4179',KEY='AIzaSy'+'x'.repeat(33),ASSET='0b0e4c1e
 const TYPES={'.html':'text/html; charset=utf-8','.js':'text/javascript','.mjs':'text/javascript','.css':'text/css','.svg':'image/svg+xml','.json':'application/json','.woff2':'font/woff2','.jpg':'image/jpeg','.webp':'image/webp','.avif':'image/avif','.png':'image/png','.ico':'image/x-icon'};
 const PNG='data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8/x8AAwMCAO+ip1sAAAAASUVORK5CYII=';
 const USER={authenticated:true,user:{name:'Học sinh thử',email:'hs@example.com',provider:'local'}};
-const MANIFEST={version:1,extractionVersion:3,engine:'pymupdf',totalPages:1,pages:[{number:1,width:400,height:560,original:PNG,background:PNG,blocks:[{id:'p1-b1',text:'第一段的内容。',source:'第一段的内容。',box:[40,60,260,92],fontSize:12}],images:[],drawings:[],ocr:false,protectedRegions:[],extractionVersion:3}],warnings:[]};
+const MANIFEST={version:1,extractionVersion:LAYOUT_VERSION,engine:'pymupdf',totalPages:1,pages:[{number:1,width:400,height:560,original:PNG,background:PNG,blocks:[{id:'p1-b1',text:'第一段的内容。',source:'第一段的内容。',box:[40,60,260,92],fontSize:12}],images:[],drawings:[],ocr:false,protectedRegions:[],extractionVersion:LAYOUT_VERSION}],warnings:[]};
 const LAYOUT_ITEM={id:'5d7c1f7e-1111-4c2b-9d1e-2a2f0c9b7a10',title:'Bài thử giữ bố cục',filename:'bai-thu.pdf',domain:'general',mode:'economy',status:'complete',translated_parts:1,total_parts:1,library_story_id:null,library_chapter_id:null,updated_at:'2026-10-20 08:00:00',page_start:1,page_end:1,source_total_pages:1};
 
 // api(path,method) -> body | {status,json} | undefined (the defaults of a signed-in student with nothing saved).

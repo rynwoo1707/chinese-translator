@@ -5,15 +5,18 @@
 // pdf.js and pdf-lib load only when used; everything else here also runs under node --test.
 import {openPdf} from './cover-detect.js';
 import {keyRefused} from './gemini-key.js';
-import {DEFAULT_MODE,isMode,modeProfile} from './translation-modes.js';
+import {DEFAULT_MODE,isMode,modeProfile,untranslatedHan} from './translation-modes.js';
 
-export const PAGE_STATES=Object.freeze({pending:'.',done:'d',blank:'b',cover:'c',skipped:'s',failed:'f'});
+// untranslated: a page with no block to translate that still shows Chinese outside every block (the extractor's
+// page.untranslated: in a figure, a rotated watermark…), kept as printed and named in the notes; only a page that shows
+// none is blank.
+export const PAGE_STATES=Object.freeze({pending:'.',done:'d',blank:'b',untranslated:'u',cover:'c',skipped:'s',failed:'f'});
 const NAMES=Object.fromEntries(Object.entries(PAGE_STATES).map(([name,char])=>[char,name]));
 // 20 pages is the PDF service's limit per extraction. A chunk over 16 MB would not fit the service's 32 MB budget once it
 // is base64-encoded next to its page images, so it is cut smaller before it is sent.
 export const CHUNK_PAGES=20,SOURCE_MAX_BYTES=100*1024*1024,CHUNK_MAX_BYTES=16*1024*1024;
 // nopdf: a translated page of a part whose Vietnamese PDF is missing (study.js missingPdf), drawn apart in the grid.
-export const PAGE_LABELS=Object.freeze({pending:'Chưa dịch',working:'Đang dịch',done:'Đã dịch',nopdf:'Đã dịch, chưa có PDF',blank:'Trang trống',cover:'Bìa',skipped:'Bỏ qua',failed:'Lỗi'});
+export const PAGE_LABELS=Object.freeze({pending:'Chưa dịch',working:'Đang dịch',done:'Đã dịch',nopdf:'Đã dịch, chưa có PDF',blank:'Trang trống',untranslated:'Còn chữ chưa dịch',cover:'Bìa',skipped:'Bỏ qua',failed:'Lỗi'});
 
 // ---- Page states (one character per page, as the server stores them) ----
 export function initialPageStates(total,{cover=0,pages=null}={}){
@@ -28,10 +31,10 @@ export function withStates(states,updates){
 }
 export const statesFor=(pages,name)=>Object.fromEntries([...pages].map(page=>[page,name]));
 export function countStates(states){
- const count={total:0,pending:0,done:0,blank:0,cover:0,skipped:0,failed:0};
+ const count={total:0,pending:0,done:0,blank:0,untranslated:0,cover:0,skipped:0,failed:0};
  for(const char of String(states||'')){count.total++;count[NAMES[char]||'pending']++;}
- // The pages Gemini has to translate: the cover, blank and skipped pages keep the original.
- count.wanted=count.total-count.cover-count.blank-count.skipped;return count;
+ // The pages Gemini has to translate: the cover, blank, untranslated and skipped pages keep the original.
+ count.wanted=count.total-count.cover-count.blank-count.untranslated-count.skipped;return count;
 }
 // The next chunk: the first pending page and the pending pages right after it. A chunk is one run of pages because the
 // server numbers its pages from the chunk's offset in the original.
@@ -41,10 +44,12 @@ export function nextChunk(states,limit=CHUNK_PAGES){
  return {start,end,pages:Array.from({length:end-start+1},(_,i)=>start+i)};
 }
 // What a chunk's manifest says: pages with blocks are translated with the chunk; a page without any has nothing to
-// translate and costs no Gemini call; pages the extractor did not reach stay pending for the next chunk.
+// translate and costs no Gemini call: blank only when the extractor saw no Chinese left on it (translation-modes.js
+// untranslatedHan), untranslated otherwise. Pages the extractor did not reach stay pending for the next chunk.
 export function chunkPages(document){
- const done=[],blank=[];for(const page of document?.pages||[])if(Number.isInteger(page?.number))(page.blocks?.length?done:blank).push(page.number);
- return {done,blank,processed:done.length+blank.length};
+ const done=[],blank=[],untranslated=[];
+ for(const page of document?.pages||[])if(Number.isInteger(page?.number))(page.blocks?.length?done:untranslatedHan(page)>0?untranslated:blank).push(page.number);
+ return {done,blank,untranslated,processed:done.length+blank.length+untranslated.length};
 }
 // Pages outside the chosen ones are skipped, and skipped pages chosen again become pending; finished pages stay.
 export function rangeUpdates(states,chosen){
@@ -74,7 +79,7 @@ export function pageList(pages){
 export function progressText(states){const count=countStates(states);return `Đã dịch ${count.done}/${count.wanted} trang`;}
 export function progressNote(states){
  const count=countStates(states),notes=[];
- if(count.cover)notes.push('bìa giữ nguyên');if(count.blank)notes.push(`${count.blank} trang trống`);if(count.skipped)notes.push(`bỏ qua ${count.skipped} trang`);if(count.failed)notes.push(`${count.failed} trang lỗi`);
+ if(count.cover)notes.push('bìa giữ nguyên');if(count.blank)notes.push(`${count.blank} trang trống`);if(count.untranslated)notes.push(`${count.untranslated} trang còn chữ chưa dịch`);if(count.skipped)notes.push(`bỏ qua ${count.skipped} trang`);if(count.failed)notes.push(`${count.failed} trang lỗi`);
  return notes.join(' · ');
 }
 
@@ -121,10 +126,11 @@ export function formatTokens(value){
 // server called from as 503 {code:'gemini_location', retryAfter}; Hoa Trí's own limiter as {code:'rate_limited',
 // retryAfter}. Older servers sent the same cases as plain messages, which are recognised when no code came. The PDF
 // service's (backend/pdf-layout.js): 503 pdf_service_busy with retryAfter (every place of the service is taken), 503
-// pdf_unavailable (out of reach), 413 pdf_timeout, pdf_memory, pdf_too_large or pdf_crash (this chunk is too heavy for
-// one job), 429 pdf_busy (this account's other PDF call). Saving a part (backend/study-history.js): 413 history_full or
-// too_many_parts, 409 history_conflict (another tab or device saved that part since). capacity: while the wait lasts,
-// GET pdf-layout/capacity is asked before the request goes again (createBookRun).
+// pdf_unavailable (out of reach), 503 pdf_local_off (the service of the machine running Hoa Trí does not answer), 413
+// pdf_timeout, pdf_memory, pdf_too_large or pdf_crash (this chunk is too heavy for one job), 429 pdf_busy (this account's
+// other PDF call). Saving a part (backend/study-history.js): 413 history_full or too_many_parts, 409 history_conflict
+// (another tab or device saved that part since). 500 schema_outdated: a database behind the code (backend/http.js).
+// capacity: while the wait lasts, GET pdf-layout/capacity is asked before the request goes again (createBookRun).
 const BACKOFF=[5,10,20,40,60,60];
 // A busy PDF service is shared by the whole site: a class running books at once can keep it full for a while, so a run
 // waits about half an hour (30 tries, at most a minute apart) before it pauses.
@@ -144,6 +150,8 @@ export function classifyError(error,step=''){
  if(code==='history_full')return {reason:'history_full'};
  if(code==='too_many_parts')return {reason:'too_many_parts'};
  if(code==='history_conflict')return {reason:'conflict'};
+ // A migration the database lacks fails every save alike until it is applied: no wait mends it.
+ if(code==='schema_outdated')return {reason:'schema'};
  // Another device's run holds the job (409): this run stops before it pays for anything.
  if(code==='job_busy')return {reason:'busy'};
  // Waited out like a lost connection, never shorter than the server asks, a little spread so that the students it
@@ -152,6 +160,8 @@ export function classifyError(error,step=''){
  // This account's own other PDF call (another tab or device) holds its place: waited out like a limit, asking too.
  if(code==='pdf_busy')return {reason:'pdf_account',wait:Math.min(300,Math.max(5,retryAfter??30)),retries:20,capacity:true};
  if(code==='pdf_unavailable')return {reason:'network',backoff:true,retries:BACKOFF.length,...(retryAfter!==null?{wait:Math.min(300,retryAfter)}:{})};
+ // The service of this machine may still be starting: a few short waits, then the server's words name start.cmd.
+ if(code==='pdf_local_off')return {reason:'pdf_local',wait:Math.min(300,Math.max(5,retryAfter??10)),retries:3};
  // A PDF drawn on other layout code than this site's (the service's image not rebuilt yet after a deploy) is thrown
  // away: drawn again before the rebuild it would be thrown away again, so the run pauses at once with the server's words.
  if(code==='pdf_service_outdated')return {reason:'error'};
@@ -215,6 +225,8 @@ export function pauseMessage(reason,error,now=Date.now()){
   case 'rate_limited':return 'Hoa Trí đang giới hạn tốc độ. Tiến độ đã lưu; bấm Tiếp tục dịch cả quyển sau ít phút.';
   case 'pdf_busy':return 'Dịch vụ PDF vẫn bận vì nhiều người dùng cùng lúc sau nhiều lần chờ. Tiến độ đã lưu; bấm Tiếp tục dịch cả quyển sau ít phút.';
   case 'pdf_account':return 'Tài khoản của bạn vẫn đang có một lượt xử lý PDF khác (ở tab hoặc thiết bị khác) sau nhiều lần chờ. Tiến độ đã lưu; bấm Tiếp tục dịch cả quyển khi lượt đó xong.';
+  case 'pdf_local':return `${detail||'Dịch vụ PDF trên máy này chưa chạy.'} Tiến độ đã lưu; bấm Tiếp tục dịch cả quyển khi dịch vụ PDF đã chạy.`;
+  case 'schema':return `${detail||'Cơ sở dữ liệu chưa được cập nhật lên phiên bản mới.'} Các trang đã xong trước đó vẫn được giữ; bấm Tiếp tục dịch cả quyển sau khi cơ sở dữ liệu được cập nhật.`;
   case 'gemini_location':return 'Gemini vẫn chưa phục vụ khu vực của máy chủ Hoa Trí sau nhiều lần thử. Khóa của bạn vẫn dùng được và các lần thử này không tốn token. Tiến độ đã lưu; bấm Tiếp tục dịch cả quyển sau ít phút. Nếu lỗi lặp lại, hãy báo quản trị viên.';
   case 'history_full':return `${detail||'Lịch sử dịch của tài khoản đã đầy.'} Tiến độ của quyển đã lưu; dọn bớt xong, bấm Tiếp tục dịch cả quyển.`;
   case 'conflict':return 'Phần đang dịch vừa được lưu từ một tab hoặc thiết bị khác, nên tab này dừng để không ghi đè phần đó. Tiến độ của quyển đã lưu; bấm Tiếp tục dịch cả quyển để mở bản mới nhất và dịch tiếp.';
@@ -230,6 +242,7 @@ export function waitMessage(reason,seconds){
   case 'rate_limited':return `Hoa Trí đang giới hạn tốc độ để bảo vệ máy chủ. Tự tiếp tục sau ${left}…`;
   case 'pdf_busy':return `Dịch vụ PDF đang bận vì nhiều người dùng cùng lúc. Tự thử lại sau ${left}…`;
   case 'pdf_account':return `Tài khoản của bạn đang có một lượt xử lý PDF khác (ở tab hoặc thiết bị khác). Tự thử lại sau ${left}…`;
+  case 'pdf_local':return `Dịch vụ PDF trên máy này chưa trả lời (có thể còn đang khởi động). Tự thử lại sau ${left}…`;
   case 'gemini_location':return `Gemini chưa phục vụ khu vực của máy chủ vừa gửi yêu cầu; khóa của bạn vẫn dùng được. Tự thử lại sau ${left}…`;
   case 'network':return `Mất kết nối. Tự thử lại sau ${left}; nếu bạn chuyển sang ứng dụng khác, việc dịch chờ đến khi bạn quay lại tab này.`;
   case 'server':return `Máy chủ gặp lỗi tạm thời. Tự thử lại sau ${left}…`;
@@ -269,23 +282,27 @@ export async function chunkSessionId(jobId,page){
  const hex=await digestHex(new TextEncoder().encode(`hoa-tri-chunk:${jobId}:${page}`));
  return `${hex.slice(0,8)}-${hex.slice(8,12)}-4${hex.slice(13,16)}-${(8|parseInt(hex[16],16)&3).toString(16)}${hex.slice(17,20)}-${hex.slice(20,32)}`;
 }
-// Terms a chunk added or changed; the job merges them into the book's glossary.
+// Terms a chunk added or changed; the job merges them into the book's glossary. A rendering that keeps Chinese, or
+// repeats its term, is never learned: it would keep that Chinese in every later chunk.
 export function glossaryUpdates(known,next){
  const updates={};
- for(const [term,value] of Object.entries(next||{}))if(typeof value==='string'&&value.trim()&&term.length<=100&&value.length<=100&&!['__proto__','constructor','prototype'].includes(term)&&known?.[term]!==value)updates[term]=value;
+ for(const [term,value] of Object.entries(next||{}))if(typeof value==='string'&&value.trim()&&term.length<=100&&value.length<=100&&!['__proto__','constructor','prototype'].includes(term)&&known?.[term]!==value&&!/\p{Script=Han}/u.test(value)&&value.trim()!==term.trim())updates[term]=value;
  return updates;
 }
 
 // ---- The original on the device ----
 const HAN=/\p{Script=Han}/gu;
 // Which pages have a Chinese text layer (translated straight from it) and which need Gemini to read an image, from
-// pdf.js's text content: nothing is drawn, so a 300-page book takes seconds. Blank pages are only known after extraction.
+// pdf.js's text content and, for a page with a text layer, its list of drawing operations (pdf-client.js readsAsScan:
+// a scan under its own OCR text, or under a stamp, is read from its picture). Nothing is drawn, so a 300-page book takes
+// seconds to a minute. Blank pages are only known after extraction.
 export async function surveyPages(file,{onProgress=()=>{},cancelled=()=>false}={}){
- const pdf=await openPdf(file),kinds=[];
+ const {readsAsScan}=await import('./pdf-client.js'),pdf=await openPdf(file),kinds=[];
  try{
   for(let number=1;number<=pdf.numPages&&!cancelled();number++){
-   const page=await pdf.getPage(number),content=await page.getTextContent();page.cleanup();
-   kinds.push((content.items.map(item=>item.str||'').join('').match(HAN)||[]).length>=12?'text':'scan');
+   const page=await pdf.getPage(number),content=await page.getTextContent();
+   const text=(content.items.map(item=>item.str||'').join('').match(HAN)||[]).length>=12&&!await readsAsScan(page,content.items).catch(()=>false);page.cleanup();
+   kinds.push(text?'text':'scan');
    if(number%10===0||number===pdf.numPages)onProgress(kinds.slice(),pdf.numPages);
   }
  }finally{await pdf.loadingTask.destroy();}
@@ -496,6 +513,9 @@ export function createBookRun({api,steps,source,ui={},sleep=countdown,shouldStop
  }
  const smaller=pages=>{probe=Math.max(1,Math.ceil(pages.length/2));return pages.slice(0,probe);};
  async function fail(page,message){probe=maxPages;await patch({pages:{[page]:'failed'}});ui.warn?.(message);return null;}
+ // The extractor's notes on pages it leaves with Chinese, kept with the book's notes ("dịch tiếp ở lượt sau" is what the
+ // run does by itself).
+ const warnNotes=notes=>{for(const note of Array.isArray(notes)?notes:[])if(typeof note==='string'&&note.trim()&&!/^Lượt này xử lý \d+\/\d+ trang/u.test(note))ui.warn?.(note);};
  async function extract(chunk){
   // heavy: this chunk was halved because a job ran out of time, memory or room; the size that then worked is kept.
   let pages=chunk.pages,heavy=false;
@@ -510,9 +530,12 @@ export function createBookRun({api,steps,source,ui={},sleep=countdown,shouldStop
    catch(error){
     const kind=classifyError(error,'extract'),{reason}=kind;
     if(reason==='no_blocks'){
-     // The server names the pages it read; fewer than were sent means the service's size budget stopped it.
-     probe=maxPages;const blank=Array.isArray(error.data?.pages)?error.data.pages.filter(page=>pages.includes(page)):[];if(blank.length&&blank.length<pages.length)fit=blank.length;
-     await patch({pages:statesFor(blank.length?blank:pages,'blank')});return null;
+     // The server names the pages it read (fewer than were sent: the service's size budget stopped it) and those still
+     // showing Chinese outside every block, which are named with the extractor's notes instead of called blank.
+     probe=maxPages;const read=Array.isArray(error.data?.pages)?error.data.pages.filter(page=>pages.includes(page)):[];if(read.length&&read.length<pages.length)fit=read.length;
+     const left=new Set(Array.isArray(error.data?.untranslated)?error.data.untranslated.filter(page=>pages.includes(page)):[]);
+     await patch({pages:{...statesFor((read.length?read:pages).filter(page=>!left.has(page)),'blank'),...statesFor(left,'untranslated')}});
+     if(left.size)warnNotes(error.data?.warnings);return null;
     }
     if(reason==='too_large'||reason==='page'){if(pages.length>1){heavy||=Boolean(kind.heavy);pages=smaller(pages);continue;}return fail(pages[0],/^Trang \d+/u.test(error.message)?error.message:`Trang ${pages[0]}: ${error.message}`);}
     throw error;
@@ -520,7 +543,7 @@ export function createBookRun({api,steps,source,ui={},sleep=countdown,shouldStop
    probe=maxPages;if(heavy)fit=Math.min(fit,pages.length);const found=chunkPages(result.document);
    // The service stops early when a selection's images do not fit one run; later chunks are cut to what fitted.
    if(found.processed&&found.processed<pages.length)fit=found.processed;
-   if(!found.done.length){await patch({pages:statesFor(found.blank.length?found.blank:pages,'blank')});return null;}
+   if(!found.done.length){await patch({pages:{...statesFor(found.processed?found.blank:pages,'blank'),...statesFor(found.untranslated,'untranslated')}});if(found.untranslated.length)warnNotes(result.document?.warnings);return null;}
    return result;
   }
  }
@@ -548,12 +571,12 @@ export function createBookRun({api,steps,source,ui={},sleep=countdown,shouldStop
       fit=Math.max(1,Math.floor(pages/2));continue;
      }
     }
-    const found=chunkPages(document);ui.chunk?.({...chunk,pages:found.done.concat(found.blank).sort((a,b)=>a-b)},document);
+    const found=chunkPages(document);ui.chunk?.({...chunk,pages:found.done.concat(found.blank,found.untranslated).sort((a,b)=>a-b)},document);
     await renew();const outcome=await retrying('translate',()=>steps.translate({shouldStop,renew}));
     if(!outcome?.complete)throw new BookPause('stopped');
     await renew();const finished=await retrying('export',()=>steps.finish(job))||{};if(finished.warning)ui.warn?.(finished.warning);
     const learned=glossaryUpdates(job.glossary,finished.glossary);
-    await patch({pages:{...statesFor(found.done,'done'),...statesFor(found.blank,'blank')},...(STUDY_MODEL.test(outcome.model||'')?{model:outcome.model}:{}),...(finished.storyId&&finished.storyId!==job.storyId?{storyId:finished.storyId}:{}),...(Object.keys(learned).length?{glossary:learned}:{})});
+    await patch({pages:{...statesFor(found.done,'done'),...statesFor(found.blank,'blank'),...statesFor(found.untranslated,'untranslated')},...(STUDY_MODEL.test(outcome.model||'')?{model:outcome.model}:{}),...(finished.storyId&&finished.storyId!==job.storyId?{storyId:finished.storyId}:{}),...(Object.keys(learned).length?{glossary:learned}:{})});
    }
    await patch({status:'done',pauseReason:null});
    return {status:'done',job};
@@ -579,6 +602,6 @@ export function renderPageGrid(root,states,working=null,noPdf=null){
  while(cells.length>text.length)root.lastElementChild.remove();
  for(let i=0;i<text.length;i++){const name=NAMES[text[i]]||'pending',state=name==='pending'&&working?.has(i+1)?'working':name==='done'&&noPdf?.has(i+1)?'nopdf':name,cell=cells[i];if(cell.dataset.state!==state){cell.dataset.state=state;cell.title=`Trang ${i+1} · ${PAGE_LABELS[state]}`;}}
  const count=countStates(text),missing=[...noPdf||[]].filter(page=>text[page-1]==='d').length,parts=[`${count.done} trang đã dịch`,`${count.pending} trang chưa dịch`];
- if(working?.size)parts.unshift(`đang dịch trang ${pageList([...working])}`);if(missing)parts.push(`${missing} trang chưa có PDF tiếng Việt`);if(count.blank)parts.push(`${count.blank} trang trống`);if(count.cover)parts.push('bìa');if(count.skipped)parts.push(`${count.skipped} trang bỏ qua`);if(count.failed)parts.push(`${count.failed} trang lỗi`);
+ if(working?.size)parts.unshift(`đang dịch trang ${pageList([...working])}`);if(missing)parts.push(`${missing} trang chưa có PDF tiếng Việt`);if(count.blank)parts.push(`${count.blank} trang trống`);if(count.untranslated)parts.push(`${count.untranslated} trang còn chữ chưa dịch`);if(count.cover)parts.push('bìa');if(count.skipped)parts.push(`${count.skipped} trang bỏ qua`);if(count.failed)parts.push(`${count.failed} trang lỗi`);
  root.setAttribute('aria-label',`Tiến độ ${count.total} trang: ${parts.join(', ')}.`);
 }

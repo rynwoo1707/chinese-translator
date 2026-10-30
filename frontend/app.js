@@ -44,7 +44,7 @@ const prefersReducedMotion=()=>Boolean(globalThis.matchMedia?.('(prefers-reduced
 const COMPACT_PDF='(max-width: 768px), (pointer: coarse)',compactPdf=()=>Boolean(globalThis.matchMedia?.(COMPACT_PDF).matches);
 // Reading preferences only; a browser that blocks storage (private mode, site data off) must still open the library.
 const savedTheme=(()=>{try{return localStorage.getItem('readerTheme');}catch{return null;}})(),savedFontSize=(()=>{try{return localStorage.getItem('readerFontSize');}catch{return null;}})();
-let state={route:currentRoute(),stories:[],users:[],jobs:[],requests:[],more:{stories:null,jobs:null},jobDetails:{},storyDetails:{},userBooks:{},library:[],myLibrary:[],myRequests:[],reader:{authenticated:false},status:{},file:null,pdfAnalysis:null,tab:'file',selected:null,reviewStory:null,showReviewQueue:false,chapters:[],chapter:0,theme:['paper','light','night'].includes(savedTheme)?savedTheme:'paper',fontSize:Math.max(16,Math.min(30,Number(savedFontSize)||19))};let poll=null,busy=false;
+let state={route:currentRoute(),stories:[],users:[],jobs:[],requests:[],more:{stories:null,jobs:null},jobDetails:{},storyDetails:{},userBooks:{},library:[],myLibrary:[],myRequests:[],studyBooks:[],reader:{authenticated:false},status:{},file:null,pdfAnalysis:null,tab:'file',selected:null,reviewStory:null,showReviewQueue:false,chapters:[],chapter:0,theme:['paper','light','night'].includes(savedTheme)?savedTheme:'paper',fontSize:Math.max(16,Math.min(30,Number(savedFontSize)||19))};let poll=null,busy=false;
 const OFFLINE='Không kết nối được máy chủ. Hãy kiểm tra mạng rồi thử lại sau vài giây.';
 // Covers of private books in the admin console (coverArt, showAdminCovers): "<id>:<cover_key>" -> object URL ('' when
 // it could not be loaded, null while it loads), for the view they were made in; revoked when the admin opens another
@@ -146,13 +146,17 @@ async function refresh(){if(adminArea){state.status=await api('/status');if(stat
  // Each part fails on its own: a library that did not load shows an error card (state.errors), never an empty shelf.
  // The personal lists are asked for only with a session (no 401 for a signed-out visitor): together with /api/me when
  // this page already knew one, else as soon as /api/me confirms it.
- const personal=()=>Promise.allSettled([api('/my/library'),api('/my/requests')]),early=state.reader?.authenticated?personal():null;
+ // The parts of the student's books (GET /api/my/study/books) only add the "Bố cục cũ" notes: failing, they add nothing.
+ const personal=()=>Promise.allSettled([api('/my/library'),api('/my/requests'),api('/my/study/books')]),early=state.reader?.authenticated?personal():null;
  const [library,me]=await Promise.allSettled([api('/library'),api('/me')]);const errors={};
  if(library.status==='fulfilled')state.library=Array.isArray(library.value)?library.value:[];else errors.library=library.reason;
  if(me.status==='fulfilled')state.reader=me.value||{authenticated:false};else errors.me=me.reason;
- const [mine,requests]=state.reader.authenticated?await (early||personal()):[];
+ const [mine,requests,books]=state.reader.authenticated?await (early||personal()):[];
  const own=(result,name)=>{if(!result)return [];if(result.status==='fulfilled')return Array.isArray(result.value)?result.value:[];errors[name]=result.reason;return [];};
- state.myLibrary=own(mine,'myLibrary');state.myRequests=own(requests,'myRequests');state.errors=errors;
+ // A local database behind the code (schema_outdated) is said, with how to mend it (start.cmd), rather than the notes
+ // simply missing.
+ if(books?.status==='rejected'&&books.reason?.code==='schema_outdated')errors.studyBooks=books.reason;
+ state.myLibrary=own(mine,'myLibrary');state.myRequests=own(requests,'myRequests');state.studyBooks=books?.status==='fulfilled'&&Array.isArray(books.value)?books.value:[];state.errors=errors;
 }}
 // Public pages keep "/" for the library and #reader/<storyId>/<part> for an open book; replace is for a part change.
 function setUrl(hash,replace=false){if(adminArea||!globalThis.history?.pushState){location.hash=hash;return;}const url=location.pathname+(hash?'#'+hash:'');if(url===location.pathname+location.search+location.hash)return;history[replace?'replaceState':'pushState'](null,'',url);}
@@ -329,12 +333,14 @@ function readerAssembly(){
  const entry={storyId:story.id,data:null,done:false};state.readerAssembly=entry;
  // A public book whose library row says it has no page-mapped part has nothing to look up.
  if(!story.study&&story.mappedParts===0){entry.done=true;return entry;}
- api(story.study?`/my/study/books/${encodeURIComponent(story.id)}/assembly`:`/library/${encodeURIComponent(story.id)}/assembly`).then(data=>{entry.data=data;},()=>{}).finally(()=>{entry.done=true;if(state.readerAssembly===entry)assemblyLoaded();});
+ // A local database behind the code (schema_outdated) is kept to be said beside the PDF; other failures leave the part
+ // without its bilingual view, as before.
+ api(story.study?`/my/study/books/${encodeURIComponent(story.id)}/assembly`:`/library/${encodeURIComponent(story.id)}/assembly`).then(data=>{entry.data=data;},error=>{if(error?.code==='schema_outdated')entry.error=error;}).finally(()=>{entry.done=true;if(state.readerAssembly===entry)assemblyLoaded();});
  return entry;
 }
 function bilingualFor(chapter){const assembly=readerAssembly();return assembly?.data&&chapter?bilingualSource(assembly.data,chapter.id):null;}
 function pdfTools(chapter){
- const source=bilingualFor(chapter);if(!source)return '';
+ const source=bilingualFor(chapter);if(!source){const failed=state.readerAssembly?.error;return failed?`<span class="bilingual-toggle-hint" role="status">${esc(failed.message)}</span>`:'';}
  return `<button type="button" class="bilingual-toggle" id="bilingual-toggle" aria-pressed="${Boolean(state.bilingual)}">${icon('book')}<span>Đọc song ngữ</span></button><span class="bilingual-toggle-hint">Xem trang gốc cùng bản dịch</span><a class="bilingual-original-link" href="${esc(source.url)}#page=${source.pages[0]}" target="_blank" rel="noopener">Mở PDF gốc ↗</a>`;
 }
 const pdfMode=chapter=>state.bilingual&&bilingualFor(chapter)?'bilingual':compactPdf()?'pages':'frame';
@@ -523,7 +529,28 @@ function libraryCard(s,i){
  const cover=ready?`<button type="button" class="cover-trigger" data-read="${id}" data-read-cover="${id}" aria-label="Mở tài liệu ${title}${isSample(s)?` · ${SAMPLE_LABEL}`:''}">${coverArt(s)}</button>`:`<div class="cover-trigger">${coverArt(s)}</div>`;
  return `<article class="cover-book ${ready?'':'book-pending'}" data-library-index="${i}" aria-labelledby="book-title-${i}"><div class="cover-frame">${sampleBadge(s)}${cover}</div><div class="book-caption"><small class="book-genre">${esc(s.genre||'Tài liệu học thuật')}</small><h3 class="book-title" id="book-title-${i}">${title}</h3><p class="book-chapters">${icon('book')} ${ready?`${Number(s.chapters)} phần`:'Đang dịch phần đầu tiên'}</p></div><div class="book-reveal" id="book-info-${i}"><p class="book-author">Tác giả / chủ biên: ${esc(s.author||'Chưa cập nhật')}</p>${sampleCardNote(s)}</div><div class="book-actions">${ready?`<button type="button" class="primary" data-read="${id}" aria-describedby="book-title-${i}"><span data-read-label="Mở tài liệu">Mở tài liệu</span> ${icon('arrow')}</button>`:'<span class="pending-reader-badge">Đang biên tập</span>'}</div></article>`;
 }
-function personalBookCards(){const progress={uploaded:'Đã tiếp nhận · chờ dịch',prepared:'Đã chuẩn bị · chờ dịch',splitting:'Đang chuẩn bị tài liệu',ocr:'Đang nhận diện nội dung',translating:'Đang dịch',assembling:'Đang ghép bản dịch',review:'Chờ đối chiếu',failed:'Bản dịch cần quản trị viên xử lý',published:'Đã công bố'};return state.myLibrary.map(s=>`<article class="personal-book">${coverArt(s)}<div><span class="privacy-badge">${s.visibility==='public'?'Đã chia sẻ thư viện chung':'Riêng tư'}</span><h3>${esc(s.title)}</h3><p>${esc(s.genre)} · ${Number(s.chapters)||0} phần</p>${Number(s.chapters)?`<button class="primary" data-read="${esc(s.id)}"><span data-read-label="Đọc tài liệu">Đọc tài liệu</span> ${icon('arrow')}</button>`:`<small>${esc(progress[s.translation_status]||'Ban biên tập đang chuẩn bị phần đầu tiên.')}</small>`}</div></article>`).join('');}
+// Parts of a student's book whose pages an older extractor read, or that still show the PDF of the part they took over
+// (GET /api/my/study/books: layoutOutdated): headings, captions or lines may be printed Chinese there. Thư viện riêng,
+// the reader and "Tải cả quyển" say "Bố cục cũ" and link the part's session in Xưởng dịch, where "Cập nhật bố cục" reads
+// it again (nothing is paid before it is pressed); a refreshed copy begun already is linked instead, with the blocks it
+// still has to translate.
+const outdatedParts=storyId=>(state.studyBooks.find(book=>book.id===storyId)?.parts||[]).filter(part=>part.layoutOutdated===true&&part.sessionId);
+const refreshLink=part=>part.refresh?.sessionId?`/study?history=${encodeURIComponent(part.refresh.sessionId)}`:`/study?history=${encodeURIComponent(part.sessionId)}&refresh=1`;
+const newBlocks=part=>Number(part.refresh?.blocks)>0?` (còn ${Number(part.refresh.blocks)} đoạn cần dịch)`:'';
+// A part is told apart by its pages when it has them (two parts, or two books, may share a title: "tesst" pages 4–6 and
+// 7–8), unless its title already says them; else, among parts of the same title, by its place in the book.
+function outdatedWhere(part){
+ const start=Number(part.pageStart)||0,end=Number(part.pageEnd)||start,pages=start?start===end?`trang ${start}`:`trang ${start}–${end}`:'';
+ if(pages)return String(part.title||'').toLocaleLowerCase('vi').includes(pages)?'':pages;
+ const parts=(state.studyBooks.find(book=>book.parts?.some(item=>item.id===part.id))?.parts)||[];
+ return parts.filter(item=>item.title===part.title).length>1?`phần ${parts.findIndex(item=>item.id===part.id)+1}`:'';
+}
+const outdatedNote=(part,named=true)=>{const where=outdatedWhere(part);return `${named?`Phần “${esc(part.title)}”${where?` (${where})`:''} · Bố cục cũ`:`Bố cục cũ${where?` (${where})`:''}`}: <a href="${esc(refreshLink(part))}">mở lại để cập nhật</a>${newBlocks(part)}`;};
+function outdatedCardNote(storyId){
+ const parts=outdatedParts(storyId);if(!parts.length)return '';const many=(state.studyBooks.find(book=>book.id===storyId)?.parts.length||0)>1;
+ return parts.slice(0,3).map(part=>`<p class="sample-card-note layout-outdated">${outdatedNote(part,many)}</p>`).join('')+(parts.length>3?`<p class="sample-card-note layout-outdated">và ${parts.length-3} phần khác dùng bố cục cũ</p>`:'');
+}
+function personalBookCards(){const progress={uploaded:'Đã tiếp nhận · chờ dịch',prepared:'Đã chuẩn bị · chờ dịch',splitting:'Đang chuẩn bị tài liệu',ocr:'Đang nhận diện nội dung',translating:'Đang dịch',assembling:'Đang ghép bản dịch',review:'Chờ đối chiếu',failed:'Bản dịch cần quản trị viên xử lý',published:'Đã công bố'};return state.myLibrary.map(s=>`<article class="personal-book">${coverArt(s)}<div><span class="privacy-badge">${s.visibility==='public'?'Đã chia sẻ thư viện chung':'Riêng tư'}</span><h3>${esc(s.title)}</h3><p>${esc(s.genre)} · ${Number(s.chapters)||0} phần</p>${outdatedCardNote(s.id)}${Number(s.chapters)?`<button class="primary" data-read="${esc(s.id)}"><span data-read-label="Đọc tài liệu">Đọc tài liệu</span> ${icon('arrow')}</button>`:`<small>${esc(progress[s.translation_status]||'Ban biên tập đang chuẩn bị phần đầu tiên.')}</small>`}</div></article>`).join('');}
 // Sign-in and registration. The server decides who may register (/api/me registration.mode: open, closed or domain);
 // the Google button works only once a terms box is ticked, since Google sign-in can create an account. In domain mode
 // only Google creates accounts (it proves the address belongs to the school), so there is no registration form.
@@ -579,7 +606,7 @@ function accountView(){
  const notice=state.accountNotice?`<p class="account-notice" role="status" tabindex="-1" data-focus-first>${icon('check')}<span>${esc(state.accountNotice)}</span></p>`:'';
  if(!state.reader.authenticated)return state.errors?.me?`<section class="account-error"><p class="eyebrow">GÓC NGƯỜI HỌC</p><h1>Tài khoản</h1>${errorCard('Chưa tải được tài khoản',state.errors.me,'account')}</section>`:notice+authView();
  const u=state.reader.user||{},avatar=avatarOf(u),errors=state.errors||{},ask='<button type="button" class="hero-cta" data-request-open>Gửi yêu cầu dịch</button>';
- const books=errors.myLibrary?errorCard('Chưa tải được Thư viện riêng',errors.myLibrary,'account'):`<div class="personal-library">${personalBookCards()||`<div class="panel empty account-empty"><p>Thư viện riêng chưa có tài liệu. Bản dịch hoàn tất ở Xưởng dịch và các yêu cầu dịch đã xử lý xong sẽ hiện ở đây.</p><div class="account-empty-actions"><a class="hero-cta hero-cta-primary" href="/study">Dịch tài liệu đầu tiên <span aria-hidden="true">→</span></a>${ask}</div></div>`}</div>`;
+ const books=errors.myLibrary?errorCard('Chưa tải được Thư viện riêng',errors.myLibrary,'account'):`${errors.studyBooks?errorCard('Chưa đọc được các phần sách của bạn',errors.studyBooks,'account'):''}<div class="personal-library">${personalBookCards()||`<div class="panel empty account-empty"><p>Thư viện riêng chưa có tài liệu. Bản dịch hoàn tất ở Xưởng dịch và các yêu cầu dịch đã xử lý xong sẽ hiện ở đây.</p><div class="account-empty-actions"><a class="hero-cta hero-cta-primary" href="/study">Dịch tài liệu đầu tiên <span aria-hidden="true">→</span></a>${ask}</div></div>`}</div>`;
  const requests=errors.myRequests?errorCard('Chưa tải được yêu cầu dịch của bạn',errors.myRequests,'account'):`<div class="my-requests">${state.myRequests.map(r=>`<article class="panel request-row"><div><span class="badge">${({pending:'Đang chờ',accepted:'Đang dịch',done:'Hoàn tất'})[r.status]}</span><span class="privacy-badge">${r.visibility==='public'?'Chia sẻ chung':'Riêng tư'}</span></div><h3>${esc(r.title)}</h3><p>${r.filename?`Tệp: ${esc(r.filename)}`:r.source_url?'Đã gửi liên kết nguyên tác':'Nguồn chưa cập nhật'}${dayText(r.created_at)?` · gửi ngày ${dayText(r.created_at)}`:''}</p>${r.story_id?'<small>Tài liệu đã được đưa vào Thư viện riêng của bạn.</small>':''}</article>`).join('')||`<div class="panel empty account-empty"><p>Bạn chưa gửi yêu cầu dịch nào. Gửi tệp hoặc liên kết tài liệu tiếng Trung, rồi theo dõi tiến độ tại đây.</p><div class="account-empty-actions">${ask}</div></div>`}</div>`;
  // An account with a password changes it here (the current one confirms it); any account can end its other sessions,
  // e.g. one left open on a school computer.
@@ -622,6 +649,11 @@ function readerProse(content){
 // heading: 'h1' where the card is the whole page (the reader). back: a signed-out reader's book and part (reader/<id>/<n>);
 // /api/read answers 404, not 401, for a private book, so the card offers to sign in and come back there.
 function errorCard(title,error,retry,{heading='h2',back=''}={}){return `<div class="panel load-error" role="alert"><${heading}>${esc(title)}</${heading}><p>${esc(error?.message||'Đã có lỗi khi tải dữ liệu.')}</p>${back?'<p>Nếu đây là tài liệu trong Thư viện riêng của bạn, hãy đăng nhập để mở.</p>':''}<div class="button-row">${(error?.status===401||back)&&state.route!=='account'?`<a class="load-error-link" href="/#account${back?`?sau=${esc(back)}`:''}">Đăng nhập</a>`:''}<button type="button" class="primary" data-retry="${retry}">Thử lại</button></div></div>`;}
+// A part of the student's own book an older extractor read: said above it, with the way to update it.
+function readerOutdatedNotice(chapter){
+ const part=state.readerStory?.study?outdatedParts(state.readerStory.id).find(item=>item.id===chapter?.id):null;if(!part)return '';
+ return `<aside class="sample-notice layout-outdated" role="note"><strong>Bố cục cũ:</strong> phần này được tách trang bằng bộ tách cũ nên tiêu đề, chú thích hoặc dòng chữ Trung ngoài các đoạn có thể chưa được dịch. <a href="${esc(refreshLink(part))}">Mở lại để cập nhật</a>${newBlocks(part)}; chỉ các đoạn mới hoặc đổi vùng chữ tốn token.</aside>`;
+}
 // Only a book in the public library has a link others can open.
 const shareable=()=>Boolean(state.readerStory?.id&&state.library.some(item=>item.id===state.readerStory.id));
 function readerView(){
@@ -640,7 +672,7 @@ function readerView(){
  <div class="reader-more" id="reader-more"><div class="reader-options"><div class="reader-control-group theme-options" role="group" aria-label="Màu trang sách">${[['paper','paper','Màu giấy'],['light','sun','Nền sáng'],['night','moon','Ban đêm']].map(([theme,glyph,label])=>`<button class="reader-icon theme-${theme}" data-reader-theme="${theme}" aria-label="${label}" title="${label}" aria-pressed="${state.theme===theme}">${icon(glyph)}</button>`).join('')}</div><div class="reader-control-group" role="group" aria-label="Tra cứu chữ Hán"><button class="reader-icon" id="hanzi-open" aria-label="Tra chữ Hán: pinyin, âm Hán Việt và nghĩa" title="Tra chữ Hán"><span class="font-symbol" lang="zh-Hans" aria-hidden="true">字</span></button></div>
  ${!pdf?`<div class="reader-control-group font-options" role="group" aria-label="Cỡ chữ"><button class="reader-icon" id="font-smaller" title="Giảm cỡ chữ" aria-label="Giảm cỡ chữ" ${state.fontSize<=16?'disabled':''}><span class="font-symbol">A−</span></button><output class="font-value" aria-live="polite" aria-label="Cỡ chữ hiện tại">${state.fontSize}</output><button class="reader-icon" id="font-larger" title="Tăng cỡ chữ" aria-label="Tăng cỡ chữ" ${state.fontSize>=30?'disabled':''}><span class="font-symbol">A+</span></button></div>`:''}</div>
  ${!pdf?`<div class="reader-audio" role="group" aria-label="Đọc thành tiếng"><button class="reader-icon listen-icon" id="speak" aria-label="Nghe đọc tiếng Việt" title="Nghe đọc tiếng Việt">${icon('headphones')}</button><button class="reader-icon stop-icon" id="stop-speak" aria-label="Dừng nghe" title="Dừng nghe">${icon('stop')}</button></div>`:''}</div>
- </div><article class="reader ${state.theme}">${state.readerStory?.title?`<p class="reader-book-title">${esc(state.readerStory.title)}</p>`:''}<p class="eyebrow">PHẦN ${state.chapter+1} / ${state.chapters.length}</p><h1 tabindex="-1">${esc(c.title)}</h1>${c.source_url?`<p class="chapter-source">Nguồn: ${sourceLink(c.source_url,'Mở nguyên tác ↗')}</p>`:''}${sampleReaderNotice(state.readerStory,c)}${pdf?`<p class="subtitle">Tài liệu PDF · <a href="/api/chapter-file/${encodeURIComponent(c.id)}" target="_blank" rel="noopener">Mở PDF trong tab mới ↗</a></p><div id="book-download-slot">${wholeBookPdf()?bookDownloadPanel():''}</div><div class="reader-pdf-tools" id="reader-pdf-tools">${pdfTools(c)}</div><div class="reader-pdf-area" id="reader-pdf-area">${pdfFrame(c)}</div>`:`<div class="prose" style="font-size:${state.fontSize}px">${reading.html}</div>${reading.notes.length?`<details class="footnotes-panel"><summary>Chú thích <span>${reading.notes.length}</span></summary><ol>${reading.notes.map(note=>`<li id="note-${note.number}"><b>[${note.number}]</b> ${renderMathText(note.content,{bare:false})}</li>`).join('')}</ol></details>`:''}`}</article>
+ </div><article class="reader ${state.theme}">${state.readerStory?.title?`<p class="reader-book-title">${esc(state.readerStory.title)}</p>`:''}<p class="eyebrow">PHẦN ${state.chapter+1} / ${state.chapters.length}</p><h1 tabindex="-1">${esc(c.title)}</h1>${c.source_url?`<p class="chapter-source">Nguồn: ${sourceLink(c.source_url,'Mở nguyên tác ↗')}</p>`:''}${sampleReaderNotice(state.readerStory,c)}${readerOutdatedNotice(c)}${pdf?`<p class="subtitle">Tài liệu PDF · <a href="/api/chapter-file/${encodeURIComponent(c.id)}" target="_blank" rel="noopener">Mở PDF trong tab mới ↗</a></p><div id="book-download-slot">${wholeBookPdf()?bookDownloadPanel():''}</div><div class="reader-pdf-tools" id="reader-pdf-tools">${pdfTools(c)}</div><div class="reader-pdf-area" id="reader-pdf-area">${pdfFrame(c)}</div>`:`<div class="prose" style="font-size:${state.fontSize}px">${reading.html}</div>${reading.notes.length?`<details class="footnotes-panel"><summary>Chú thích <span>${reading.notes.length}</span></summary><ol>${reading.notes.map(note=>`<li id="note-${note.number}"><b>[${note.number}]</b> ${renderMathText(note.content,{bare:false})}</li>`).join('')}</ol></details>`:''}`}</article>
  <nav class="reader-pagination" aria-label="Chuyển phần"><button id="prev-chapter" ${state.chapter===0?'disabled':''}>← <span>Phần trước</span></button><span class="chapter-position">${state.chapter+1}<small> / ${state.chapters.length}</small></span><button id="next-chapter" ${state.chapter===state.chapters.length-1?'disabled':''}><span>Phần tiếp</span> →</button></nav></div>`;
 }
 
@@ -661,7 +693,7 @@ function bookDownloadPanel(){
  const pick=d.pick?`<div class="book-pick" role="group" aria-labelledby="book-pick-title"><strong id="book-pick-title">Chọn PDF gốc để ghép đủ bìa và các trang chưa dịch</strong><p>Tài khoản chưa lưu bản gốc của ${d.pick.sources.length>1?'các tệp':'tệp'} dưới đây (phần dịch từ trước khi Hoa Trí lưu bản gốc). Tệp bạn chọn chỉ dùng trên thiết bị này, không tải lên.</p><ul>${d.pick.sources.map(source=>`<li>${esc(source.filename||'Tệp gốc')} · ${source.totalPages?`${source.totalPages} trang`:'chưa rõ số trang'}${localSources.has(source.key)?' · đã chọn':''}</li>`).join('')}</ul>${d.pick.errors?.length?`<ul class="book-pick-errors" role="alert">${d.pick.errors.map(error=>`<li>${esc(error)}</li>`).join('')}</ul>`:''}<div class="book-pick-actions"><label class="book-pick-file">${icon('upload')}<span>Chọn PDF gốc…</span><input type="file" id="book-pick-input" accept="application/pdf,.pdf" multiple ${d.busy?'disabled':''}></label><button type="button" id="book-join-only" ${d.busy?'disabled':''}>Chỉ ghép các phần đã dịch</button></div></div>`:'';
  const join=!d.pick&&d.offerJoin?`<button type="button" class="book-join-secondary" id="book-join-only">Chỉ ghép các phần đã dịch</button>`:'';
  const offer=d.coverOffer?`<div class="book-cover-offer"><img src="${d.coverOffer.url}" alt="Trang ${d.coverOffer.page} của bản gốc" width="48" height="68"><p>Bản gốc có trang bìa (trang ${d.coverOffer.page}). Dùng làm ảnh bìa sách trong Thư viện riêng?</p><button type="button" id="book-cover-offer">Đặt làm ảnh bìa</button></div>`:'';
- return `<div class="book-download"><button type="button" id="download-whole-book" ${d.busy?'disabled':''}>${icon('file')}<span>Tải cả quyển (PDF)</span></button><span id="book-download-status" role="status" aria-live="polite">${esc(d.message||hint)}</span>${pick}${join}${d.notes?.length?`<ul class="book-download-notes">${d.notes.map(note=>`<li>${esc(note)}</li>`).join('')}</ul>`:''}${offer}</div>`;
+ return `<div class="book-download"><button type="button" id="download-whole-book" ${d.busy?'disabled':''}>${icon('file')}<span>Tải cả quyển (PDF)</span></button><span id="book-download-status" role="status" aria-live="polite">${esc(d.message||hint)}</span>${pick}${join}${d.notes?.length||d.outdated?.length?`<ul class="book-download-notes">${(d.notes||[]).map(note=>`<li>${esc(note)}</li>`).join('')}${(d.outdated||[]).map(part=>`<li>${outdatedNote(part)}.</li>`).join('')}</ul>`:''}${offer}</div>`;
 }
 // Only the download box is redrawn, so the open PDF does not reload.
 function renderBookDownload(){const box=$('.book-download');if(box){box.outerHTML=bookDownloadPanel();bindBookDownload();}}
@@ -700,7 +732,9 @@ async function downloadWholeBook({joinOnly=false}={}){
   await joinParts(libs,chapters,title,story,progress,joinNote);
  }catch(error){
   state.bookDownload={busy:false,message:'',offerJoin:Boolean((story.study||story.assembly)&&!joinOnly)};renderBookDownload();
-  throw new Error(error?.known?error.message:'Không ghép được cả quyển trên thiết bị này (có thể do thiếu bộ nhớ). Hãy thử lại hoặc mở từng phần.');
+  // The server's own words (a database behind the code names start.cmd, a part gone…) and a lost connection are said as
+  // they are; only a failure on this device is told it may be its memory.
+  throw error?.known||error?.code||Number.isInteger(error?.status)?error:new Error('Không ghép được cả quyển trên thiết bị này (có thể do thiếu bộ nhớ). Hãy thử lại hoặc mở từng phần.');
  }
 }
 // A library reader has neither Xưởng dịch nor a Thư viện riêng: a part that is not in the file is simply named.
@@ -724,7 +758,7 @@ async function assembleLikeOriginal({PDFLib,pdfjs,assembly,covers},info,sources,
  // An original kept as an excerpt (a sample: the cover and the translated pages) says which pages of the book it holds.
  const excerpts=sources.map(source=>stored.get(source.sha256)?.bookPages).filter(pages=>Array.isArray(pages)&&pages.length).map(pages=>`PDF gốc của sách này là bản trích đoạn, chỉ gồm trang ${pageRunText(pages)} của sách in.`);
  const notes=[...new Set([...excerpts,...sources.map(source=>localSources.get(source.key)?.warning).filter(Boolean),...result.plan.warnings,...waiting.map(part=>library?libraryMissingNote(part):assembly.missingPdfNote(part,{inBook:false}))])];
- state.bookDownload={busy:false,message:`Đã ghép ${result.pages} trang như bản gốc. ${assembly.coverageNote(result.plan)}`,notes,coverOffer};renderBookDownload();
+ state.bookDownload={busy:false,message:`Đã ghép ${result.pages} trang như bản gốc. ${assembly.coverageNote(result.plan)}`,notes,coverOffer,outdated:library?[]:(info.parts||[]).filter(part=>part.layoutOutdated===true&&part.sessionId)};renderBookDownload();
 }
 // Parts without a Vietnamese PDF (text translations, ranges not exported yet) cannot be joined; they are named, not dropped silently.
 async function joinParts({PDFLib,assembly},chapters,title,story,progress,joinNote=''){
@@ -733,7 +767,7 @@ async function joinParts({PDFLib,assembly},chapters,title,story,progress,joinNot
  const loadPart=async part=>{const index=parts.indexOf(part)+1,response=await fetch(`/api/chapter-file/${encodeURIComponent(part.id)}`,{credentials:'same-origin'});if(!response.ok)throw knownError(`Không tải được phần ${index} “${part.title}”. Hãy thử lại sau.`);return response.arrayBuffer();};
  const result=await assembly.concatenateParts({PDFLib,title,parts,loadPart,cover,onProgress:(index,total)=>progress(`Đang ghép phần ${index}/${total}…`)});
  progress('Đang lưu tệp PDF…');saveBookFile(result.bytes,title);
- state.bookDownload={busy:false,message:`Đã ghép ${parts.length} phần · ${result.pages} trang${cover?' · có ảnh bìa ở trang đầu':''}.`,notes};renderBookDownload();
+ state.bookDownload={busy:false,message:`Đã ghép ${parts.length} phần · ${result.pages} trang${cover?' · có ảnh bìa ở trang đầu':''}.`,notes,outdated:story.study?outdatedParts(story.id):[]};renderBookDownload();
 }
 // pdf-lib embeds JPEG and PNG; a WebP cover is redrawn as JPEG first.
 async function bookCoverImage(storyId){
@@ -885,7 +919,7 @@ function requestStory(){
    // The session ran out while the dialog was open: what was typed waits in this tab while the student signs in again.
    if(error.status!==401)throw error;
    keepRequestDraft({title:String(f.get('title')||''),source_url:source,notes:String(f.get('notes')||''),visibility:String(f.get('visibility')||'private'),filename:file?.size?String(file.name||''):''});
-   $('#modal').close();state.reader={...state.reader,authenticated:false,user:null};state.myLibrary=[];state.myRequests=[];go('account');
+   $('#modal').close();state.reader={...state.reader,authenticated:false,user:null};state.myLibrary=[];state.myRequests=[];state.studyBooks=[];go('account');
    toast('Phiên đăng nhập đã hết. Hãy đăng nhập lại; hộp yêu cầu dịch sẽ mở lại với nội dung bạn đã nhập.');return;
   }
   await refresh();render();toast('Đã gửi yêu cầu dịch. Bạn có thể theo dõi tiến độ tại đây.');
@@ -908,7 +942,7 @@ function deleteAccountDialog(){
    if(error.code==='reauth_required'){const row=$('#reauth-row');if(row){row.hidden=false;$('#reauth-signout')?.focus();}}
    throw error;
   }
-  localSources=new Map();Object.assign(state,{reader:{...state.reader,authenticated:false,user:null},myLibrary:[],myRequests:[],readerStory:null,chapters:[]});
+  localSources=new Map();Object.assign(state,{reader:{...state.reader,authenticated:false,user:null},myLibrary:[],myRequests:[],studyBooks:[],readerStory:null,chapters:[]});
   await refresh().catch(()=>{});go('library');toast('Tài khoản và dữ liệu của bạn đã được xóa.');
  },'Xóa vĩnh viễn',{danger:true});
  on('#reauth-signout','click',signOutToReauthenticate);
@@ -1076,7 +1110,7 @@ function deleteUser(id){
 function bind(){bindMusic(toast);bindAuth();on('#delete-account','click',deleteAccountDialog);document.querySelectorAll('[data-user-lock]').forEach(b=>b.onclick=()=>lockUser(b.dataset.userLock));document.querySelectorAll('[data-user-delete]').forEach(b=>b.onclick=()=>deleteUser(b.dataset.userDelete));document.querySelectorAll('[data-user-reset]').forEach(b=>b.onclick=()=>createResetLink(b.dataset.userReset,b).catch(error=>toast(error.message)));document.querySelectorAll('[data-request-open]').forEach(b=>b.onclick=()=>requestStory());on('#hanzi-open','click',()=>{const picked=String(getSelection()||'').trim();openHanziPanel({text:/\p{Script=Han}/u.test(picked)?picked.slice(0,600):'',search:true,returnFocus:$('#hanzi-open'),theme:state.theme});});on('#bilingual-toggle','click',toggleBilingual);document.querySelectorAll('[data-request-file]').forEach(b=>b.onclick=()=>adminDownload(`/requests/${encodeURIComponent(b.dataset.requestFile)}/file`,state.requests.find(x=>x.id===b.dataset.requestFile)?.filename||'nguyen-tac','Không tải được tệp nguồn').catch(error=>toast(error.message)));on('#download-source','click',()=>adminDownload(`/jobs/${encodeURIComponent(state.selected)}/source`,'nguyen-tac.txt','Không tải được nguyên tác'));bindAdminContent();on('#pdf-parts','click',showPdfParts);on('#download-book','click',downloadBook);bindCoverButtons();on('#reader-request','click',requestStory);on('#account-request','click',requestStory);on('#reader-logout','click',async event=>{const button=event.currentTarget;button.disabled=true;try{await signOut();}finally{if(button.isConnected!==false)button.disabled=false;}await refresh().catch(()=>{});go('library');toast('Đã đăng xuất tài khoản người học.');});on('#reader-more-toggle','click',event=>{state.readerMore=!state.readerMore;$('.reader-toolbar')?.classList.toggle('is-more-open',state.readerMore);event.currentTarget.setAttribute('aria-expanded',String(state.readerMore));});bindAdminAuth();bindOpeners(document);document.querySelectorAll('[data-tab]').forEach(b=>b.onclick=()=>{state.draftText=$('#source-input')?.value||state.draftText;state.storyId=$('#story-select')?.value;state.tab=b.dataset.tab;render();});
  document.querySelectorAll('[data-review-story]').forEach(b=>b.onclick=()=>{state.reviewStory=b.dataset.reviewStory;state.showReviewQueue=false;state.selected=null;render();});on('#back-review-books','click',()=>{state.reviewStory=null;state.showReviewQueue=false;render();});on('#toggle-review-queue','click',()=>{state.showReviewQueue=!state.showReviewQueue;render();});
  on('#new-story','click',createStory);on('#back-jobs','click',()=>{state.selected=null;render();});on('#story-select','change',e=>{state.storyId=e.target.value;selectAcademicField(state.storyId);$('#story-cover-slot').innerHTML=uploadCoverPanel();bindCoverButtons();showAdminCovers();});selectAcademicField(state.storyId||'');on('#genre','change',e=>{genreDrafts[state.storyId||'']=e.target.value;});
- async function selected(file){if(!file)return;if(file.size>25*1024*1024)throw new Error('Tối đa 25 MB mỗi tài liệu.');state.file=file;state.pdfAnalysis=null;state.storyId=$('#story-select')?.value;render();if(file.name.toLowerCase().endsWith('.pdf')){toast('Đang kiểm tra lớp chữ của PDF trên trình duyệt…');try{const {analyzePdf}=await import('./pdf-client.js');state.pdfAnalysis=await analyzePdf(file,(page,total)=>{if(page===1||page===total||page%10===0)toast(`Đang phân tích PDF · ${page}/${total} trang`);});toast(state.pdfAnalysis.mode==='hybrid'?`Đã lấy chữ từ ${state.pdfAnalysis.pagesWithText} trang; chỉ ${state.pdfAnalysis.scanPages} trang cần OCR.`:state.pdfAnalysis.mode==='text'?`Đã lấy và làm sạch lớp chữ từ ${state.pdfAnalysis.totalPages} trang. Không cần OCR ảnh.`:`Đã nhận diện PDF scan ${state.pdfAnalysis.totalPages} trang. Ảnh sẽ được giảm còn 1200px, chuyển xám và nén trước khi OCR.`);}catch(error){state.pdfAnalysis={mode:'fallback',error:error.message};toast('Không đọc được lớp chữ trong trình duyệt; máy chủ sẽ dùng quy trình PDF dự phòng.');}render();}}
+ async function selected(file){if(!file)return;if(file.size>25*1024*1024)throw new Error('Tối đa 25 MB mỗi tài liệu.');state.file=file;state.pdfAnalysis=null;state.storyId=$('#story-select')?.value;render();if(file.name.toLowerCase().endsWith('.pdf')){toast('Đang kiểm tra lớp chữ của PDF trên trình duyệt…');try{const {analyzePdf}=await import('./pdf-client.js');state.pdfAnalysis=await analyzePdf(file,(page,total)=>{if(page===1||page===total||page%10===0)toast(`Đang phân tích PDF · ${page}/${total} trang`);});const analysis=state.pdfAnalysis,reread=analysis.reclassified?` ${analysis.reclassified} trang có lớp chữ không khớp ảnh trang (chữ nhận dạng nằm ẩn dưới ảnh scan, hoặc chỉ có dấu ở mép trang) sẽ được đọc lại từ ảnh.`:'';toast(analysis.mode==='hybrid'?`Đã lấy chữ từ ${analysis.pagesWithText} trang; chỉ ${analysis.scanPages} trang cần OCR.${reread}`:analysis.mode==='text'?analysis.pictured?`Đã lấy và làm sạch lớp chữ từ ${analysis.totalPages} trang; ${analysis.pictured} trang có chữ nằm trong hình ảnh hoặc nét vẽ sẽ được nhận dạng thêm từ ảnh.`:`Đã lấy và làm sạch lớp chữ từ ${analysis.totalPages} trang. Không cần OCR ảnh.`:`Đã nhận diện PDF scan ${analysis.totalPages} trang. Ảnh sẽ được giảm còn 1200px, chuyển xám và nén trước khi OCR.${reread}`);}catch(error){state.pdfAnalysis={mode:'fallback',error:error.message};toast('Không đọc được lớp chữ trong trình duyệt; máy chủ sẽ dùng quy trình PDF dự phòng.');}render();}}
  on('#dropzone','click',e=>{e.preventDefault();$('#file-input').click();});on('#dropzone','keydown',e=>{if(e.key==='Enter'||e.key===' '){e.preventDefault();$('#file-input').click();}});on('#file-input','change',e=>selected(e.target.files[0]));on('#dropzone','dragover',e=>{e.preventDefault();e.currentTarget.classList.add('drag');});on('#dropzone','dragleave',e=>e.currentTarget.classList.remove('drag'));on('#dropzone','drop',e=>{e.preventDefault();selected(e.dataTransfer.files[0]);});on('#remove-file','click',()=>{state.file=null;render();});
  on('#start-translate','click',e=>uploadJob(e,false));on('#prepare-pdf','click',e=>uploadJob(e,true));
  on('#logout','click',signOutAdmin);on('#admin-logout','click',signOutAdmin);
@@ -1328,22 +1362,37 @@ function bindCoverButtons(){document.querySelectorAll('[data-cover]').forEach(b=
 // The job carries the "Cách dịch" chosen above (POST /api/jobs mode), so starting it sends none: the other parts queued
 // with it keep their own. Its profile also says whether a scanned page may keep the text read on this device (hybrid) or
 // always goes to Gemini (gemini).
-async function uploadJob(e,prepareOnly){const sid=$('#story-select').value;if(!sid)throw new Error('Hãy tạo hoặc chọn hồ sơ tài liệu trước.');const f=new FormData(),sourceFile=state.file,pdfAnalysis=state.pdfAnalysis,picked=$('#job-mode')?.value,mode=isMode(picked)?picked:chosenMode(),ocrPolicy=modeProfile(mode).textOcr;f.set('story_id',sid);f.set('mode',mode);if(state.tab==='file'){if(!sourceFile)throw new Error('Hãy chọn tài liệu.');if(sourceFile.name.toLowerCase().endsWith('.pdf')&&!pdfAnalysis)throw new Error('Hãy đợi phân tích PDF hoàn tất.');f.set('file',sourceFile);if(pdfAnalysis?.mode==='text'){f.set('parsed_text',pdfAnalysis.text);f.set('pdf_pages',String(pdfAnalysis.totalPages));}if(['scan','hybrid'].includes(pdfAnalysis?.mode)){f.set('pdf_mode','scan');f.set('pdf_pages',String(pdfAnalysis.totalPages));}}else f.set('text',$('#source-input').value);const genre=$('#genre').value;e.currentTarget.disabled=true;try{if(genre!==state.stories.find(s=>s.id===sid)?.genre){await api(`/stories/${sid}`,{method:'PATCH',body:{genre}});const story=state.stories.find(s=>s.id===sid);if(story)story.genre=genre;}const j=await api('/jobs',{method:'POST',body:f});state.selected=j.id;if(['scan','hybrid'].includes(pdfAnalysis?.mode)){
-  const {uploadPreparedPdf}=await import('./pdf-client.js');let localOcr=null,localOcrPages=0,fallback='',told=false;
+// A PDF goes page by page when some page is read from its picture: a scan, or a page of text with Han in pictures or
+// outlines (analyzePdf pictured); otherwise its cleaned text layer goes whole (parsed_text).
+const pagewise=analysis=>['scan','hybrid'].includes(analysis?.mode)||analysis?.mode==='text'&&analysis.pictured>0;
+async function uploadJob(e,prepareOnly){const sid=$('#story-select').value;if(!sid)throw new Error('Hãy tạo hoặc chọn hồ sơ tài liệu trước.');const f=new FormData(),sourceFile=state.file,pdfAnalysis=state.pdfAnalysis,picked=$('#job-mode')?.value,mode=isMode(picked)?picked:chosenMode(),ocrPolicy=modeProfile(mode).textOcr;f.set('story_id',sid);f.set('mode',mode);if(state.tab==='file'){if(!sourceFile)throw new Error('Hãy chọn tài liệu.');if(sourceFile.name.toLowerCase().endsWith('.pdf')&&!pdfAnalysis)throw new Error('Hãy đợi phân tích PDF hoàn tất.');f.set('file',sourceFile);if(pdfAnalysis?.mode==='text'&&!pagewise(pdfAnalysis)){f.set('parsed_text',pdfAnalysis.text);f.set('pdf_pages',String(pdfAnalysis.totalPages));}if(pagewise(pdfAnalysis)){f.set('pdf_mode','scan');f.set('pdf_pages',String(pdfAnalysis.totalPages));}if(pdfAnalysis?.notes?.length)f.set('notes',JSON.stringify(pdfAnalysis.notes));}else f.set('text',$('#source-input').value);const genre=$('#genre').value;e.currentTarget.disabled=true;try{if(genre!==state.stories.find(s=>s.id===sid)?.genre){await api(`/stories/${sid}`,{method:'PATCH',body:{genre}});const story=state.stories.find(s=>s.id===sid);if(story)story.genre=genre;}const j=await api('/jobs',{method:'POST',body:f});state.selected=j.id;if(pagewise(pdfAnalysis)){
+  const {uploadPreparedPdf,readPictureText,scanReading}=await import('./pdf-client.js');let localOcr=null,localOcrPages=0,fallback='',told=false;
   // Same on-device OCR (0 token) used by the student workspace: skip Gemini for pages a local pass
   // can already read confidently. Math/formula-heavy pages stay low-confidence and still go to Gemini.
   // When Tesseract reads in place of PaddleOCR, the progress line says why once, then names Tesseract on each page.
   try{
    await uploadPreparedPdf(sourceFile,pdfAnalysis,async(item,page,total)=>{
-    const pageForm=new FormData();pageForm.set('page',String(page));pageForm.set('total',String(total));
-    if(item.kind==='text'){pageForm.set('text',item.text);await api(`/jobs/${j.id}/pdf-page`,{method:'POST',body:pageForm});return;}
-    const image=()=>pageForm.set('image',item.blob,`page-${page}.${item.blob.type==='image/webp'?'webp':'jpg'}`);
-    if(ocrPolicy==='gemini'){image();await api(`/jobs/${j.id}/pdf-page`,{method:'POST',body:pageForm});return;}
+    const pageForm=new FormData(),send=()=>api(`/jobs/${j.id}/pdf-page`,{method:'POST',body:pageForm});pageForm.set('page',String(page));pageForm.set('total',String(total));
+    // A page taken from its text layer, which the browser cleaned from each line's place: the server keeps its lines.
+    if(item.kind==='text'&&!item.regions){pageForm.set('text',item.text);pageForm.set('cleaned','1');await send();return;}
+    // A page image for Gemini to read. A page whose PDF gave a text layer as well (a searchable scan, a stamp over a
+    // scan, a page of text with Han in pictures) sends that layer along: the server weighs the reading against it.
+    const image=()=>{pageForm.set('image',item.blob,`page-${page}.${item.blob.type==='image/webp'?'webp':'jpg'}`);if(item.reclassified||item.regions)pageForm.set('hint',JSON.stringify({text:item.text,reason:item.reclassified||'pictured'}));};
+    if(ocrPolicy==='gemini'){image();await send();return;}
     if(!localOcr){const [engine,policy]=await Promise.all([import('./local-ocr.js'),import('./ocr-policy.js')]);localOcr={...engine,...policy};}
+    if(item.kind==='text'){
+     // Han in pictures or outlines on a page of text, read on the device and set where it stands; a region the device
+     // cannot read sends the page to Gemini. PaddleOCR's reading of letters or digits alone says a region holds no
+     // Chinese (an English label, a formula); Tesseract's is not sure (readPictureText).
+     const read=await readPictureText(item,async blob=>{const assessment=await localOcr.recognizeChinesePage(blob);fallback||=assessment.fallbackReason||'';return {text:assessment.text,sure:assessment.engine==='paddle'};},page);
+     if(read.note)image();else{pageForm.set('text',read.text);pageForm.set('cleaned','1');localOcrPages++;}
+     await send();return;
+    }
     const assessment=await localOcr.recognizeChinesePage(item.blob);fallback||=assessment.fallbackReason||'';
     if(localOcr.shouldUseGeminiOcr(ocrPolicy,assessment))image();
-    else{pageForm.set('text',assessment.text);localOcrPages++;}
-    await api(`/jobs/${j.id}/pdf-page`,{method:'POST',body:pageForm});
+    // A scan under its own OCR text or a stamp keeps that layer where the device read clearly fewer Han (scanReading).
+    else{const merged=scanReading(item,assessment.text,page);pageForm.set('text',merged.text);if(merged.note)pageForm.set('note',merged.note);localOcrPages++;}
+    await send();
    },(page,total,kind)=>{const notice=kind==='scan'&&fallback&&!told?localOcr.fallbackNotice(fallback):'';told||=Boolean(notice);toast(`Đang chuẩn bị PDF · ${page}/${total} trang · ${kind!=='scan'?'lớp chữ':ocrPolicy==='gemini'?'ảnh trang để Gemini đọc':notice?`kiểm tra OCR cục bộ. ${notice}`:`kiểm tra OCR cục bộ${fallback?' bằng Tesseract':''}`}`);});
    if(localOcrPages)toast(`Đã nhận dạng cục bộ ${localOcrPages} trang${fallback?' bằng Tesseract':''} (0 token Gemini); các trang còn lại sẽ OCR bằng Gemini khi dịch.`);
   }finally{if(localOcr)await localOcr.terminateLocalOcr().catch(()=>{});}

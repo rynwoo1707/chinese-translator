@@ -84,26 +84,27 @@ test('Textbook pedagogical labels stay consistent even outside the Math genre',a
  assert.equal(payload.glossary['定理'],TEXTBOOK_GLOSSARY['定理']);assert.equal(payload.glossary['练习'],TEXTBOOK_GLOSSARY['练习']);
 });
 
-test('translateAndVerify repairs a paragraph that lost its citation marker, shared by admin and study engines',async t=>{
+test('translateAndVerify corrects only the paragraph that lost its citation marker, in the one correction request admin and study engines share',async t=>{
  const calls=[];t.mock.method(globalThis,'fetch',async(url,options)=>{const body=JSON.parse(options.body),payload=JSON.parse(body.contents[0].parts[0].text);calls.push({url,payload});
-  const value=calls.length===1?{translation:'Đoạn đầu.\n\nSử liệu ghi chép.',contextUpdate:'',glossaryUpdates:{}}:{translation:'Sử liệu ghi chép [12].'};
+  const value=calls.length===1?{translation:'Đoạn đầu.\n\nSử liệu ghi chép.',contextUpdate:'',glossaryUpdates:{}}:{items:[{id:'d1',translation:'Sử liệu ghi chép [12].'}]};
   return Response.json({usageMetadata:{promptTokenCount:10,candidatesTokenCount:8,totalTokenCount:18},candidates:[{finishReason:'STOP',content:{parts:[{text:JSON.stringify(value)}]}}]});
  });
  const env={GEMINI_API_KEY:'test',GEMINI_MODEL:'gemini-2.5-flash-lite'};
  const result=await translateAndVerify(env,`${'甲'.repeat(160)}\n\n史料记载[12]。`,{context:'',genre:'Khác',glossary:'{}'});
- assert.equal(calls.length,2);assert.equal(result.repairScope,'partial');assert.equal(result.translation,'Đoạn đầu.\n\nSử liệu ghi chép [12].');assert.equal(result.warnings.length,0);assert.equal(result.usage.total,36);
+ assert.equal(calls.length,2);assert.deepEqual(calls[1].payload.items,[{id:'d1',source:'史料记载[12]。',draft:'Sử liệu ghi chép.',missingNumbers:['[12]']}]);
+ assert.equal(result.repairScope,'partial');assert.equal(result.translation,'Đoạn đầu.\n\nSử liệu ghi chép [12].');assert.equal(result.warnings.length,0);assert.equal(result.usage.total,36);
 });
 
-test('translateAndVerify falls back to a full retry only for short unaligned passages',async t=>{
- let calls=0;t.mock.method(globalThis,'fetch',async()=>{calls++;const translation=calls===1?'Bản dịch thiếu dẫn chứng.':'Bản dịch có dẫn chứng [12].';return Response.json({candidates:[{finishReason:'STOP',content:{parts:[{text:JSON.stringify({translation,contextUpdate:'',glossaryUpdates:{}})}]}}]});});
+test('translateAndVerify corrects a short passage that lost its citation marker in place, never translating it again',async t=>{
+ const sent=[];t.mock.method(globalThis,'fetch',async(url,options)=>{const payload=JSON.parse(JSON.parse(options.body).contents[0].parts[0].text);sent.push(payload);const value=payload.items?{items:[{id:'d1',translation:'Bản dịch có dẫn chứng [12].'}]}:{translation:'Bản dịch thiếu dẫn chứng.',contextUpdate:'',glossaryUpdates:{}};return Response.json({candidates:[{finishReason:'STOP',content:{parts:[{text:JSON.stringify(value)}]}}]});});
  const result=await translateAndVerify({GEMINI_API_KEY:'test'},'原文[12]。',{context:'',genre:'Khác',glossary:'{}'});
- assert.equal(calls,2);assert.equal(result.repairScope,'full');assert.match(result.translation,/\[12\]/);assert.equal(result.warnings.length,0);
+ assert.equal(sent.length,2);assert.equal(sent[1].items[0].draft,'Bản dịch thiếu dẫn chứng.');assert.equal(result.repairScope,'partial');assert.match(result.translation,/\[12\]/);assert.equal(result.warnings.length,0);
 });
 
-test('translateAndVerify skips the repair pass entirely when allowRepair is false, to save tokens for an already-trusted model',async t=>{
+test('translateAndVerify skips the correction entirely when allowRepair is false, and names what is missing',async t=>{
  let calls=0;t.mock.method(globalThis,'fetch',async()=>{calls++;return Response.json({candidates:[{finishReason:'STOP',content:{parts:[{text:JSON.stringify({translation:'Bản dịch thiếu dẫn chứng.',contextUpdate:'',glossaryUpdates:{}})}]}}]});});
  const result=await translateAndVerify({GEMINI_API_KEY:'test'},'原文[12]。',{context:'',genre:'Khác',glossary:'{}'},{allowRepair:false});
- assert.equal(calls,1);assert.equal(result.repairScope,'none');assert.match(result.warnings.join(' '),/\[12\]/);
+ assert.equal(calls,1);assert.equal(result.repairScope,'none');assert.deepEqual(result.warnings,['Đoạn 1: thiếu số hoặc dẫn chứng: [12]']);
 });
 
 test('missingTranslationMarkers detects dropped footnote numbers and years',()=>{

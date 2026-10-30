@@ -214,7 +214,7 @@ test('Long TXT passes upload, translates all chunks, and retains full content ou
  assert.equal(job.prompt_version,PROMPT_VERSION);assert.equal(job.model,'gemini-2.5-flash');assert.ok(job.ai_requests>0);assert.equal(job.total_tokens,job.ai_requests*200);
 });
 
-test('Admin book pipeline repairs a dropped citation marker before marking review, same as the study workspace',async t=>{
+test('Admin book pipeline corrects a dropped citation marker in place before marking review, same as the study workspace',async t=>{
  const source='原文[12]。',objects=new Map();let job;
  const env={ADMIN_TOKEN:'test-admin-token-0123456789abcdef',GEMINI_API_KEY:'test',DB:{prepare(sql){return {bind(...args){this.args=args;return this;},async first(){return sql.includes('FROM jobs')?job:{id:'story',context:'',genre:'Khác',glossary:'{}'};},async run(){
   if(sql.startsWith('INSERT INTO jobs')){const [id,story_id,filename,file_key,mime,source,source_key]=this.args;job={id,story_id,filename,file_key,mime,source,source_key,warnings:'[]'};}
@@ -223,12 +223,12 @@ test('Admin book pipeline repairs a dropped citation marker before marking revie
  }};}},FILES:{async put(key,value){objects.set(key,value);},async get(key){const value=objects.get(key);return value===undefined?null:{text:async()=>value,json:async()=>JSON.parse(value)};}}};
  const form=new FormData();form.set('story_id','story');form.set('file',new File([source],'short.txt'));
  const response=await worker.fetch(new Request('https://test/api/jobs',{method:'POST',headers:{Authorization:`Bearer test-admin-token-0123456789abcdef`},body:form}),env,{});assert.equal(response.status,201);
- let calls=0;t.mock.method(globalThis,'fetch',async()=>{calls++;const translation=calls===1?'Bản dịch thiếu dẫn chứng.':'Bản dịch có dẫn chứng [12].';return Response.json({usageMetadata:{promptTokenCount:10,candidatesTokenCount:8,totalTokenCount:18},candidates:[{finishReason:'STOP',content:{parts:[{text:JSON.stringify({translation,contextUpdate:'',glossaryUpdates:{}})}]}}]});});
+ let calls=0;t.mock.method(globalThis,'fetch',async()=>{calls++;const value=calls===1?{translation:'Bản dịch thiếu dẫn chứng.',contextUpdate:'',glossaryUpdates:{}}:{items:[{id:'d1',translation:'Bản dịch có dẫn chứng [12].'}]};return Response.json({usageMetadata:{promptTokenCount:10,candidatesTokenCount:8,totalTokenCount:18},candidates:[{finishReason:'STOP',content:{parts:[{text:JSON.stringify(value)}]}}]});});
  for(let n=0;n<10&&job.status!=='review';n++)await processJob(job.id,env);
  assert.equal(calls,2);assert.equal(job.status,'review');assert.match(job.translation,/\[12\]/);assert.deepEqual(JSON.parse(job.warnings),[]);
 });
 
-test('A configured GEMINI_QUALITY_MODEL is used only for the repair retry, never for routine translation',async t=>{
+test('A configured GEMINI_QUALITY_MODEL makes only the correction of a part, never the routine translation',async t=>{
  const source='原文[12]。',objects=new Map();let job;
  const env={ADMIN_TOKEN:'test-admin-token-0123456789abcdef',GEMINI_API_KEY:'test',GEMINI_MODEL:'gemini-2.5-flash',GEMINI_QUALITY_MODEL:'gemini-3.0-pro',DB:{prepare(sql){return {bind(...args){this.args=args;return this;},async first(){return sql.includes('FROM jobs')?job:{id:'story',context:'',genre:'Khác',glossary:'{}'};},async run(){
   if(sql.startsWith('INSERT INTO jobs')){const [id,story_id,filename,file_key,mime,source,source_key]=this.args;job={id,story_id,filename,file_key,mime,source,source_key,warnings:'[]'};}
@@ -237,7 +237,7 @@ test('A configured GEMINI_QUALITY_MODEL is used only for the repair retry, never
  }};}},FILES:{async put(key,value){objects.set(key,value);},async get(key){const value=objects.get(key);return value===undefined?null:{text:async()=>value,json:async()=>JSON.parse(value)};}}};
  const form=new FormData();form.set('story_id','story');form.set('file',new File([source],'short.txt'));
  const response=await worker.fetch(new Request('https://test/api/jobs',{method:'POST',headers:{Authorization:`Bearer test-admin-token-0123456789abcdef`},body:form}),env,{});assert.equal(response.status,201);
- const models=[];t.mock.method(globalThis,'fetch',async(endpoint)=>{models.push(endpoint);const translation=models.length===1?'Bản dịch thiếu dẫn chứng.':'Bản dịch có dẫn chứng [12].';return Response.json({usageMetadata:{promptTokenCount:10,candidatesTokenCount:8,totalTokenCount:18},candidates:[{finishReason:'STOP',content:{parts:[{text:JSON.stringify({translation,contextUpdate:'',glossaryUpdates:{}})}]}}]});});
+ const models=[];t.mock.method(globalThis,'fetch',async(endpoint)=>{models.push(endpoint);const value=models.length===1?{translation:'Bản dịch thiếu dẫn chứng.',contextUpdate:'',glossaryUpdates:{}}:{items:[{id:'d1',translation:'Bản dịch có dẫn chứng [12].'}]};return Response.json({usageMetadata:{promptTokenCount:10,candidatesTokenCount:8,totalTokenCount:18},candidates:[{finishReason:'STOP',content:{parts:[{text:JSON.stringify(value)}]}}]});});
  for(let n=0;n<10&&job.status!=='review';n++)await processJob(job.id,env);
  assert.equal(models.length,2);assert.match(models[0],/gemini-2\.5-flash/);assert.match(models[1],/gemini-3\.0-pro/);assert.equal(job.status,'review');assert.match(job.translation,/\[12\]/);
 });

@@ -138,7 +138,7 @@ test('Every model id of a thinking family gets the bound: dated, preview and -00
  assert.equal(thinkingConfigFor('gemini-2.0-flash','minimal'),null);assert.equal(thinkingConfigFor('gemini-3.6-flash','default'),null);assert.equal(thinkingConfigFor('gemini-30-flash','minimal'),null);
 });
 
-test('Every billed attempt counts: a malformed answer retried, a blocked or cut-off answer, and failed repairs',async t=>{
+test('Every billed attempt counts: a malformed answer retried, a blocked or cut-off answer, and a failed correction, which keeps the first translation',async t=>{
  let {calls}=gemini(t,[answer('not json at all'),answer({ok:true})]);
  assert.deepEqual((await generate(env,[{text:'x'}],'i')).__usage,{prompt:20,output:10,thinking:0,total:30,requests:2,cacheHits:0});assert.equal(calls.length,2);
  gemini(t,[answer('{broken')]);let error=await rejected(generate(env,[{text:'x'}],'i'));
@@ -153,15 +153,21 @@ test('Every billed attempt counts: a malformed answer retried, a blocked or cut-
  gemini(t,[answer(translation('Phần một.')),answer('',{finishReason:'SAFETY',usage:{promptTokenCount:50,totalTokenCount:50}})]);
  error=await rejected(translate(env,'甲'.repeat(9000)+'。\n'+'乙'.repeat(3000)+'。',{genre:'',glossary:'{}'}));
  assert.equal(error.finishReason,'SAFETY');assert.deepEqual(error.usage,{prompt:60,output:5,thinking:0,total:65,requests:2,cacheHits:0});
- // A repair that comes back empty keeps the first translation, and its tokens.
+ // A correction that comes back without its items keeps the first translation, and its tokens.
  const source='第一段的内容比较长，包含很多文字和说明。\n\n第二段[12]。';
  gemini(t,[answer(translation('Đoạn một có nội dung khá dài.\n\nĐoạn hai.')),answer({translation:''})]);
  const repaired=await translateAndVerify(env,source,{genre:'',glossary:'{}'});
- assert.equal(repaired.repairScope,'partial');assert.match(repaired.warnings.join(' '),/không hiệu đính được/u);assert.deepEqual(repaired.usage,{prompt:20,output:10,thinking:0,total:30,requests:2,cacheHits:0});
- // A full retry that fails reports the first translation's tokens and its own.
+ assert.equal(repaired.repairScope,'partial');assert.match(repaired.warnings.join(' '),/Không hiệu đính được/u);assert.deepEqual(repaired.usage,{prompt:20,output:10,thinking:0,total:30,requests:2,cacheHits:0});
+ // A correction Gemini refuses keeps the first translation too, with the tokens of both calls: what was translated and
+ // paid for is never thrown away for the sake of one marker.
  gemini(t,[answer(translation('Sử liệu ghi chép.')),answer('',{finishReason:'RECITATION',usage:{promptTokenCount:40,totalTokenCount:40}})]);
+ const refused=await translateAndVerify(env,'史料记载[12]。',{genre:'',glossary:'{}'});
+ assert.equal(refused.translation,'Sử liệu ghi chép.');assert.deepEqual(refused.usage,{prompt:50,output:5,thinking:0,total:55,requests:2,cacheHits:0});
+ assert.deepEqual(refused.warnings,['Không hiệu đính được các đoạn cần sửa; bản dịch đầu tiên vẫn được giữ.','Đoạn 1: thiếu số hoặc dẫn chứng: [12]']);
+ // A translation that fails reports what it spent to the browser.
+ gemini(t,[answer('',{finishReason:'RECITATION',usage:{promptTokenCount:40,totalTokenCount:40}})]);
  error=await rejected(translateAndVerify(env,'史料记载[12]。',{genre:'',glossary:'{}'}));
- assert.equal(error.finishReason,'RECITATION');assert.deepEqual(error.usage,{prompt:50,output:5,thinking:0,total:55,requests:2,cacheHits:0});
+ assert.equal(error.finishReason,'RECITATION');assert.deepEqual(error.usage,{prompt:40,output:0,thinking:0,total:40,requests:1,cacheHits:0});
  assert.deepEqual((await errorResponse(error).json()).usage,error.usage,'the browser receives what was spent');
 });
 

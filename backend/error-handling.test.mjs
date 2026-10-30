@@ -37,6 +37,33 @@ test('Database errors never reach the browser; a missing migration is named as s
  assert.equal(production.code,'schema_outdated');assert.match(production.error,/chưa được cập nhật/u);assert.doesNotMatch(production.error,/disabled_at|npm/u);
  const local=await (await worker.fetch(new Request('http://127.0.0.1:8787/api/library'),{DB:failingDatabase(schema)},{})).json();
  assert.match(local.error,/npm run db:local/u);assert.equal(lines.length,4);
+ // A write naming a column the database lacks (D1's text, and SQLite's own without the D1_ERROR prefix) is the same case.
+ for(const text of ['D1_ERROR: table study_sessions has no column named engine: SQLITE_ERROR','table study_sessions has no column named engine']){
+  const response=await worker.fetch(new Request(origin+'/api/library'),{DB:failingDatabase(new Error(text))},{}),body=await response.json();
+  assert.equal(response.status,500,text);assert.equal(body.code,'schema_outdated',text);assert.match(body.error,/^Cơ sở dữ liệu chưa được cập nhật lên phiên bản mới\. Hãy báo quản trị viên, kèm mã /u);assert.doesNotMatch(body.error,/study_sessions|engine|npm|start\.cmd/u);
+ }
+ // On the machine running the app it is the local database, and the answer says what updates it.
+ const write=await (await worker.fetch(new Request('http://127.0.0.1:8787/api/library'),{DB:failingDatabase(new Error('D1_ERROR: table study_sessions has no column named engine: SQLITE_ERROR'))},{})).json();
+ assert.match(write.error,/^Cơ sở dữ liệu cục bộ chưa cập nhật: hãy tắt Hoa Trí rồi chạy start\.cmd \(hoặc npm run db:local rồi khởi động lại\)\. Mã [\w-]+\.$/u);assert.ok(write.error.includes(write.ray));
+ assert.equal(lines.length,7);
+});
+
+test('A database at migration 0024 answers a save and the history list with schema_outdated, never internal',async t=>{
+ // node:sqlite's "experimental" warning is printed once it loads, before the log is captured.
+ const {sqliteEnvironment,signedIn}=await import('./test-support/sqlite-d1.mjs');await new Promise(resolve=>setImmediate(resolve));
+ const lines=capture(t),{sqlite,env}=sqliteEnvironment(t,{before:'0025'}),{cookie}=await signedIn(sqlite);
+ assert.ok(!sqlite.prepare('PRAGMA table_info(study_sessions)').all().some(column=>column.name==='engine'));
+ const id='3f2b8a10-4c5d-4e6f-8a7b-9c0d1e2f3a4b',save={id,title:'Thử lưu',filename:'',domain:'math',mode:'economy',state:{source:'第一章 测试',parts:['第一章 测试'],translationParts:[],done:0}};
+ for(const base of ['http://127.0.0.1:8787','https://hoa-tri.example']){
+  const call=(method,body)=>worker.fetch(new Request(base+'/api/my/study/history',{method,headers:{Cookie:cookie,Origin:base,...(body?{'Content-Type':'application/json'}:{})},...(body?{body:JSON.stringify(body)}:{})}),env,{});
+  for(const [label,response] of [['save',await call('POST',save)],['list',await call('GET')]]){
+   const body=await response.json();assert.equal(response.status,500,label);assert.equal(body.code,'schema_outdated',`${label}: ${body.error}`);
+   if(base.startsWith('http://127'))assert.match(body.error,/^Cơ sở dữ liệu cục bộ chưa cập nhật: hãy tắt Hoa Trí rồi chạy start\.cmd/u,label);
+   else assert.doesNotMatch(body.error,/start\.cmd|npm|engine/u,label);
+  }
+ }
+ assert.equal(sqlite.prepare('SELECT COUNT(*) AS n FROM study_sessions').get().n,0);assert.equal(env.FILES.keys('study/').length,0,'nothing kept for a save that failed');
+ assert.ok(lines.length>=4&&lines.every(line=>JSON.parse(line).event==='api_error'));
 });
 
 test('User errors keep their message and status; malformed JSON gets one clear message',async t=>{

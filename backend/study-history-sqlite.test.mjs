@@ -5,7 +5,7 @@ import {readdirSync,readFileSync} from 'node:fs';
 import {fileURLToPath} from 'node:url';
 import {studyHistoryRoute,placeBookPart} from './study-history.js';
 import {pdfLayoutRoute} from './pdf-layout.js';
-import {isMode} from '../frontend/translation-modes.js';
+import {isMode,LAYOUT_VERSION} from '../frontend/translation-modes.js';
 
 const reader={id:'student-sqlite',name:'Lan'},historyBase='/api/my/study/history';
 const assetId='11111111-1111-4111-8111-111111111111';
@@ -95,9 +95,9 @@ test('A formula whose machine text holds a $ is kept as written in the saved tex
 const other={id:'student-other',name:'Minh'},png='data:image/png;base64,AA==',SHA_A='a'.repeat(64),SHA_B='b'.repeat(64);
 let assetCounter=0;
 const addReader=(sqlite,user)=>sqlite.prepare('INSERT INTO reader_users(id,google_sub,email,name) VALUES(?,?,?,?)').run(user.id,`sub-${user.id}`,`${user.id}@example.test`,user.name);
-async function pdfRange(env,pages,{owner=reader,sha256=SHA_A,totalPages=40,filename='toan-tap-1.pdf'}={}){
+async function pdfRange(env,pages,{owner=reader,sha256=SHA_A,totalPages=40,filename='toan-tap-1.pdf',stamp,refreshedFrom}={}){
  const assetId=`22222222-2222-4222-8222-${String(++assetCounter).padStart(12,'0')}`;
- const manifest={version:1,totalPages,sourceSha256:sha256,pages:pages.map(number=>({number,width:600,height:800,original:png,background:png,blocks:[{id:`p${number}-b0`,source:`第${number}页：向量的概念。`,box:[20,20,200,80],fontSize:12}]}))};
+ const manifest={version:1,totalPages,sourceSha256:sha256,...(stamp!==undefined?{extractionVersion:stamp}:{}),...(refreshedFrom?{refreshedFrom}:{}),pages:pages.map(number=>({number,width:600,height:800,original:png,background:png,blocks:[{id:`p${number}-b0`,source:`第${number}页：向量的概念。`,box:[20,20,200,80],fontSize:12}]}))};
  await env.FILES.put(`study/${owner.id}/pdf-layout/${assetId}/manifest.json`,JSON.stringify(manifest));
  const parts=manifest.pages.map(page=>page.blocks[0].source);
  return {assetId,body:(extra={})=>({title:'Toán 1',filename,domain:'math',...extra,state:{source:parts.join('\n\n'),parts,translationParts:parts.map((_,i)=>`Trang ${pages[i]}: khái niệm vectơ.`),done:parts.length,glossary:{},manualGlossary:{},...extra.state,pdfLayout:{assetId}}})};
@@ -209,6 +209,132 @@ test('A redone range replaces its old part, and a draft keeps the book it was st
  const foreignBook=(await save(env,(await pdfRange(env,[1],{owner:other})).body(),{owner:other})).libraryStoryId,sessions=sqlite.prepare('SELECT COUNT(*) AS count FROM study_sessions').get().count;
  assert.equal((await save(env,(await pdfRange(env,[6])).body({bookId:foreignBook}))).http,404);assert.equal(sqlite.prepare('SELECT COUNT(*) AS count FROM study_sessions').get().count,sessions);
  assert.deepEqual(sqlite.prepare('PRAGMA foreign_key_check').all(),[]);
+});
+
+// "Cập nhật bố cục" of a part an older extractor read, as the library sees it: the part is marked until the refreshed
+// range replaces it, the refreshed draft is named with what it still has to translate, the old PDF stays until the new
+// export succeeds, and the book never gets the pages twice.
+test('A refreshed layout takes over its part once complete, from any device; the old PDF stays linked until its own export, and the books list says which parts are older',async t=>{
+ const {sqlite,env}=environment(t),renderPath='/api/my/study/pdf-layout/render',chapter=id=>sqlite.prepare('SELECT * FROM chapters WHERE id=?').get(id),pdfKey=asset=>`study/${reader.id}/pdf-layout/${asset}/translated.pdf`;
+ t.mock.method(globalThis,'fetch',async()=>Response.json({pdfBase64:btoa('%PDF-1.7\nVietnamese'),report:[]}));
+ const render=(assetId,historyId)=>pdfLayoutRoute(request(renderPath,{assetId,historyId}),env,renderPath,reader);
+ const older=await pdfRange(env,[4,5,6],{stamp:2}),first=await save(env,older.body()),bookId=first.libraryStoryId,chapterId=first.libraryChapterId,next=await save(env,(await pdfRange(env,[7],{stamp:LAYOUT_VERSION})).body({bookId}));
+ assert.equal((await render(older.assetId,first.id)).status,200);assert.equal(chapter(chapterId).file_key,pdfKey(older.assetId));
+ const part=async id=>(await books(env))[0].parts.find(item=>item.id===id);
+ assert.deepEqual([sessionRow(sqlite,first.id).layout_version,sessionRow(sqlite,next.id).layout_version],[2,LAYOUT_VERSION],'each save records its layout\'s stamp');
+ let shown=await part(chapterId);assert.deepEqual([shown.layoutVersion,shown.layoutOutdated,shown.oldPdf,shown.refresh],[2,true,false,null]);
+ shown=await part(next.libraryChapterId);assert.deepEqual([shown.layoutVersion,shown.layoutOutdated,shown.oldPdf],[LAYOUT_VERSION,false,false]);
+ // A part saved before migration 0027 has no stamp: older. A text part has no layout to refresh.
+ sqlite.prepare('UPDATE study_sessions SET layout_version=NULL WHERE id=?').run(first.id);shown=await part(chapterId);assert.deepEqual([shown.layoutVersion,shown.layoutOutdated],[null,true]);
+ // Exporting it again records the stamp it was drawn from.
+ assert.equal((await render(older.assetId,first.id)).status,200);assert.equal(sessionRow(sqlite,first.id).layout_version,2);
+ // Refreshed in this tab: a draft naming the part it will take over, with one block of three translated so far.
+ const refreshed=await pdfRange(env,[4,5,6],{stamp:LAYOUT_VERSION}),draft=await save(env,refreshed.body({bookId,replaceChapterId:chapterId,state:{done:1,translationParts:['Trang 4: khái niệm vectơ.','','']}}));
+ assert.equal(draft.http,201);assert.deepEqual([sessionRow(sqlite,draft.id).replaces_chapter_id,sessionRow(sqlite,draft.id).library_chapter_id],[chapterId,null]);
+ shown=await part(chapterId);assert.deepEqual([shown.sessionId,shown.layoutOutdated,shown.refresh],[first.id,true,{sessionId:draft.id,blocks:2}]);
+ const listed=await (await studyHistoryRoute(new Request('https://example.test'+historyBase),env,historyBase,reader)).json();assert.equal(listed.find(row=>row.id===draft.id).replaces_chapter_id,chapterId);
+ // Finished on another device, whose page never knew which part it replaces: it still takes that part over.
+ const done=await save(env,refreshed.body({bookId}),{id:draft.id});
+ assert.equal(done.http,200);assert.equal(done.libraryChapterId,chapterId);assert.deepEqual(chaptersOf(sqlite,bookId).map(c=>c.id),[chapterId,next.libraryChapterId],'replaced, not added');
+ assert.deepEqual([sessionRow(sqlite,first.id).library_chapter_id,sessionRow(sqlite,draft.id).replaces_chapter_id],[null,null]);
+ // Until its own export the part keeps the old PDF: the book and its download never fall back to the original pages.
+ assert.deepEqual([chapter(chapterId).file_key,chapter(chapterId).mime],[pdfKey(older.assetId),'application/pdf']);assert.equal(env.FILES.values.has(pdfKey(older.assetId)),true);
+ shown=await part(chapterId);assert.deepEqual([shown.sessionId,shown.layoutVersion,shown.oldPdf,shown.layoutOutdated,shown.refresh],[draft.id,LAYOUT_VERSION,true,true,null]);
+ // A save of an edit before that export leaves the older PDF where it is too.
+ const edited=refreshed.body({bookId});edited.state.translationParts[2]='Trang 6: sửa tay.';assert.equal((await save(env,edited,{id:draft.id})).http,200);assert.equal(chapter(chapterId).file_key,pdfKey(older.assetId));
+ assert.equal((await render(refreshed.assetId,draft.id)).status,200);
+ assert.deepEqual([chapter(chapterId).file_key,chapter(chapterId).mime],[pdfKey(refreshed.assetId),'application/pdf']);
+ shown=await part(chapterId);assert.deepEqual([shown.oldPdf,shown.layoutOutdated],[false,false]);
+ // Its own PDF out of date after an edit goes as before.
+ edited.state.translationParts[2]='Trang 6: sửa tay lần hai.';assert.equal((await save(env,edited,{id:draft.id})).http,200);assert.deepEqual([chapter(chapterId).file_key,chapter(chapterId).mime],[null,'text/plain']);
+ assert.deepEqual(sqlite.prepare('PRAGMA foreign_key_check').all(),[]);
+});
+
+test('Deleting the range that took a part over before its export keeps the older PDF its own session still names',async t=>{
+ const {sqlite,env}=environment(t),renderPath='/api/my/study/pdf-layout/render',pdfKey=asset=>`study/${reader.id}/pdf-layout/${asset}/translated.pdf`;
+ t.mock.method(globalThis,'fetch',async()=>Response.json({pdfBase64:btoa('%PDF-1.7\nVietnamese'),report:[]}));
+ // R2 lists a folder for its removal.
+ env.FILES.list=async({prefix})=>({objects:[...env.FILES.values.keys()].filter(key=>key.startsWith(prefix)).map(key=>({key})),truncated:false});
+ const older=await pdfRange(env,[4],{stamp:2}),first=await save(env,older.body()),bookId=first.libraryStoryId;
+ assert.equal((await pdfLayoutRoute(request(renderPath,{assetId:older.assetId,historyId:first.id}),env,renderPath,reader)).status,200);
+ const refreshed=await pdfRange(env,[4],{stamp:LAYOUT_VERSION}),taken=await save(env,refreshed.body({bookId,replaceChapterId:first.libraryChapterId}));assert.equal(taken.libraryChapterId,first.libraryChapterId);
+ const remove=async id=>(await studyHistoryRoute(new Request(`https://example.test${historyBase}/${id}`,{method:'DELETE'}),env,`${historyBase}/${id}`,reader)).status;
+ assert.equal(await remove(taken.id),200);assert.equal(env.FILES.values.has(pdfKey(older.assetId)),true,'the older session still shows it when opened');
+ assert.equal(await remove(first.id),200);assert.equal(env.FILES.values.has(pdfKey(older.assetId)),false);
+ assert.deepEqual(sqlite.prepare('PRAGMA foreign_key_check').all(),[]);
+});
+
+// Parts saved by older code have no file hash anywhere (no source_sha256, no sourceSha256 in the manifest): the refreshed
+// copy names the layout it was made from, and that alone keeps the old PDF until the copy's own export.
+test('A part saved without any file hash keeps its old PDF until its refreshed copy exports its own',async t=>{
+ const {sqlite,env}=environment(t),renderPath='/api/my/study/pdf-layout/render',chapter=id=>({...sqlite.prepare('SELECT file_key,mime FROM chapters WHERE id=?').get(id)}),pdfKey=asset=>`study/${reader.id}/pdf-layout/${asset}/translated.pdf`;
+ t.mock.method(globalThis,'fetch',async()=>Response.json({pdfBase64:btoa('%PDF-1.7\nVietnamese'),report:[]}));
+ const render=(assetId,historyId)=>pdfLayoutRoute(request(renderPath,{assetId,historyId}),env,renderPath,reader);
+ const older=await pdfRange(env,[4,5,6],{stamp:2,sha256:null}),first=await save(env,older.body()),bookId=first.libraryStoryId,chapterId=first.libraryChapterId;
+ assert.equal((await render(older.assetId,first.id)).status,200);assert.equal(sessionRow(sqlite,first.id).source_sha256,null);
+ const refreshed=await pdfRange(env,[4,5,6],{stamp:LAYOUT_VERSION,sha256:null,refreshedFrom:older.assetId});
+ const draft=await save(env,refreshed.body({bookId,replaceChapterId:chapterId,state:{done:1,translationParts:['Trang 4: khái niệm vectơ.','','']}}));
+ assert.equal(sessionRow(sqlite,draft.id).refreshed_from,older.assetId);
+ const listed=await (await studyHistoryRoute(new Request('https://example.test'+historyBase),env,historyBase,reader)).json();assert.equal(listed.find(row=>row.id===draft.id).refreshed_from,older.assetId);
+ // Finished from the history (the page sends no hash) and its export not made yet: the book keeps the old PDF.
+ const done=await save(env,refreshed.body({bookId}),{id:draft.id});assert.equal(done.libraryChapterId,chapterId);
+ assert.deepEqual(chapter(chapterId),{file_key:pdfKey(older.assetId),mime:'application/pdf'},'old PDF stays until the refreshed export succeeds');
+ const shown=(await books(env))[0].parts.find(item=>item.id===chapterId);assert.deepEqual([shown.oldPdf,shown.layoutOutdated],[true,true]);assert.equal('assetId' in shown,false);
+ assert.equal((await render(refreshed.assetId,draft.id)).status,200);assert.deepEqual(chapter(chapterId),{file_key:pdfKey(refreshed.assetId),mime:'application/pdf'});
+});
+
+// A draft of a book refreshed before it was finished (adoptRefreshed names no part: the draft has none yet) and both
+// continued, in two tabs or by a student who ignored the note: the book gets those pages once, whichever finishes first.
+test('A draft and its refreshed copy give their book one part of those pages, whichever finishes first',async t=>{
+ const {sqlite,env}=environment(t),anchor=await save(env,(await pdfRange(env,[1],{stamp:LAYOUT_VERSION,sha256:null})).body()),bookId=anchor.libraryStoryId,partial=n=>({done:1,translationParts:['Trang 4: khái niệm vectơ.',...Array(n-1).fill('')]});
+ const pagesOf=()=>chaptersOf(sqlite,bookId).length;
+ // The copy first: the old draft, finished later, stays complete outside the book.
+ const old=await pdfRange(env,[4,5],{stamp:2,sha256:null}),draft=await save(env,old.body({bookId,state:partial(2)}));
+ const copy=await pdfRange(env,[4,5],{stamp:LAYOUT_VERSION,sha256:null,refreshedFrom:old.assetId}),copied=await save(env,copy.body({bookId,state:partial(2)}));
+ const copyDone=await save(env,copy.body({bookId}),{id:copied.id});assert.ok(copyDone.libraryChapterId);assert.equal(pagesOf(),2);
+ const oldDone=await save(env,old.body({bookId}),{id:draft.id});
+ assert.deepEqual([oldDone.http,oldDone.status,oldDone.libraryChapterId,oldDone.supersededBy],[200,'complete',null,copied.id]);assert.equal(pagesOf(),2,'not added a second time');
+ assert.deepEqual([sessionRow(sqlite,draft.id).library_story_id,sessionRow(sqlite,draft.id).library_chapter_id],[null,null]);
+ // The old draft first: the copy, finished later, takes its part over.
+ const old2=await pdfRange(env,[7,8],{stamp:2,sha256:null}),draft2=await save(env,old2.body({bookId,state:partial(2)}));
+ const copy2=await pdfRange(env,[7,8],{stamp:LAYOUT_VERSION,sha256:null,refreshedFrom:old2.assetId}),copied2=await save(env,copy2.body({bookId,replaceChapterId:'',state:partial(2)}));
+ const old2Done=await save(env,old2.body({bookId}),{id:draft2.id});assert.ok(old2Done.libraryChapterId);assert.equal(pagesOf(),3);
+ const copy2Done=await save(env,copy2.body({bookId}),{id:copied2.id});
+ assert.equal(copy2Done.libraryChapterId,old2Done.libraryChapterId,'replaced, not added');assert.equal(pagesOf(),3);assert.equal(sessionRow(sqlite,draft2.id).library_chapter_id,null);
+ assert.deepEqual(sqlite.prepare('PRAGMA foreign_key_check').all(),[]);
+});
+
+// "Thay phần …" ticked for a draft's first save and unticked before it finishes ("Nếu giữ cả hai…"): the page says so
+// with an empty name, and the old part stays. A page that says nothing (opened from the history) still replaces it.
+test('Unticking Thay phần before a draft finishes keeps both parts',async t=>{
+ const {sqlite,env}=environment(t),old=await save(env,(await pdfRange(env,[4,5])).body()),bookId=old.libraryStoryId,X=old.libraryChapterId;
+ const redo=await pdfRange(env,[4,5,6]),draft=await save(env,redo.body({bookId,replaceChapterId:X,state:{done:1,translationParts:['Trang 4.','','']}}));
+ assert.equal(sessionRow(sqlite,draft.id).replaces_chapter_id,X);
+ const unticked=await save(env,redo.body({bookId,replaceChapterId:'',state:{done:2,translationParts:['Trang 4.','Trang 5.','']}}),{id:draft.id});
+ assert.equal(unticked.http,200);assert.equal(sessionRow(sqlite,draft.id).replaces_chapter_id,null);
+ const done=await save(env,redo.body({bookId,replaceChapterId:''}),{id:draft.id});
+ assert.notEqual(done.libraryChapterId,X);assert.deepEqual(chaptersOf(sqlite,bookId).map(c=>c.id).sort(),[X,done.libraryChapterId].sort());assert.equal(sessionRow(sqlite,old.id).library_chapter_id,X);
+});
+
+// The marks a layout session keeps (frontend/study.js): its hand edits (an empty list too, which says the session records
+// them), blocks that may be hand edits saved before they were recorded (legacy) and the problems of the drafts it holds
+// (review), each for the session's own blocks only; notes are a text session's.
+test('A layout session keeps its edited, legacy and review marks for its own blocks only',async t=>{
+ const {env}=environment(t),range=await pdfRange(env,[4,5]),body=range.body({state:{done:2}}),stored=async id=>JSON.parse(await (await env.FILES.get(`study/${reader.id}/${id}/state.json`)).text());
+ body.state.pdfLayout={assetId:range.assetId,edited:[],legacy:['p4-b0','p9-b0',7],review:{'p5-b0':['rows','bogus','rows'],'p9-b0':['han'],'p4-b0':'han','bad id':['han']}};body.state.notes=['Trang 4 · đoạn 1: còn chữ Hán chưa dịch: 向量'];
+ const saved=await save(env,body),state=await stored(saved.id);
+ assert.deepEqual(state.pdfLayout,{assetId:range.assetId,edited:[],legacy:['p4-b0'],review:{'p5-b0':['rows']}});assert.equal('notes' in state,false);
+});
+
+test('A draft records only a part of its own book to replace; a text translation replacing a layout part leaves no PDF behind',async t=>{
+ const {sqlite,env}=environment(t),first=await save(env,(await pdfRange(env,[1,2])).body()),bookId=first.libraryStoryId,other=await save(env,(await pdfRange(env,[9],{sha256:SHA_B,filename:'khac.pdf'})).body());
+ sqlite.prepare('UPDATE chapters SET file_key=?,mime=? WHERE id=?').run(`study/${reader.id}/pdf-layout/${'3'.repeat(8)}-3333-4333-8333-333333333333/translated.pdf`,'application/pdf',first.libraryChapterId);
+ // A chapter of another book is not recorded (the save that finishes will be told so).
+ const stray=await save(env,(await pdfRange(env,[1,2])).body({bookId,replaceChapterId:other.libraryChapterId,state:{done:0,translationParts:[]}}));assert.equal(stray.http,201);assert.equal(sessionRow(sqlite,stray.id).replaces_chapter_id,null);
+ // Text read in the browser has no PDF to wait for: the replaced part becomes text.
+ const source='第1页：向量的概念。\n\n第2页：向量的概念。',text={title:'Toán 1',filename:'toan-tap-1.pdf',domain:'math',bookId,replaceChapterId:first.libraryChapterId,pageRange:{start:1,end:2,total:40},state:{source,parts:source.split('\n\n'),translationParts:['Trang 1.','Trang 2.'],done:2}};
+ const redone=await save(env,text);assert.equal(redone.http,201);assert.equal(redone.libraryChapterId,first.libraryChapterId);
+ assert.deepEqual([sqlite.prepare('SELECT file_key,mime FROM chapters WHERE id=?').get(first.libraryChapterId)].map(row=>[row.file_key,row.mime]),[[null,'text/plain']]);
 });
 
 test('A first save sent again with its own id updates that session instead of making a second one',async t=>{

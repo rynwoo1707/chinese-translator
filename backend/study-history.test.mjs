@@ -92,3 +92,14 @@ test('renaming completed history changes its private library title without rewri
  await assert.rejects(()=>studyHistoryRoute(jsonRequest(url,'PATCH',{title:'a'.repeat(201)}),env,path,reader),/Tên lịch sử/);
  const restored=await (await studyHistoryRoute(new Request(url),env,path,reader)).json();assert.equal(restored.title,title);assert.equal(restored.state.done,2);assert.doesNotMatch(JSON.stringify(restored),/must-never-be-stored/);
 });
+
+// A text session keeps what the checks still found in its parts (notes: "Trang N · đoạn k: …"), so the session opened
+// again names them (frontend/study.js): strings only, the last 200, each at most 500 characters.
+test('A text session keeps the notes of its parts, bounded; anything else in their place is left out',async()=>{
+ const DB=new MemoryDB(),FILES=new MemoryFiles(),env={DB,FILES},stored=id=>JSON.parse(FILES.values.get(DB.sessions.get(id).state_key).value);
+ const notes=['Trang 1 · đoạn 2: còn chữ Hán chưa dịch: 归乡',7,'',' ',...Array.from({length:205},(_,i)=>`Phần ${i+1}: ${'x'.repeat(600)}`)];
+ const saved=await (await studyHistoryRoute(jsonRequest(base,'POST',{...draft,state:{...draft.state,notes}}),env,'/api/my/study/history',reader)).json(),kept=stored(saved.id).notes;
+ assert.equal(kept.length,200);assert.ok(kept.every(note=>typeof note==='string'&&note.length<=500));assert.match(kept[0],/^Phần 6: x/u);assert.match(kept.at(-1),/^Phần 205: x/u);
+ const other=await (await studyHistoryRoute(jsonRequest(base,'POST',{...draft,state:{...draft.state,notes:'Trang 1: …'}}),env,'/api/my/study/history',reader)).json();
+ assert.equal('notes' in stored(other.id),false);
+});

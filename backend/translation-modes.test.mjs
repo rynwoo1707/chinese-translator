@@ -1,7 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {MODES,DEFAULT_MODE,ADMIN_DEFAULT_MODE,isMode,modeProfile,modeLabel} from '../frontend/translation-modes.js';
+import {MODES,DEFAULT_MODE,ADMIN_DEFAULT_MODE,isMode,modeProfile,modeLabel,rereads,hanLeft,learnedTerm,LAYOUT_VERSION,layoutStamp,untranslatedHan,blockTokens} from '../frontend/translation-modes.js';
 import {OCR_LIMITS} from '../frontend/pdf-box-layout.js';
+import {OCR_KEPT_CODES,OCR_DOUBT_CODES} from './pdf-block-ocr.js';
 import {generate,thinkingConfigFor,thinkingHeadroom} from './ai.js';
 import {studyRoute,studyModelConfig} from './study-translation.js';
 
@@ -18,8 +19,9 @@ function call(path,{method='POST',body,form,env=studyEnv({GEMINI_MODEL:'gemini-3
  return studyRoute(new Request(url,{method,headers:{Cookie:'cat_hien_session=test',Origin:url.origin,...(body?{'Content-Type':'application/json'}:{})},...(body?{body:JSON.stringify(body)}:form?{body:form}:{})}),env,url,url.pathname);
 }
 const ocrForm=(mode,model)=>{const form=new FormData();form.set('apiKey',KEY);if(mode!==undefined)form.set('mode',mode);if(model)form.set('model',model);form.set('image',new File([new Uint8Array([255,216,255,1,2,3])],'page.jpg',{type:'image/jpeg'}));return form;};
-// A layout block answer that passes every check: no Chinese, no digits, about three times the source's length.
-const fluent=(source,index)=>`Vectơ ${String.fromCharCode(97+index%26)}${'ơ'.repeat(Math.floor(index/26))} ${'không '.repeat(Math.ceil(source.length/2))}`.trim();
+// A layout block answer that passes every check: no Chinese, no digits, about three times the source's length, a sentence
+// for each of the source's.
+const fluent=(source,index)=>{const sentences=Math.max(1,(source.match(/[。！？]/gu)||[]).length),words=Math.max(1,Math.ceil(source.length/2/sentences));return Array.from({length:sentences},(_,i)=>`${i?'Khi':`Vectơ ${String.fromCharCode(97+index%26)}${'ơ'.repeat(Math.floor(index/26))}`} ${'không '.repeat(words).trim()}.`).join(' ');};
 
 test('Every mode has the shared profile shape, within the limits the routes and an OCR call enforce',()=>{
  assert.deepEqual(MODES,['economy','balanced','quality','premium']);assert.equal(DEFAULT_MODE,'economy');assert.equal(ADMIN_DEFAULT_MODE,'premium');
@@ -30,10 +32,11 @@ test('Every mode has the shared profile shape, within the limits the routes and 
   assert.ok(profile.label.trim()&&profile.hint.trim(),id);assert.equal(profile.label,profile.label.normalize('NFC'));assert.equal(profile.hint,profile.hint.normalize('NFC'));assert.equal(modeLabel(id),profile.label);
   for(const level of levelsOf(profile))assert.ok(LEVELS.includes(level),`${id}: ${level}`);
   assert.equal(typeof profile.allowRepair,'boolean');assert.equal(typeof profile.strict,'boolean');
-  if(profile.reread!==null){
-   assert.deepEqual(Object.keys(profile.reread).sort(),['doubt','kept','maxPerPage','thinking'],id);
-   assert.equal(typeof profile.reread.kept,'boolean');assert.equal(typeof profile.reread.doubt,'boolean');assert.ok(Number.isInteger(profile.reread.maxPerPage)&&profile.reread.maxPerPage>0,id);
-  }
+  // Every mode reads again what it could not read (a code of OCR_KEPT_CODES, or all) and doubts it names (or all, or none).
+  assert.deepEqual(Object.keys(profile.reread).sort(),['doubt','kept','maxPerPage','thinking'],id);
+  assert.ok(profile.reread.kept===true||Array.isArray(profile.reread.kept)&&profile.reread.kept.length&&profile.reread.kept.every(code=>OCR_KEPT_CODES.includes(code)),id);
+  assert.ok(typeof profile.reread.doubt==='boolean'||Array.isArray(profile.reread.doubt)&&profile.reread.doubt.every(code=>OCR_DOUBT_CODES.includes(code)),id);
+  assert.ok(Number.isInteger(profile.reread.maxPerPage)&&profile.reread.maxPerPage>0,id);
   // translate-blocks takes at most 48 blocks and 8,000 characters a request (pdf-block-translation.js); an OCR call at
   // most OCR_LIMITS. A mode may ask for less, never more.
   assert.ok(Number.isInteger(profile.layoutBatch.chars)&&profile.layoutBatch.chars>=500&&profile.layoutBatch.chars<=8000,id);
@@ -47,9 +50,12 @@ test('Every mode has the shared profile shape, within the limits the routes and 
  }
 });
 
-test('Tiết kiệm is the engine every request used before modes; Kỹ nhất reads and reasons the most',()=>{
+test('Tiết kiệm is the engine every request used before modes, reading again only what it could not read or read short; Kỹ nhất reads and reasons the most',()=>{
  const economy=modeProfile('economy'),premium=modeProfile('premium'),rank=level=>LEVELS.indexOf(level);
- assert.deepEqual({...economy,label:undefined,hint:undefined},{id:'economy',label:undefined,hint:undefined,translateThinking:'minimal',ocrThinking:'minimal',retryThinking:'low',allowRepair:true,strict:false,reread:null,layoutBatch:{chars:5000,blocks:48},ocrBatch:{images:OCR_LIMITS.images,blocks:OCR_LIMITS.sheetBlocks},sheets:'standard',textOcr:'hybrid',textChunk:10000,estimate:1});
+ assert.deepEqual({...economy,label:undefined,hint:undefined},{id:'economy',label:undefined,hint:undefined,translateThinking:'minimal',ocrThinking:'minimal',retryThinking:'low',allowRepair:true,strict:false,reread:{kept:['empty','unread','refused','truncated','malformed'],doubt:['han'],thinking:'low',maxPerPage:2},layoutBatch:{chars:5000,blocks:48},ocrBatch:{images:OCR_LIMITS.images,blocks:OCR_LIMITS.sheetBlocks},sheets:'standard',textOcr:'hybrid',textChunk:10000,estimate:1});
+ // Tiết kiệm leaves a reading kept for its formula or mixed with another strip's text as it is; Kỹ nhất reads every kind again.
+ assert.deepEqual(['empty','formula','mixed'].map(code=>rereads(economy.reread.kept,code)),[true,false,false]);assert.deepEqual(OCR_DOUBT_CODES.map(code=>rereads(economy.reread.doubt,code)),[false,false,false,true]);
+ assert.ok(OCR_KEPT_CODES.every(code=>rereads(premium.reread.kept,code))&&OCR_DOUBT_CODES.every(code=>rereads(premium.reread.doubt,code)));assert.equal(rereads(premium.reread.kept,undefined),false,'nothing to read again');
  assert.equal(premium.sheets,'fine');assert.equal(premium.textOcr,'gemini');assert.equal(premium.strict,true);assert.ok(premium.reread?.kept&&premium.reread.doubt);
  for(const id of MODES){
   const profile=modeProfile(id);
@@ -103,19 +109,19 @@ test('/config keeps its keys and adds premium, the modes the select offers and t
  assert.equal(studyModelConfig({GEMINI_MODEL:'gemini-3.6-flash',GEMINI_PREMIUM_MODEL:'gemini-3.8-flash'}).premium,'gemini-3.8-flash');
 });
 
-test('Kỹ nhất translates text with its own model and more reasoning, and its full retry reasons as much',async t=>{
- const calls=[];t.mock.method(globalThis,'fetch',async(endpoint,options)=>{calls.push({endpoint:String(endpoint),config:JSON.parse(options.body).generationConfig});return reply({translation:calls.length===1?'Bản dịch thiếu dẫn chứng.':'Bản dịch có dẫn chứng [12].',contextUpdate:'',glossaryUpdates:{}});});
+test('Kỹ nhất translates text with its own model and more reasoning, and its one correction reasons as much',async t=>{
+ const calls=[];t.mock.method(globalThis,'fetch',async(endpoint,options)=>{calls.push({endpoint:String(endpoint),config:JSON.parse(options.body).generationConfig});return reply(calls.length===1?{translation:'Bản dịch thiếu dẫn chứng.',contextUpdate:'',glossaryUpdates:{}}:{items:[{id:'d1',translation:'Bản dịch có dẫn chứng [12].'}]});});
  const env=studyEnv({GEMINI_MODEL:'gemini-3.6-flash',GEMINI_PREMIUM_MODEL:'gemini-3.8-flash'});
  const data=await (await call('translate',{env,body:{apiKey:KEY,source:'原文[12]。',mode:'premium'}})).json();
  assert.equal(calls.length,2);assert.match(data.translation,/\[12\]/u);
  assert.match(calls[0].endpoint,/\/gemini-3\.8-flash:generateContent$/u);assert.deepEqual(calls[0].config.thinkingConfig,{thinkingLevel:'medium'});assert.equal(calls[0].config.maxOutputTokens,32768+8192);
- // Without a model chosen in the tab, the retry uses the quality model (GEMINI_MODEL here) at the mode's retry level.
- assert.match(calls[1].endpoint,/\/gemini-3\.6-flash:generateContent$/u);assert.deepEqual(calls[1].config.thinkingConfig,{thinkingLevel:modeProfile('premium').retryThinking});
+ // Without a model chosen in the tab, the correction uses the quality model (GEMINI_MODEL here) at the mode's level.
+ assert.match(calls[1].endpoint,/\/gemini-3\.6-flash:generateContent$/u);assert.deepEqual(calls[1].config.thinkingConfig,{thinkingLevel:modeProfile('premium').translateThinking});
 });
 
-test('Each mode bounds the reasoning of a marker repair as of its translation; Kỹ hơn no longer skips the repair',async t=>{
+test('Each mode bounds the reasoning of its one correction as of its translation; Kỹ hơn no longer skips it',async t=>{
  for(const mode of ['economy','balanced','quality','premium']){
-  const levels=[];t.mock.method(globalThis,'fetch',async(endpoint,options)=>{levels.push(JSON.parse(options.body).generationConfig.thinkingConfig.thinkingLevel);return reply(levels.length===1?{translation:'Đoạn đầu được giữ nguyên.\n\nSử liệu ghi chép.',contextUpdate:'',glossaryUpdates:{}}:{translation:'Sử liệu ghi chép [12].'});});
+  const levels=[];t.mock.method(globalThis,'fetch',async(endpoint,options)=>{levels.push(JSON.parse(options.body).generationConfig.thinkingConfig.thinkingLevel);return reply(levels.length===1?{translation:'Đoạn đầu được giữ nguyên.\n\nSử liệu ghi chép.',contextUpdate:'',glossaryUpdates:{}}:{items:[{id:'d1',translation:'Sử liệu ghi chép [12].'}]});});
   const data=await (await call('translate',{body:{apiKey:KEY,source:`${'甲'.repeat(160)}\n\n史料记载[12]。`,mode}})).json();
   const level=modeProfile(mode).translateThinking;
   assert.deepEqual(levels,[level,level],mode);assert.equal(data.translation,'Đoạn đầu được giữ nguyên.\n\nSử liệu ghi chép [12].',mode);
@@ -155,16 +161,43 @@ test('Kept-layout blocks go in the mode\'s batch, with the mode\'s reasoning; a 
  assert.deepEqual(requests.map(r=>[r.count,r.config.thinkingConfig]),[[48,{thinkingLevel:'minimal'}]]);
 });
 
-test('Kỹ nhất translates a kept-layout block again when Chinese is left in it; Tiết kiệm only warns',async t=>{
- for(const [mode,calls] of [['premium',2],['economy',1]]){
-  const requests=[];
-  t.mock.method(globalThis,'fetch',async(endpoint,options)=>{const ids=JSON.parse(JSON.parse(options.body).contents[0].parts[0].text).blocks.map(block=>block.id);requests.push(ids);return reply({blocks:ids.map(id=>({id,translation:requests.length===1?'Khái niệm 向量 trong không gian và các phép toán.':'Khái niệm vectơ trong không gian và các phép toán.'})),contextUpdate:'',glossaryUpdates:{}});});
-  const data=await (await call('translate-blocks',{body:{apiKey:KEY,mode,partial:true,blocks:[{id:'p1-b0',source:'空间向量的概念与运算。'}]}})).json();
-  assert.equal(requests.length,calls,`${mode}: ${JSON.stringify(data)}`);
-  if(mode==='premium')assert.deepEqual(data.blocks,[{id:'p1-b0',translation:'Khái niệm vectơ trong không gian và các phép toán.'}]);
-  else{assert.deepEqual(data.blocks,[{id:'p1-b0',translation:'Khái niệm 向量 trong không gian và các phép toán.'}]);assert.ok(data.warnings.some(warning=>/chữ Hán/u.test(warning)),JSON.stringify(data.warnings));}
-  t.mock.restoreAll();
+test('Every Cách dịch, Tiết kiệm included, translates a kept-layout block again when Chinese is left in it, and only then',async t=>{
+ for(const mode of MODES){
+  for(const [first,calls] of [['Khái niệm 向量 trong không gian và các phép toán.',2],['Khái niệm vectơ trong không gian và các phép toán.',1]]){
+   const requests=[];
+   t.mock.method(globalThis,'fetch',async(endpoint,options)=>{const ids=JSON.parse(JSON.parse(options.body).contents[0].parts[0].text).blocks.map(block=>block.id);requests.push(ids);return reply({blocks:ids.map(id=>({id,translation:requests.length===1?first:'Khái niệm vectơ trong không gian và các phép toán.'})),contextUpdate:'',glossaryUpdates:{}});});
+   const data=await (await call('translate-blocks',{body:{apiKey:KEY,mode,partial:true,blocks:[{id:'p1-b0',source:'空间向量的概念与运算。'}]}})).json();
+   assert.equal(requests.length,calls,`${mode}: ${JSON.stringify(data)}`);
+   assert.deepEqual(data.blocks,[{id:'p1-b0',translation:'Khái niệm vectơ trong không gian và các phép toán.'}],mode);assert.deepEqual(data.failedBlocks,[],mode);
+   t.mock.restoreAll();
+  }
  }
+ // What every mode allows to stay Chinese: a quoted example, a glossary rendering, a name glossed in parentheses.
+ assert.deepEqual(hanLeft('“的”字表示所属。','Chữ “的” chỉ sở hữu.'),[]);assert.deepEqual(hanLeft('《论语》是经典。','《论语》 là kinh điển.'),['论语'],'a title is translated');
+ assert.deepEqual(hanLeft('张三说。','Trương Tam (张三) nói.'),[]);assert.deepEqual(hanLeft('答案(略)','Đáp án (略)'),['略'],'the source\'s own parenthesis is no gloss');
+ assert.deepEqual(hanLeft('人名','Tên 人名',['Tên 人名']),[]);assert.deepEqual(hanLeft('思考','思考'),['思考']);
+ // Correct translations of any subject that keep characters on purpose: a word list glossing each word after it, a
+ // phonetics exercise listing its characters, a character named as such, a name glossed with its pinyin, a gloss after a
+ // number. None is asked for again.
+ for(const [source,translation] of [['生词：山 shān，水 shuǐ','Từ mới: 山 (sơn – núi), 水 (thủy – nước)'],['生词：山、水、火','Từ mới: 山 (núi), 水 (nước), 火 (lửa)'],['给下列汉字注音：山 水 火','Ghi phiên âm cho các chữ sau: 山, 水, 火'],['山字有三画。','Chữ 山 có ba nét.'],['张三说','Trương Tam (张三, Zhāng Sān) nói'],['练习三','Bài 3 (练习三)']])assert.deepEqual(hanLeft(source,translation),[],translation);
+ // Still named: a word left before the source's own parenthesis, a list the translation reorders, a name left bare.
+ assert.deepEqual(hanLeft('答案（略）','答案 (lược)'),['答案']);assert.deepEqual(hanLeft('给下列汉字注音：山 水 火','Ghi phiên âm: 火, 山, 水'),['火','山','水']);assert.deepEqual(hanLeft('王小明来了。','王小明 đến.'),['王小明']);
+ // Chinese a lesson teaches as language, as text mode allows it (ai.js chineseLeft): the words of a line read aloud in
+ // pinyin, a character the translation names, a name glossed in the other script. Speech in quotes is translated, and a
+ // pinyin line licenses its own words only; a gloss sharing nothing with the source is no gloss.
+ for(const [source,translation] of [['山 shān 山峰','Núi: 山 shān; đỉnh núi: 山峰'],['mā 妈','mā 妈 (mẹ)'],['江：河流。','Chữ 江 có nghĩa là sông.'],['張三說。','Trương Tam (张三) nói.']])assert.deepEqual(hanLeft(source,translation),[],translation);
+ assert.deepEqual(hanLeft('他说：“好。”','Anh ấy nói: “好。”'),['好']);assert.deepEqual(hanLeft('山 shān\n他住在城市。','Núi 山 shān.\nAnh ấy sống ở 城市.'),['城市']);
+ assert.deepEqual(hanLeft('张三说。','Trương Tam (李四) nói.'),['李四']);assert.deepEqual(hanLeft('江河','Sông 江 và sông 河'),['江','河']);
+ // A glossary rendering keeping Chinese (a teacher's, or a name learned as D9 gives it) allows that rendering as written,
+ // never its characters elsewhere: a learned 'Tư Mã Thiên (司马迁)' does not let 司马迁 or 中国人民 stand bare.
+ const learned=['Tư Mã Thiên (司马迁)','Sử ký (史记)','Trung Quốc (中国)','nhân dân (人民)','đại học (大学)'];
+ assert.deepEqual(hanLeft('司马迁写了史记。','Tư Mã Thiên (司马迁) viết Sử ký (史记).',learned),[]);
+ // One rule learns a term in every path (text mode, kept layouts, whole books): a Vietnamese rendering, the Chinese in
+ // parentheses after a reading at most.
+ assert.deepEqual(Object.entries({张三:'Trương Tam (张三)',司马迁:'Tư Mã Thiên (司马迁, Sīmǎ Qiān)',向量:'vectơ',探究:'探究',史景迁:'史景迁 (Sử Cảnh Khiên)',DNA:'DNA',空:' ',人民:'nhân dân 人民'}).filter(([term,value])=>learnedTerm(term,value)).map(([term])=>term),['张三','司马迁','向量']);
+ // What a lesson may keep in a translation is no rendering for every later page: Chinese outside the parentheses never.
+ assert.deepEqual(Object.entries({張三:'Trương Tam (张三)',山:'chữ 山',山字:'chữ 山'}).filter(([term,value])=>learnedTerm(term,value)).map(([term])=>term),['張三']);
+ assert.deepEqual(hanLeft('司马迁写了史记。','司马迁 viết 史记.',learned),['司马迁','史记']);assert.deepEqual(hanLeft('中国人民热爱祖国。','中国人民 yêu tổ quốc.',learned),['中国人民']);assert.deepEqual(hanLeft('国民大学','国民大学',learned),['国民大学']);
 });
 
 test('Text-mode OCR reasons at the mode\'s OCR level, with room for that reasoning',async t=>{
@@ -193,4 +226,17 @@ test('Model discovery knows Kỹ nhất, and a Pro model set for it is never wha
  let data=await ask('gemini-3.8-flash');assert.deepEqual([data.requested,data.selected],['gemini-3.8-flash','gemini-3.8-flash']);
  data=await ask('gemini-3.8-pro');assert.equal(data.requested,'gemini-3.8-pro');assert.equal(data.selected,'gemini-3.6-flash');assert.ok(data.models.every(model=>/-flash/u.test(model.id)));
  await assert.rejects(()=>call('translate',{body:{apiKey:KEY,source:'你好。',mode:'premium',model:'gemini-3.8-pro'}}),/model Gemini Flash/u);
+});
+
+// The extractor stamp a saved layout is compared with: the same number as services/pdf-layout/extract.py, read here so the
+// two never drift (a newer extractor makes "Cập nhật bố cục" offered for the parts read before it).
+test('LAYOUT_VERSION is extract.py EXTRACTION_VERSION; a manifest\'s stamp is its oldest page\'s; untranslated Han and the token estimate',async()=>{
+ const {readFile}=await import('node:fs/promises'),extractor=await readFile(new URL('../services/pdf-layout/extract.py',import.meta.url),'utf8');
+ assert.equal(LAYOUT_VERSION,Number(/^EXTRACTION_VERSION = (\d+)$/mu.exec(extractor)?.[1]),'the same number as the extractor');
+ assert.equal(layoutStamp({extractionVersion:4,pages:[{},{extractionVersion:3}]}),3,'the oldest page counts');assert.equal(layoutStamp({extractionVersion:2,pages:[{},{}]}),2,'pages take the document\'s');
+ assert.equal(layoutStamp({pages:[{}]}),0);assert.equal(layoutStamp({extractionVersion:4,pages:[]}),4);assert.equal(layoutStamp(null),0);
+ assert.equal(untranslatedHan({untranslated:{figure:12,footer:3,unread:0}}),15);assert.equal(untranslatedHan({untranslated:7}),7);
+ for(const page of [{},{untranslated:{}},{untranslated:{figure:0}},{untranslated:{figure:-3,note:'x',other:Number.NaN}},null])assert.equal(untranslatedHan(page),0,JSON.stringify(page));
+ assert.equal(blockTokens({sheets:7,characters:2030,requests:2}),7*1400+3045+1600,'about the owner\'s three refreshed parts, as the plan measured them');assert.equal(blockTokens({}),0);
+ assert.equal(blockTokens({sheets:1},'premium'),Math.round(1400*modeProfile('premium').estimate));assert.equal(blockTokens({sheets:1},'turbo'),1400);
 });
