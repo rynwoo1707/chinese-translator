@@ -26,8 +26,13 @@ const TYPES={'.html':'text/html; charset=utf-8','.js':'text/javascript','.mjs':'
 const PNG='data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8/x8AAwMCAO+ip1sAAAAASUVORK5CYII=';
 const USER={authenticated:true,user:{name:'Học sinh thử',email:'hs@example.com',provider:'local'}};
 const now=()=>new Date().toISOString();
-const hintOf=id=>{const {hint,estimate}=modeProfile(id);return id==='economy'?hint:`${hint} Ước tính tốn khoảng gấp ${estimate.toLocaleString('vi-VN')} lần token so với Tiết kiệm.`;};
-const ADMIN_NOTE='Trình duyệt này đang đăng nhập quản trị nên Cách dịch mặc định là Kỹ nhất.';
+const hintOf=id=>modeProfile(id).brief;
+const ADMIN_NOTE='Mặc định của quản trị: Kỹ nhất.';
+// Cần xem lại: each note is one row (data-note keeps its whole line), as the warnings box held them, one per line.
+// Once nothing is left to send, Bắt đầu dịch is hidden (S54); the run behind it is pressed here all the same, to show
+// that it reads and sends nothing.
+async function pressRun(page){assert.equal(await page.isHidden('#translate'),true,'nothing is left to run, so the button is hidden');await page.$eval('#translate',button=>button.click());}
+const warningsText=page=>page.evaluate(()=>[...document.querySelectorAll('#warnings [data-note]')].map(row=>`${row.dataset.note}\n`).join(''));
 const DOUBT_NOTE='Bản đọc của Gemini cho đoạn này có chỗ đáng ngờ (công thức hoặc chữ có thể sai); hãy đối chiếu với trang gốc.';
 
 // Scanned pages for a kept-layout run: per page, `blocks` blocks with their own image (older manifests) or `sheets`
@@ -125,7 +130,7 @@ const idle=page=>page.waitForFunction(()=>!document.querySelector('#translate').
 // Waits until check() holds on this side (the requests seen); then lets the page handle the answer.
 const until=async(check,ms=15000)=>{for(const end=Date.now()+ms;Date.now()<end;await new Promise(resolve=>setTimeout(resolve,50)))if(check())return new Promise(resolve=>setTimeout(()=>resolve(true),300));return false;};
 const askedAdmin=requests=>requests.some(entry=>entry.path==='/api/admin/session');
-const EXPORTED=/^PDF tiếng Việt đã được lưu vào Thư viện riêng/u;
+const EXPORTED=/^Xong · PDF đã lưu vào Thư viện riêng/u;
 // The second reading as study.js chooses it, checked against the mode's profile: per page at most maxPerPage blocks (the
 // kept ones before any doubtful one), each block once, every call within ocrBatch.
 function checkRereads(account,mode,{exact=null}={}){
@@ -143,7 +148,10 @@ test('Under Cách dịch the chosen mode says what it does and, beside Tiết ki
   assert.deepEqual(await page.evaluate(()=>{const hint=document.querySelector('#mode-hint');return {live:hint.getAttribute('aria-live'),described:document.querySelector('#mode').getAttribute('aria-describedby'),text:hint.textContent,mode:document.querySelector('#mode').value};}),{live:'polite',described:'mode-hint',text:hintOf('economy'),mode:'economy'});
   assert.deepEqual(await page.$$eval('#mode option',options=>options.map(option=>[option.value,option.textContent])),MODES.map(id=>[id,modeLabel(id)]));
   for(const id of [...MODES].reverse()){await page.selectOption('#mode',id);assert.equal(await page.textContent('#mode-hint'),hintOf(id),id);}
-  await page.selectOption('#mode','premium');assert.match(await page.textContent('#mode-hint'),/\. Ước tính tốn khoảng gấp \d+(?:,\d+)? lần token so với Tiết kiệm\.$/u);
+  await page.selectOption('#mode','premium');assert.match(await page.textContent('#mode-hint'),/khoảng \d+(?:,\d+)?× token/u);
+  // The full descriptions, each under its mode's name, are one disclosure away.
+  assert.deepEqual(await page.$$eval('#mode-compare dt',terms=>terms.map(term=>term.textContent)),MODES.map(modeLabel));assert.deepEqual(await page.$$eval('#mode-compare dd',texts=>texts.map(text=>text.textContent)),MODES.map(id=>modeProfile(id).hint));
+  assert.equal(await page.$eval('#mode-compare',details=>details.open),false);
   // On a phone the hint wraps under the field, inside the screen.
   await page.setViewportSize({width:360,height:740});
   const measure=await page.evaluate(()=>{const hint=document.querySelector('#mode-hint').getBoundingClientRect(),select=document.querySelector('#mode').getBoundingClientRect();return {scroll:document.documentElement.scrollWidth,inner:innerWidth,right:hint.right,below:hint.top>=select.bottom,height:hint.height};});
@@ -190,7 +198,7 @@ test('A mode that reads again sends the kept and the doubtful readings once more
    assert.deepEqual(kept.filter(id=>onPage.includes(id)),kept.slice(0,Math.min(kept.length,reread.maxPerPage)),'kept ones first');
   }
   // A kept block read well this time loses its note; one still kept keeps it. The translation took the new readings.
-  const warnings=await page.textContent('#warnings');
+  const warnings=await warningsText(page);
   assert.ok(!warnings.includes(keptNote('p1-b2')),warnings);assert.ok(warnings.includes(keptNote('p1-b6')),warnings);
   // The doubtful readings the page's quota left as they are are named once, since nothing else names them.
   const left=['p1-b3','p1-b5','p1-b8','p2-b1'].filter(id=>!sent.includes(id)).map(id=>id.replace(/^p(\d+)-b(\d+)$/u,'Trang $1 · đoạn $2'));
@@ -200,7 +208,7 @@ test('A mode that reads again sends the kept and the doubtful readings once more
   await page.click('[data-source-block="p1-b3"]');await page.waitForSelector('#hanzi-panel:not([hidden])');
   assert.equal(await page.textContent('#hanzi-panel .hz-note'),DOUBT_NOTE);
   // Nothing is read again on the next Bắt đầu dịch: the OCR of this session is done.
-  const before=account.ocr.length;await page.keyboard.press('Escape');await page.click('#translate');await idle(page);assert.equal(account.ocr.length,before);
+  const before=account.ocr.length;await page.keyboard.press('Escape');await pressRun(page);await idle(page);assert.equal(account.ocr.length,before);
   assert.deepEqual(errors,[]);
  }finally{await context.close();}
  // Tiết kiệm reads again only the block Gemini could not read (p1-b2) and the reading short of its strip's Chinese (p2-b1):
@@ -209,7 +217,7 @@ test('A mode that reads again sends the kept and the doubtful readings once more
  try{
   await pickPdf(plain.page,2);await plain.page.click('#translate');await waitProgress(plain.page,EXPORTED);await idle(plain.page);
   checkRereads(cheap,'economy',{exact:['p1-b2','p2-b1']});
-  const warnings=await plain.page.textContent('#warnings');assert.ok(!warnings.includes(keptNote('p1-b2')),warnings);assert.ok(warnings.includes(keptNote('p1-b6')),warnings);
+  const warnings=await warningsText(plain.page);assert.ok(!warnings.includes(keptNote('p1-b2')),warnings);assert.ok(warnings.includes(keptNote('p1-b6')),warnings);
   assert.deepEqual(plain.errors,[]);
  }finally{await plain.context.close();}
 });
@@ -224,7 +232,7 @@ test('A doubtful block of an OCR sheet is read again with its whole sheet (one i
   await pickPdf(page);await page.selectOption('#mode','premium');await page.click('#translate');await waitProgress(page,EXPORTED);await idle(page);
   const last=[1,2,3].map(i=>`p1-b${4+big+i}`);
   checkRereads(account,'premium',{exact:['p1-b1','p1-b2','p1-b3','p1-b4',...last]});
-  const warnings=await page.textContent('#warnings');
+  const warnings=await warningsText(page);
   for(const id of large)assert.ok(warnings.includes(keptNote(id)),`${id} on the large sheet keeps its machine text and its note`);
   assert.ok(!warnings.includes(keptNote(last[1])),'the kept block read well again loses its note');assert.ok(!warnings.includes('chưa được đọc lại'),warnings);
   assert.ok(account.ocr.filter(body=>!body.reread).every(body=>body.mode==='premium'));
@@ -242,9 +250,9 @@ test('Dừng while readings are read again stops before the next paid call; Bắ
  const {context,page,errors}=await openStudy(account.api);
  try{
   await pickPdf(page,pages);await page.selectOption('#mode','premium');await page.click('#translate');
-  await page.waitForFunction(()=>/^Đang đọc kỹ lại \d+ đoạn chữ trong ảnh còn đáng ngờ \(Trang /u.test(document.querySelector('#progress').textContent),null,{timeout:60000});
+  await page.waitForFunction(()=>/^Đang đọc kỹ lại \d+ đoạn chữ trong ảnh còn đáng ngờ…$/u.test(document.querySelector('#progress').textContent),null,{timeout:60000});
   await page.click('#stop');release();await idle(page);
-  assert.equal(await progress(page),'Đã dừng khi đang đọc kỹ lại các đoạn chữ trong ảnh còn đáng ngờ. Phần đã đọc được giữ lại; bấm Bắt đầu dịch để đọc tiếp và dịch.');
+  assert.equal(await progress(page),'Đã dừng khi đọc kỹ lại chữ trong ảnh. Bấm Dịch tiếp để đọc tiếp.');
   assert.equal(account.ocr.filter(body=>body.reread).length,1,'no reading again is paid after Dừng');assert.equal(account.translate.length,0);
   await page.click('#translate');await waitProgress(page,EXPORTED);await idle(page);
   const {sent}=checkRereads(account,'premium');
@@ -264,7 +272,7 @@ test('Only the blocks chosen to be read again count it, never the others of thei
  const {context,page,errors}=await openStudy(account.api);
  try{
   await pickPdf(page);await page.selectOption('#mode','premium');await page.click('#translate');
-  await page.waitForFunction(()=>/^Đang đọc kỹ lại \d+ đoạn chữ trong ảnh còn đáng ngờ \(Trang /u.test(document.querySelector('#progress').textContent),null,{timeout:60000});
+  await page.waitForFunction(()=>/^Đang đọc kỹ lại \d+ đoạn chữ trong ảnh còn đáng ngờ…$/u.test(document.querySelector('#progress').textContent),null,{timeout:60000});
   await page.click('#stop');release();await idle(page);
   await page.click('#translate');await waitProgress(page,EXPORTED);await idle(page);
   // Each call sends whole sheets and names the blocks chosen among them (rereadIds); the first call's sheet-mates use
@@ -272,7 +280,7 @@ test('Only the blocks chosen to be read again count it, never the others of thei
   assert.deepEqual(account.ocr.filter(body=>body.reread).map(body=>[body.blockIds,body.rereadIds]),[[ids.slice(0,2*ocrBatch.images),firsts.slice(0,ocrBatch.images)],[ids.slice(2*ocrBatch.images),firsts.slice(ocrBatch.images)]]);
   assert.deepEqual(account.document.pages[0].blocks.filter(b=>b.ocrRereads).map(b=>b.id),firsts,'only the chosen blocks were counted');
   // The last block only came along with its sheet: still doubtful, it is named as not read again.
-  assert.match(await page.textContent('#warnings'),new RegExp(`^Trang 1 · đoạn ${ids.length}: bản đọc của Gemini có chỗ đáng ngờ \\(công thức hoặc chữ có thể sai\\) và chưa được đọc lại`,'mu'));
+  assert.match(await warningsText(page),new RegExp(`^Trang 1 · đoạn ${ids.length}: bản đọc của Gemini có chỗ đáng ngờ \\(công thức hoặc chữ có thể sai\\) và chưa được đọc lại`,'mu'));
   assert.deepEqual(errors,[]);
  }finally{await context.close();}
 });
@@ -301,7 +309,7 @@ test('A browser signed in to /admin starts at the school\'s mode (Kỹ nhất un
  const school=await openStudy(path=>path==='/api/admin/session'?{...ADMIN,translationMode:'quality'}:undefined);
  try{
   await school.page.waitForFunction(()=>document.querySelector('#mode').value==='quality');
-  assert.equal(await school.page.textContent('#mode-hint'),`${hintOf('quality')} Trình duyệt này đang đăng nhập quản trị nên Cách dịch mặc định là Kỹ hơn.`);assert.deepEqual(school.errors,[]);
+  assert.equal(await school.page.textContent('#mode-hint'),`${hintOf('quality')} Mặc định của quản trị: Kỹ hơn.`);assert.deepEqual(school.errors,[]);
  }finally{await school.context.close();}
  // 1. Signed in, the answer naming no mode (a Worker from before translationMode): Kỹ nhất is preselected, asked with
  // the header that lets the admin cookie count, and marked as only a
@@ -352,20 +360,20 @@ test('A saved session comes back with its engine (a mode its old column cannot h
   if(path==='/api/my/study/book-jobs'&&method==='GET')return {jobs:[job]};
  });
  try{
-  // An unfinished book run opens the history by itself.
-  await page.waitForSelector('#study-books-list [data-book-resume]');if(!await page.evaluate(()=>document.querySelector('#study-history').open))await page.click('#study-history > summary');
+  // An unfinished book run keeps one line under the folded history; its row is in the history.
+  await page.waitForSelector('#study-resume:not([hidden])');await page.waitForSelector('#study-books-list [data-book-resume]',{state:'attached'});if(!await page.evaluate(()=>document.querySelector('#study-history').open))await page.click('#study-history > summary');
   for(const [item,mode] of [[items[0],'premium'],[items[1],'balanced'],[items[2],'economy']]){
    await page.click(`[data-history-open="${item.id}"]`);await waitProgress(page,/Đã khôi phục 1\/2 phần/u);await page.evaluate(()=>{document.querySelector('#progress').textContent='';});
    assert.equal(await page.inputValue('#mode'),mode,item.mode);assert.equal(await page.textContent('#mode-hint'),hintOf(mode));
   }
   // The book's run is continued with its own mode (no key yet, so nothing runs); its estimate is Kỹ nhất's.
-  await page.click('#study-books-list [data-book-resume]');await page.waitForSelector('#whole-book:not([hidden])');await waitProgress(page,/Dán khóa Gemini rồi bấm Tiếp tục dịch cả quyển/u);
+  await page.click('#study-books-list [data-book-resume]');await page.waitForSelector('#whole-book:not([hidden])');await waitProgress(page,/^Dán khóa Gemini rồi bấm Dịch tiếp\.$/u);
   assert.equal(await page.inputValue('#mode'),'premium');
   const estimate=()=>page.textContent('#whole-book-estimate'),costs=mode=>pageTokens(mode);
-  assert.match(await estimate(),/chỉ là ước tính · Cách dịch Kỹ nhất/u);
+  assert.match(await page.textContent('#whole-book-estimate .estimate-total'),/ token \(Kỹ nhất\)$/u);
   assert.ok((await estimate()).includes(`Trang scan (Gemini đọc ảnh): khoảng ${formatTokens(costs('premium').scan[0])}–${formatTokens(costs('premium').scan[1])} token`),await estimate());
   await page.selectOption('#mode','economy');
-  assert.match(await estimate(),/chỉ là ước tính · Cách dịch Tiết kiệm/u);assert.ok((await estimate()).includes(`Trang scan (Gemini đọc ảnh): khoảng ${formatTokens(3000)}–${formatTokens(8000)} token`),await estimate());
+  assert.match(await page.textContent('#whole-book-estimate .estimate-total'),/ token \(Tiết kiệm\)$/u);assert.ok((await estimate()).includes(`Trang scan (Gemini đọc ảnh): khoảng ${formatTokens(3000)}–${formatTokens(8000)} token`),await estimate());
   assert.deepEqual(errors,[]);
  }finally{await context.close();}
 });
@@ -378,10 +386,11 @@ test('The token count shows the thinking Gemini spent beside what was sent and r
   if(path==='/api/my/study/translate')return {translation:'Học mà thường ôn tập.',context:'',glossary:{},usage:{prompt:1200,output:340,thinking:2048,total:3588,requests:1},warnings:[]};
  });
  try{
-  assert.equal(await page.textContent('#usage-detail'),'0 lần gửi · 0 token gửi đi · 0 token nhận về · 0 token suy luận');
+  // No zero count: the line in Nâng cao shows once Gemini has been asked.
+  const detailShown=()=>page.$eval('#usage-detail',node=>!node.closest('.usage-detail').hidden);assert.equal(await detailShown(),false);
   await page.fill('#content-title','Thử suy luận');await page.fill('#api-key',KEY);await page.fill('#source','子曰：学而时习之。');await page.selectOption('#mode','quality');
-  await page.click('#translate');await waitProgress(page,/^Hoàn tất/u);
-  assert.equal(await page.textContent('#usage-detail'),'1 lần gửi · 1.200 token gửi đi · 340 token nhận về · 2.048 token suy luận');assert.equal(await page.textContent('#usage-total'),'3.588');
+  await page.click('#translate');await waitProgress(page,/^Xong/u);
+  assert.equal(await detailShown(),true);assert.equal(await page.textContent('#usage-detail'),'1 lần gửi · 1.200 token gửi đi · 340 token nhận về · 2.048 token suy luận');assert.equal(await page.textContent('#usage-total'),'3.588');
   assert.deepEqual(errors,[]);
  }finally{await context.close();}
 });
@@ -403,11 +412,11 @@ test('A scan read in the browser: Kỹ nhất has Gemini read every scanned page
  },{init:()=>Object.defineProperty(navigator,'connection',{configurable:true,value:{saveData:false,effectiveType:'4g'}})});
  await context.route('**/vendor/paddle/**',route=>route.fulfill({status:404,headers:{'Content-Type':'text/html; charset=utf-8'},body:'<!doctype html><title>Không tìm thấy</title>'}));
  try{
-  await page.waitForFunction(()=>/chưa được cấu hình/u.test(document.querySelector('#pdf-layout-service-status').textContent));
+  await page.waitForFunction(()=>/chưa sẵn sàng/u.test(document.querySelector('#pdf-layout-service-status').textContent));
   await page.fill('#content-title','Bài scan Kỹ nhất');await page.fill('#api-key',KEY);await page.selectOption('#mode','premium');
   await page.setInputFiles('#source-file',{name:'bai-scan.pdf',mimeType:'application/pdf',buffer:await scannedPdf(page)});
   await page.waitForFunction(()=>/trang scan/u.test(document.querySelector('#file-status').textContent),null,{timeout:30000});
-  await page.click('#translate');await waitProgress(page,/^Hoàn tất/u,150000);
+  await page.click('#translate');await waitProgress(page,/^Xong/u,150000);
   assert.deepEqual(forms,[{mode:'premium',model:'gemini-test'}],'the page went to Gemini once, with its mode');
   const statuses=await page.evaluate(()=>window.__statuses);
   assert.ok(statuses.some(line=>/^(?:Đang đọc trang scan 1\/1 bằng Gemini \(Cách dịch Kỹ nhất\)…|Trang 1\/1 khó đọc · đang chuyển riêng trang này sang Gemini…)$/u.test(line)),statuses.join(' | '));
@@ -436,12 +445,12 @@ test('A scanned page with a figure keeps the reading Gemini made of it (Kỹ nh�
    if(path==='/api/my/study/translate')return {translation:'Bài 1: khái niệm vectơ trong không gian.',context:'',glossary:{},usage:{prompt:10,output:5,total:15,requests:1},warnings:[]};
   },{init:()=>Object.defineProperty(navigator,'connection',{configurable:true,value:{saveData:false,effectiveType:'4g'}}),modules:{'/local-ocr.js':DEVICE_OCR,'/document-figures.js':FIGURES}});
   try{
-   await page.waitForFunction(()=>/chưa được cấu hình/u.test(document.querySelector('#pdf-layout-service-status').textContent));
+   await page.waitForFunction(()=>/chưa sẵn sàng/u.test(document.querySelector('#pdf-layout-service-status').textContent));
    await page.fill('#content-title','Bài scan có hình');await page.fill('#api-key',KEY);await page.selectOption('#mode',mode);
    await page.setInputFiles('#source-file',{name:'bai-scan.pdf',mimeType:'application/pdf',buffer:await scannedPdf(page)});
    await page.waitForFunction(()=>/trang scan/u.test(document.querySelector('#file-status').textContent),null,{timeout:30000});
-   await page.click('#translate');await waitProgress(page,/^Hoàn tất/u);
-   assert.match(await page.textContent('#file-status'),/· 1 hình được tách từ bản gốc/u,'the figure was found');
+   await page.click('#translate');await waitProgress(page,/^Xong/u);
+   assert.match(await page.textContent('#file-status'),/· 1 hình giữ nguyên từ bản gốc$/u,'the figure was found');
    const source=await page.inputValue('#source');
    if(mode==='premium'){assert.deepEqual(forms,['premium'],'Gemini read the page once');assert.equal(source,GEMINI,'the reading paid for is the one translated');}
    else{assert.deepEqual(forms,[],'a page the device read well costs no OCR call');assert.equal(source,`${DEVICE_LINES[0].text}\n\n${DEVICE_LINES[2].text}`,'the label inside the figure is cut, its caption kept');}
@@ -482,16 +491,16 @@ test('A searchable scan read as text keeps its own OCR layer and gains the lines
   if(path==='/api/my/study/translate'){sent.push(json.source);return {translation:'Bản dịch.',context:'',glossary:{},usage:{prompt:10,output:5,total:15,requests:1},warnings:sent.length===1?['Đoạn 1: còn chữ Hán chưa dịch: 归乡','Thuật ngữ mới cần xem lại.']:[]};}
  },{init:()=>Object.defineProperty(navigator,'connection',{configurable:true,value:{saveData:false,effectiveType:'4g'}}),modules:{'/local-ocr.js':READER,'/document-figures.js':NO_FIGURES}});
  try{
-  await page.waitForFunction(()=>/chưa được cấu hình/u.test(document.querySelector('#pdf-layout-service-status').textContent));
+  await page.waitForFunction(()=>/chưa sẵn sàng/u.test(document.querySelector('#pdf-layout-service-status').textContent));
   await page.fill('#content-title','Sách có trang scan tìm được chữ');await page.fill('#api-key',KEY);await page.selectOption('#mode','economy');
   await page.setInputFiles('#source-file',{name:'sach.pdf',mimeType:'application/pdf',buffer:await searchablePdf()});
   await page.waitForFunction(()=>/trang scan/u.test(document.querySelector('#file-status').textContent),null,{timeout:60000});
-  assert.match(await page.textContent('#file-status'),/^1 trang có lớp chữ · 1 trang scan \(1 trang có lớp chữ không khớp ảnh trang nên sẽ được đọc lại từ ảnh\)\. Đang chọn 1-2;/u);
-  await page.click('#translate');await waitProgress(page,/^Hoàn tất/u,120000);
+  assert.equal(await page.textContent('#file-status'),'1 trang có lớp chữ · 1 trang scan · nhận dạng chữ khi bấm Bắt đầu dịch.');
+  await page.click('#translate');await waitProgress(page,/^Xong/u,120000);
   const [scan,text]=(await page.inputValue('#source')).split('\n\n');
   assert.equal(scan,['第三章 归乡',...LAYER].join('\n'),'the layer\'s own lines stay (a character the device misread changes nothing) and the title it lacked is added');
   assert.equal(text.split('\n')[0],PICTURED,'the pictured heading is read and set above the text it heads');assert.match(text,new RegExp(BODY,'u'));
-  const notes=await page.textContent('#warnings');
+  const notes=await warningsText(page);
   assert.match(notes,/Trang 1: lớp chữ có sẵn của PDF là chữ nhận dạng nằm ẩn dưới ảnh scan nên trang được đọc lại từ ảnh\./u);
   assert.match(notes,/Trang 1: lớp chữ nhận dạng sẵn trong PDF thiếu khoảng \d+ chữ so với ảnh trang; đã thêm các dòng đó từ bản nhận dạng lại\./u);
   assert.match(notes,/Trang 2: khoảng 9 chữ nằm trong hình ảnh hoặc nét vẽ, không có trong lớp chữ của PDF, nên được nhận dạng từ ảnh\./u);
@@ -536,21 +545,21 @@ test('Pages read from their image keep a running head or foot once (firm where G
    return history.api(path,method,json);
   },{init:()=>Object.defineProperty(navigator,'connection',{configurable:true,value:{saveData:false,effectiveType:'4g'}}),modules:{'/local-ocr.js':FAILING,'/document-figures.js':NO_FIGURES}});
   try{
-   await page.waitForFunction(()=>/chưa được cấu hình/u.test(document.querySelector('#pdf-layout-service-status').textContent));
+   await page.waitForFunction(()=>/chưa sẵn sàng/u.test(document.querySelector('#pdf-layout-service-status').textContent));
    await page.fill('#content-title','Sách scan');await page.fill('#api-key',KEY);await page.selectOption('#mode','premium');
    await page.setInputFiles('#source-file',{name:'sach-scan.pdf',mimeType:'application/pdf',buffer:pdf});
    await page.waitForFunction(()=>/trang scan/u.test(document.querySelector('#file-status').textContent),null,{timeout:60000});await page.fill('#page-range','1-4');
-   await page.click('#translate');await waitProgress(page,/^Hoàn tất/u,150000);
+   await page.click('#translate');await waitProgress(page,/^Xong/u,150000);
    const pages=(await page.inputValue('#source')).split('\n\n');
    assert.deepEqual(pages,marked?[['第一章 集合与函数概念',...body(1),'人民教育出版社'].join('\n'),...[2,3,4].map(n=>body(n).join('\n'))]:[['第一章 集合与函数概念',...body(1),'人民教育出版社'].join('\n'),...[2,3,4].map(n=>['第一章 集合与函数概念',...body(n)].join('\n'))]);
-   assert.match(await page.textContent('#warnings'),/^Trang 1 · đoạn 2: còn chữ Hán chưa dịch: 集合$/mu);assert.deepEqual(errors,[]);
+   assert.match(await warningsText(page),/^Trang 1 · đoạn 2: còn chữ Hán chưa dịch: 集合$/mu);assert.deepEqual(errors,[]);
   }finally{await context.close();}
   if(!marked)break;
   // Opened again from the history (a reload, another device): the notes are named again.
   const again=await openStudy(history.api);
   try{
    await again.page.click('#study-history > summary');await again.page.click(`[data-history-open="${ID}"]`);await waitProgress(again.page,/Bản dịch đã hoàn tất/u);
-   assert.equal(await again.page.textContent('#warnings'),'Trang 1 · đoạn 2: còn chữ Hán chưa dịch: 集合\n');assert.deepEqual(history.state.notes,['Trang 1 · đoạn 2: còn chữ Hán chưa dịch: 集合']);assert.deepEqual(again.errors,[]);
+   assert.equal(await warningsText(again.page),'Trang 1 · đoạn 2: còn chữ Hán chưa dịch: 集合\n');assert.deepEqual(history.state.notes,['Trang 1 · đoạn 2: còn chữ Hán chưa dịch: 集合']);assert.deepEqual(again.errors,[]);
   }finally{await again.context.close();}
  }
 });
@@ -568,13 +577,13 @@ test('A pictured heading the device reader fails on is read by Gemini, set where
   if(path==='/api/my/study/translate')return {translation:'Bản dịch.',context:'',glossary:{},usage:{prompt:10,output:5,total:15,requests:1},warnings:[]};
  },{init:()=>Object.defineProperty(navigator,'connection',{configurable:true,value:{saveData:false,effectiveType:'4g'}}),modules:{'/local-ocr.js':FAILING,'/document-figures.js':NO_FIGURES}});
  try{
-  await page.waitForFunction(()=>/chưa được cấu hình/u.test(document.querySelector('#pdf-layout-service-status').textContent));
+  await page.waitForFunction(()=>/chưa sẵn sàng/u.test(document.querySelector('#pdf-layout-service-status').textContent));
   await page.fill('#content-title','Trang có tiêu đề vẽ');await page.fill('#api-key',KEY);await page.selectOption('#mode','economy');
   await page.setInputFiles('#source-file',{name:'tieu-de.pdf',mimeType:'application/pdf',buffer:pdf});
   await page.waitForFunction(()=>/có lớp chữ/u.test(document.querySelector('#file-status').textContent),null,{timeout:60000});
-  await page.click('#translate');await waitProgress(page,/^Hoàn tất/u,120000);
+  await page.click('#translate');await waitProgress(page,/^Xong/u,120000);
   assert.deepEqual(forms,['economy'],'the region went to Gemini once');assert.equal((await page.inputValue('#source')).split('\n')[0],PICTURED);
-  assert.doesNotMatch(await page.textContent('#warnings'),/chưa nhận dạng được/u);assert.deepEqual(errors,[]);
+  assert.doesNotMatch(await warningsText(page),/chưa nhận dạng được/u);assert.deepEqual(errors,[]);
  }finally{await context.close();}
 });
 });

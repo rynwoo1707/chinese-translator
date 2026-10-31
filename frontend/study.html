@@ -37,109 +37,107 @@
  <header class="site-masthead"><div class="site-masthead-inner">
   <a class="brand" href="/" aria-label="Về trang chủ Hoa Trí">
    <img src="/favicon.svg" alt="" width="40" height="40">
-   <span><strong>Hoa Trí<span class="brand-dot">.</span></strong><small>TRUNG VĂN · VIỆT NGỮ</small></span>
+   <span><strong>Hoa Trí<span class="brand-dot">.</span></strong></span>
   </a>
-  <nav class="site-nav" aria-label="Dành cho người học">
-   <a href="/"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 4h6l3 2 3-2h6v15h-6l-3 2-3-2H3z M12 6v15"/></svg><span>Học liệu</span></a>
+  <nav class="site-nav" aria-label="Điều hướng chính">
+   <a href="/"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 4h6l3 2 3-2h6v15h-6l-3 2-3-2H3z M12 6v15"/></svg><span>Thư viện</span></a>
    <a href="/study" aria-current="page"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 5h12M10 3v2M6 5c0 6 4 9 8 11M14 5c0 6-4 9-10 11M14 21l4-10 4 10M16 17h4"/></svg><span>Xưởng dịch</span></a>
   </nav>
-  <div class="site-header-actions"><a class="header-request" href="/#yeu-cau"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg><span>Yêu cầu dịch</span></a><a class="header-login" href="/#account">Đăng nhập</a></div>
+  <div class="site-header-actions"><a class="header-request" href="/#yeu-cau"><span>Yêu cầu dịch</span></a><a class="header-login" href="/#account">Đăng nhập</a></div>
  </div></header>
  <main id="main" tabindex="-1">
-  <section class="hero">
-   <div class="hero-copy">
-    <p class="eyebrow">DỊCH ĐỂ HIỂU · ĐỐI CHIẾU ĐỂ HỌC</p>
-    <h1>Dịch học thuật Trung–Việt <em>rõ nguồn, đúng nghĩa.</em></h1>
-    <p>Chọn tài liệu và bấm Bắt đầu dịch — hệ thống tự nhận diện định dạng, chỉ nhận dạng chữ trong ảnh khi cần và giữ nguyên công thức toán học. Khóa Gemini riêng chỉ nằm trong bộ nhớ của tab hiện tại.</p>
-   </div>
-   <div id="account-status" class="account-status" role="status">Đang kiểm tra phiên đăng nhập…</div>
-  </section>
+  <header class="page-head">
+   <h1>Xưởng dịch</h1>
+   <p id="account-status" class="page-meta" role="status">Đang kiểm tra phiên đăng nhập…</p>
+  </header>
   <section id="session-card" class="session-card" aria-labelledby="session-card-title" hidden></section>
-  <ol class="workflow" aria-label="Quy trình dịch">
-   <li class="active"><span>1</span><div><strong>Chuẩn bị nguyên tác</strong><small>Trích xuất và làm sạch</small></div></li>
-   <li><span>2</span><div><strong>Thiết lập bản dịch</strong><small>Chọn lĩnh vực và thuật ngữ</small></div></li>
-   <li><span>3</span><div><strong>Đối chiếu kết quả</strong><small>Kiểm tra cảnh báo và công thức</small></div></li>
-  </ol>
   <details id="study-history" class="study-history" hidden>
-   <summary class="history-head"><div><p class="eyebrow">TÀI KHOẢN HỌC SINH</p><h2 id="study-history-title">Lịch sử dịch của tôi <span id="study-history-count" class="history-count" aria-live="polite"></span></h2></div><small>Tiến độ được tự lưu sau mỗi phần. Bản hoàn tất xuất hiện trong Thư viện riêng.</small></summary>
+   <summary class="history-head"><h2 id="study-history-title">Lịch sử dịch</h2><span id="study-history-count" class="count" aria-live="polite"></span></summary>
    <section id="study-books" class="study-books" aria-labelledby="study-books-title" hidden><h3 id="study-books-title">Sách của tôi</h3><div id="study-books-list" class="study-books-list"></div></section>
    <div id="study-history-list" class="history-list"></div>
   </details>
+  <div id="study-resume" class="history-resume" hidden></div>
   <div class="workspace">
-   <section class="panel source-panel">
-    <div class="panel-head"><span class="step-number">01</span><div><p class="eyebrow">NGUYÊN TÁC</p><h2>Chuẩn bị tài liệu</h2></div></div>
-    <div class="content-title-field">
-     <label for="content-title">Tên nội dung <span class="required">Bắt buộc</span></label>
-     <div class="content-title-line"><input id="content-title" type="text" maxlength="200" required autocomplete="off" placeholder="Ví dụ: Vectơ trong không gian – bài 1" aria-describedby="content-title-hint"><button id="save-title" type="button" hidden disabled>Lưu tên</button></div>
-     <p id="content-title-hint" class="hint" role="status">Tên này xuất hiện trong lịch sử, Thư viện riêng và tệp tải xuống.</p>
+   <section class="panel source-panel" aria-labelledby="source-title">
+    <h2 id="source-title">Tài liệu</h2>
+    <div class="field content-title-field">
+     <label for="content-title">Tên nội dung</label>
+     <div class="content-title-line"><input id="content-title" type="text" maxlength="200" required aria-required="true" autocomplete="off" placeholder="Ví dụ: Vectơ trong không gian – bài 1" aria-describedby="content-title-hint"><button id="save-title" class="secondary" type="button" hidden>Lưu tên</button><button id="rename-book" class="quiet" type="button" hidden>Đổi tên sách…</button></div>
+     <p id="content-title-hint" class="field-hint" role="status"></p>
     </div>
-    <label class="file-picker" for="source-file"><span class="upload-icon" aria-hidden="true">↥</span><span class="upload-copy"><strong>Chọn tài liệu từ thiết bị</strong><small>Hệ thống tự nhận diện và xử lý phù hợp. Ảnh chụp trang sách: chọn một hoặc nhiều ảnh cùng lúc, mỗi ảnh thành một trang.</small></span><span class="format-tags"><i>PDF</i><i>TXT</i><i>DOCX</i><i>EPUB</i><i>AZW3</i><i>ẢNH</i></span><input id="source-file" type="file" multiple accept=".txt,.docx,.epub,.azw3,.pdf,.jpg,.jpeg,.png,.webp,image/jpeg,image/png,image/webp"></label>
-    <p id="file-status" class="hint status-note" role="status">Hoặc dán một đoạn tiếng Trung bên dưới.</p>
-    <div id="ocr-download" class="ocr-download" role="group" aria-labelledby="ocr-download-title" hidden><p id="ocr-download-title"><strong>Tải bộ nhận dạng chữ về máy?</strong></p><p id="ocr-download-text">Tài liệu có trang scan. Hoa Trí nhận dạng chữ ngay trên thiết bị (không tốn token), nhưng lần đầu cần tải bộ nhận dạng chữ về máy; những lần sau trình duyệt dùng lại bản đã tải.</p><div class="ocr-download-actions"><button id="ocr-download-yes" class="primary" type="button">Tải và nhận dạng</button><button id="ocr-download-no" type="button">Để sau (khi có Wi-Fi)</button></div></div>
-    <div id="library-match" class="library-match" role="status" hidden><p><strong>Học liệu của Hoa Trí đã công bố bản dịch của đúng tệp này:</strong> <span id="library-match-title"></span></p><p>Bạn có thể đọc ngay mà không tốn token, hoặc vẫn tự dịch bằng khóa của mình để luyện tập.</p><div class="library-match-actions"><a id="library-match-open" target="_blank" rel="noopener">Đọc bản đã công bố</a><button id="library-match-dismiss" type="button">Tôi vẫn tự dịch</button></div></div>
-    <label class="pdf-layout-option"><input id="pdf-layout-enabled" type="checkbox" checked> <span>Giữ bố cục PDF và xuất PDF tiếng Việt<small id="pdf-layout-service-status">Đang kiểm tra dịch vụ PDF…</small></span></label>
-    <fieldset id="book-mode" class="book-mode" hidden><legend>Cách dịch PDF</legend><label><input type="radio" name="book-mode" value="range" checked><span><strong>Dịch theo phạm vi</strong><small>Chọn tối đa 20 trang mỗi lượt</small></span></label><label><input type="radio" name="book-mode" value="book"><span><strong>Dịch cả quyển</strong><small>Tự chia lượt; dừng và dịch tiếp được</small></span></label><p id="book-mode-note" class="book-mode-note" role="status"></p></fieldset>
-    <div id="pdf-range-options" class="pdf-range" hidden><div id="range-fields"><label for="page-range">Trang PDF cần dịch<input id="page-range" type="text" inputmode="numeric" placeholder="Ví dụ: 12-14, 37"></label><small>Mỗi lần tối đa 20 trang. Khi giữ bố cục, mỗi đoạn được dịch ngay tại vị trí của nó trên trang; trang scan được nhận dạng chữ rồi giữ lại ảnh gốc để đối chiếu.</small></div><div id="cover-choice" class="cover-choice" hidden><img id="cover-thumb" class="cover-thumb" alt="" width="54" height="76" hidden><div class="cover-choice-body"><p class="cover-line"><strong id="cover-label">Đang tìm trang bìa…</strong><span id="cover-change-group"><span class="cover-sep" aria-hidden="true">·</span><button id="cover-change" class="cover-link" type="button">Đổi</button></span><span id="cover-none-group"><span class="cover-sep" aria-hidden="true">·</span><button id="cover-none" class="cover-link" type="button">Không dùng bìa</button></span></p><p id="cover-note" class="cover-note" role="status"></p><label id="cover-translate-option" class="cover-translate" hidden><input id="cover-translate" type="checkbox" checked><span>Dịch chữ trên bìa</span></label></div></div><div id="book-target-group" class="book-target"><label for="book-target">Thêm vào sách<select id="book-target"><option value="">Sách mới</option></select></label><p id="book-target-hint" class="book-hint" role="status"></p><button id="book-next-range" class="book-next" type="button" hidden></button><label id="book-replace-option" class="book-replace" hidden><input id="book-replace" type="checkbox"><span id="book-replace-label"></span></label></div></div>
+    <div class="field file-field">
+     <label class="file-picker" for="source-file">Chọn tệp<input id="source-file" type="file" multiple aria-describedby="file-types file-status" accept=".txt,.docx,.epub,.azw3,.pdf,.jpg,.jpeg,.png,.webp,image/jpeg,image/png,image/webp"></label>
+     <p id="file-types" class="field-hint">PDF, DOCX, EPUB, AZW3, TXT hoặc ảnh chụp trang (chọn được nhiều ảnh)</p>
+     <p id="file-status" class="file-status" role="status"></p>
+    </div>
+    <div id="ocr-download" class="note" data-tone="warn" role="group" aria-labelledby="ocr-download-title" hidden><p id="ocr-download-title"><strong>Tải bộ nhận dạng chữ về máy?</strong></p><p id="ocr-download-text">Trang scan được nhận dạng chữ ngay trên máy, không tốn token.</p><div class="note-actions"><button id="ocr-download-yes" class="primary" type="button">Tải và nhận dạng</button><button id="ocr-download-no" class="secondary" type="button">Để sau (khi có Wi-Fi)</button></div></div>
+    <div id="library-match" class="note" role="status" hidden><p>Thư viện chung đã có bản dịch của tệp này: “<span id="library-match-title"></span>”.</p><div class="note-actions"><a id="library-match-open" class="button secondary" target="_blank" rel="noopener">Đọc ngay (không tốn token)</a><button id="library-match-dismiss" class="secondary" type="button">Tự dịch</button></div></div>
+    <div class="pdf-layout-option" hidden><label class="check"><input id="pdf-layout-enabled" type="checkbox" checked aria-describedby="pdf-layout-service-status"><span>Giữ bố cục PDF và xuất PDF tiếng Việt</span></label><small id="pdf-layout-service-status" class="field-hint"></small></div>
+    <fieldset id="book-mode" class="book-mode" hidden><legend>Phạm vi</legend><label><input type="radio" name="book-mode" value="range" checked><span>Dịch một số trang</span></label><label><input type="radio" name="book-mode" value="book"><span>Dịch cả quyển</span></label><p id="book-mode-note" class="field-hint" role="status"></p></fieldset>
+    <div id="pdf-range-options" class="pdf-range" hidden><div id="range-fields" class="field"><label for="page-range">Trang cần dịch</label><input id="page-range" type="text" inputmode="numeric" placeholder="Ví dụ: 12-14, 37" aria-describedby="page-range-hint"><small id="page-range-hint" class="field-hint">Tối đa 20 trang mỗi lượt.</small></div><div id="cover-choice" class="cover-choice" hidden><img id="cover-thumb" class="cover-thumb" alt="" width="54" height="76" hidden><div class="cover-choice-body"><p class="cover-line"><strong id="cover-label">Đang tìm trang bìa…</strong><span id="cover-change-group"><span class="cover-sep" aria-hidden="true">·</span><button id="cover-change" class="quiet" type="button">Đổi</button></span><span id="cover-none-group"><span class="cover-sep" aria-hidden="true">·</span><button id="cover-none" class="quiet" type="button">Không dùng bìa</button></span></p><p id="cover-note" class="field-hint" role="status"></p><label id="cover-translate-option" class="check cover-translate" hidden><input id="cover-translate" type="checkbox" checked><span>Dịch chữ trên bìa</span></label></div></div><div id="book-target-group" class="field book-target" hidden><label for="book-target">Thêm vào sách</label><select id="book-target"><option value="">Sách mới</option></select><p id="book-target-hint" class="field-hint" role="status"></p><button id="book-next-range" class="secondary" type="button" hidden></button><label id="book-replace-option" class="check book-replace" hidden><input id="book-replace" type="checkbox"><span id="book-replace-label"></span></label></div></div>
     <section id="whole-book" class="whole-book" aria-labelledby="whole-book-title" hidden>
-     <h3 id="whole-book-title">Dịch cả quyển</h3>
-     <p id="whole-book-summary" class="whole-book-summary"></p>
-     <label class="whole-book-range" for="book-pages">Trang cần dịch <small>Để trống là cả quyển</small><input id="book-pages" type="text" inputmode="numeric" autocomplete="off" spellcheck="false" placeholder="Cả quyển · ví dụ 5-120, 130-200"></label>
+     <h3 id="whole-book-title" class="sr-only">Dịch cả quyển</h3>
+     <p id="whole-book-summary" class="field-hint"></p>
+     <div class="field"><label for="book-pages">Trang cần dịch</label><input id="book-pages" type="text" inputmode="numeric" autocomplete="off" spellcheck="false" placeholder="Cả quyển · ví dụ 5-120, 130-200"></div>
      <div id="whole-book-estimate" class="whole-book-estimate"></div>
      <p class="whole-book-count"><strong id="whole-book-count"></strong><span id="whole-book-tokens"></span></p>
-     <p id="whole-book-note" class="whole-book-note"></p>
+     <p id="whole-book-note" class="field-hint"></p>
      <div id="page-grid" class="page-grid" role="img" aria-label="Tiến độ trang"></div>
-     <ul class="page-legend" aria-hidden="true"><li data-state="pending">Chưa dịch</li><li data-state="working">Đang dịch</li><li data-state="done">Đã dịch</li><li data-state="nopdf" hidden>Chưa có PDF</li><li data-state="blank">Trang trống</li><li data-state="untranslated" hidden>Còn chữ chưa dịch</li><li data-state="cover">Bìa</li><li data-state="skipped">Bỏ qua</li><li data-state="failed">Lỗi</li></ul>
+     <ul class="page-legend" aria-hidden="true"><li data-state="pending">Chưa dịch</li><li data-state="working">Đang dịch</li><li data-state="done">Đã dịch</li><li data-state="nopdf">Chưa có PDF</li><li data-state="blank">Trang trống</li><li data-state="untranslated">Còn chữ chưa dịch</li><li data-state="cover">Bìa</li><li data-state="skipped">Bỏ qua</li><li data-state="failed">Lỗi</li></ul>
      <p id="whole-book-status" class="whole-book-status" role="status" aria-live="polite"></p>
-     <a id="book-read" class="whole-book-read" hidden>Đọc sách trong Thư viện riêng</a>
-     <p class="hint">Bìa và trang không có chữ Trung giữ nguyên ảnh gốc, không gọi Gemini. Hãy để tab này mở khi dịch; trên điện thoại, nếu chuyển sang ứng dụng khác, việc dịch tạm chờ và tự chạy tiếp khi bạn quay lại.</p>
+     <a id="book-read" class="quiet" hidden>Đọc sách trong Thư viện riêng</a>
+     <p class="field-hint">Để tab này mở khi dịch.</p>
     </section>
-    <div class="field-heading"><label for="source">Văn bản cần dịch</label><div class="metrics"><span id="source-count">0 ký tự</span><span id="part-count">0 phần dịch</span><button id="source-lookup" class="source-lookup" type="button" disabled aria-describedby="source-lookup-hint">Tra chữ Hán</button></div></div>
-    <textarea id="source" lang="zh" spellcheck="false" placeholder="Dán đoạn nguyên tác tiếng Trung vào đây…"></textarea>
-    <p id="source-lookup-hint" class="hint">Bôi đen chữ Hán trong ô rồi bấm Tra chữ Hán; không bôi đen thì tra quanh con trỏ. Không dùng khóa Gemini.</p>
+    <div class="field source-field">
+     <div class="field-heading"><label for="source">Văn bản cần dịch</label><div class="metrics" hidden><span id="source-count" hidden>0 ký tự</span><span id="part-count" hidden>0 phần dịch</span><button id="source-lookup" class="quiet" type="button" hidden aria-describedby="source-lookup-hint" title="Bôi đen chữ Hán trong ô rồi bấm; không bôi đen thì tra quanh con trỏ. Không dùng khóa Gemini.">Tra chữ Hán</button></div></div>
+     <textarea id="source" lang="zh" spellcheck="false" placeholder="Dán đoạn tiếng Trung vào đây…"></textarea>
+     <p id="source-lookup-hint" class="sr-only">Bôi đen chữ Hán trong ô rồi bấm Tra chữ Hán; không bôi đen thì tra quanh con trỏ. Không dùng khóa Gemini.</p>
+    </div>
    </section>
-   <section class="panel controls">
-    <div class="panel-head"><span class="step-number">02</span><div><p class="eyebrow">THIẾT LẬP</p><h2>Thiết lập bản dịch</h2></div></div>
-    <div class="control-group key-group">
-     <label for="api-key">Khóa Gemini API riêng <span class="required">Bắt buộc</span></label>
-     <div class="key-line"><input id="api-key" type="password" autocomplete="off" spellcheck="false" required aria-describedby="key-status key-note" placeholder="Dán khóa API cho phiên này"><button id="clear-key" type="button" title="Xóa khóa khỏi phiên">Xóa</button></div>
-     <p id="key-status" class="hint key-status">Chưa nạp khóa cho phiên này.</p>
+   <section class="panel controls" aria-labelledby="controls-title">
+    <h2 id="controls-title">Thiết lập</h2>
+    <div class="field key-group">
+     <label for="api-key">Khóa Gemini</label>
+     <div class="key-line"><input id="api-key" type="password" autocomplete="off" spellcheck="false" required aria-required="true" aria-describedby="key-status key-note" placeholder="Dán khóa API"><button id="clear-key" class="secondary" type="button" title="Xóa khóa khỏi tab này" hidden>Xóa</button></div>
+     <p id="key-status" class="field-hint key-status">Khóa chỉ dùng trong tab này, không được lưu.</p>
      <div class="key-help">
-      <a class="key-help-link" href="https://aistudio.google.com/apikey" target="_blank" rel="noopener">Chưa có khóa? Tạo miễn phí ở Google AI Studio<span class="visually-hidden"> (mở trong tab mới)</span></a>
-      <ol><li>Đăng nhập Google AI Studio bằng tài khoản Google của bạn.</li><li>Bấm “Create API key” (Tạo khóa API) rồi sao chép khóa.</li><li>Dán khóa vào ô trên và bấm Bắt đầu dịch.</li></ol>
-      <p id="key-note">Gói miễn phí có giới hạn số lượt dùng mỗi ngày, và mức dùng được tính vào tài khoản Google của chính bạn. Khóa chỉ nằm trong bộ nhớ của tab này và không bao giờ được lưu lại.</p>
-      <p class="key-terms">Theo <a href="https://ai.google.dev/gemini-api/terms" target="_blank" rel="noopener">điều khoản Gemini API của Google<span class="visually-hidden"> (mở trong tab mới)</span></a>, người dùng phải từ 18 tuổi trở lên. Với gói miễn phí, Google có thể dùng nội dung bạn gửi để cải thiện sản phẩm và nhân viên của Google có thể đọc nội dung đó, nên đừng gửi thông tin nhạy cảm. Xem thêm mục <a href="/dieu-khoan#khoa-gemini">Khóa Gemini</a> trong Điều khoản sử dụng.</p>
+      <a id="key-help-link" class="key-help-link" href="https://aistudio.google.com/apikey" target="_blank" rel="noopener">Chưa có khóa? Tạo miễn phí ở Google AI Studio<span class="visually-hidden"> (mở trong tab mới)</span> <span aria-hidden="true">↗</span></a>
+      <details id="key-steps" class="more"><summary>Cách tạo khóa</summary><div class="more-body"><ol><li>Đăng nhập Google AI Studio bằng tài khoản Google của bạn.</li><li>Bấm “Create API key” (Tạo khóa API) rồi sao chép khóa.</li><li>Dán khóa vào ô trên và bấm Bắt đầu dịch.</li></ol><p id="key-note">Gói miễn phí có giới hạn lượt dùng mỗi ngày, tính vào tài khoản Google của bạn.</p></div></details>
+      <p class="key-terms">Theo <a href="https://ai.google.dev/gemini-api/terms" target="_blank" rel="noopener">điều khoản Gemini API<span class="visually-hidden"> (mở trong tab mới)</span></a>, người dùng phải từ 18 tuổi trở lên. Với gói miễn phí, Google có thể dùng nội dung bạn gửi để cải thiện sản phẩm và nhân viên của Google có thể đọc nội dung đó, nên đừng gửi thông tin nhạy cảm. Xem <a href="/dieu-khoan#khoa-gemini">Khóa Gemini</a>.</p>
      </div>
     </div>
-    <div class="control-grid"><label for="domain">Lĩnh vực tài liệu<select id="domain"><option value="general">Chuyên khảo · Nghiên cứu</option><option value="math">Toán học · STEM</option><option value="history">Lịch sử Trung Hoa</option><option value="physics">Vật lý</option><option value="chemistry">Hóa học</option><option value="biology">Sinh học</option><option value="informatics">Tin học</option></select></label><label id="mode-field" for="mode">Cách dịch<select id="mode" aria-describedby="mode-hint"><option value="economy">Tiết kiệm (ít token nhất)</option><option value="balanced">Cân bằng</option><option value="quality">Kỹ hơn (tốn token hơn)</option><option value="premium">Kỹ nhất (tốn nhiều token nhất)</option></select></label><p id="mode-hint" class="hint mode-hint" aria-live="polite">Đọc và dịch theo lượt lớn, không suy luận thêm; chỉ thử lại một lần những đoạn còn sót chữ Trung, thiếu dòng hoặc đọc chưa đủ. Hợp với khóa Gemini miễn phí.</p></div>
-    <label for="glossary">Thuật ngữ cần thống nhất <small>Không bắt buộc</small></label>
-    <textarea id="glossary" lang="zh" rows="4" spellcheck="false" placeholder="史料 = sử liệu&#10;明朝 = triều Minh" aria-describedby="glossary-hint"></textarea>
-    <p id="glossary-hint" class="hint">Mỗi dòng một thuật ngữ: chữ Hán = cách dịch bạn muốn dùng.</p>
-    <details id="advanced-settings" class="advanced-settings">
-     <summary>Nâng cao <small>Phiên bản Gemini · chi tiết lượt dùng</small></summary>
-     <div class="advanced-body">
-      <label for="gemini-model">Phiên bản Gemini dùng để dịch<select id="gemini-model" disabled><option value="">Tự chọn sau khi kiểm tra khóa</option></select></label>
-      <p id="gemini-model-status" class="hint">Hoa Trí tự chọn phiên bản phù hợp với khóa của bạn trước khi gửi nội dung dịch.</p>
-      <button id="check-gemini-model" type="button">Kiểm tra phiên bản dùng được với khóa</button>
-      <p class="usage-detail"><span>Chi tiết lượt dùng trong tab này:</span> <span id="usage-detail">0 lần gửi · 0 token gửi đi · 0 token nhận về · 0 token suy luận</span></p>
+    <div class="control-grid"><label class="field" for="domain">Lĩnh vực<select id="domain"><option value="general">Chuyên khảo · Nghiên cứu</option><option value="math">Toán học · STEM</option><option value="history">Lịch sử Trung Hoa</option><option value="physics">Vật lý</option><option value="chemistry">Hóa học</option><option value="biology">Sinh học</option><option value="informatics">Tin học</option></select></label><label id="mode-field" class="field" for="mode">Cách dịch<select id="mode" aria-describedby="mode-hint"><option value="economy">Tiết kiệm</option><option value="balanced">Cân bằng</option><option value="quality">Kỹ hơn</option><option value="premium">Kỹ nhất</option></select></label><p id="mode-hint" class="field-hint mode-hint" aria-live="polite">Ít token nhất; hợp với khóa miễn phí.</p><details id="mode-compare" class="more mode-compare"><summary>So sánh các Cách dịch</summary><div class="more-body"><dl id="mode-compare-list"></dl></div></details></div>
+    <div class="field glossary-field">
+     <label for="glossary">Thuật ngữ (không bắt buộc)</label>
+     <textarea id="glossary" lang="zh" rows="4" spellcheck="false" placeholder="史料 = sử liệu&#10;明朝 = triều Minh" aria-describedby="glossary-hint"></textarea>
+     <p id="glossary-hint" class="sr-only">Mỗi dòng một thuật ngữ: chữ Hán = cách dịch bạn muốn dùng.</p>
+    </div>
+    <details id="advanced-settings" class="more advanced-settings">
+     <summary>Nâng cao</summary>
+     <div class="more-body advanced-body">
+      <label for="gemini-model">Phiên bản Gemini<select id="gemini-model" disabled><option value="">Tự chọn sau khi kiểm tra khóa</option></select></label>
+      <p id="gemini-model-status" class="field-hint" role="status"></p>
+      <button id="check-gemini-model" class="secondary" type="button">Kiểm tra phiên bản dùng được với khóa</button>
+      <p class="usage-detail" hidden><span>Lượt dùng trong tab này:</span> <span id="usage-detail">0 lần gửi · 0 token gửi đi · 0 token nhận về · 0 token suy luận</span></p>
      </div>
     </details>
-    <div id="run-bar" class="run-bar"><p id="save-warning" class="save-warning" role="alert" hidden></p><p id="run-bar-status" class="run-bar-status" aria-hidden="true"></p><div class="actions"><button id="translate" class="primary" type="button">Bắt đầu dịch <span aria-hidden="true">→</span></button><button id="stop" type="button" disabled hidden>Dừng sau lượt hiện tại</button></div></div>
-    <div class="progress-box"><span class="progress-mark" aria-hidden="true">✦</span><p id="progress" role="status" aria-live="polite" tabindex="-1">Chưa bắt đầu.</p></div>
-    <div class="usage"><strong id="usage-total">0</strong><span>token Gemini đã dùng trong tab này</span><small>Token là đơn vị Google dùng để tính lượt dùng của khóa.</small></div>
-    <p class="privacy-note">Nguyên tác, bản dịch và tiến độ được lưu trong tài khoản học sinh. Khóa Gemini chỉ dùng trong tab này và không được lưu.</p>
+    <div id="run-bar" class="run-bar"><p id="save-warning" class="save-warning" role="alert" hidden></p><p id="run-bar-status" class="run-bar-status" aria-hidden="true"></p><div class="actions"><button id="translate" class="primary" type="button">Bắt đầu dịch</button><button id="stop" class="secondary" type="button" disabled hidden>Dừng sau lượt này</button></div></div>
+    <p id="progress" role="status" aria-live="polite" tabindex="-1"></p>
+    <p id="usage" class="usage" hidden>Đã dùng <span id="usage-total">0</span> <abbr title="Đơn vị Google dùng để tính lượt dùng của khóa">token</abbr> trong tab này</p>
+    <div id="layout-refresh" class="note" data-tone="warn" role="status" hidden></div>
    </section>
   </div>
-  <section class="panel result">
-   <div class="panel-head result-head"><span class="step-number">03</span><div><p class="eyebrow">BẢN DỊCH</p><h2>Đối chiếu kết quả</h2></div><div class="result-actions"><button id="download-pdf" type="button" disabled>Xuất PDF tiếng Việt</button><button id="download" type="button" disabled>Tải .txt</button><button id="download-rich" type="button" disabled>Tải HTML có hình</button></div></div>
+  <section class="panel result" aria-labelledby="result-title">
+   <div class="section-head result-head"><h2 id="result-title">Đối chiếu kết quả</h2><div class="result-actions" hidden><span class="export-main"></span><details class="menu export-more" hidden><summary class="secondary icon-btn" aria-label="Tải định dạng khác" title="Định dạng khác"><span aria-hidden="true">▾</span></summary><div class="menu-list"><button id="download-pdf" type="button" disabled hidden>Xuất PDF tiếng Việt</button><button id="download" type="button" disabled hidden>Tải .txt</button><button id="download-rich" type="button" disabled hidden title="Tệp HTML, mở bằng trình duyệt">Tải bản có hình (.html)</button></div></details></div></div>
+   <div id="warnings" class="warnings" role="status"></div>
    <div id="pdf-dual-viewer" class="pdf-dual-viewer" hidden></div>
-   <details id="source-figures" class="source-figures" hidden><summary>Tất cả trang gốc · hình & công thức</summary><div class="source-figures-head"><small>Bản dịch được chia theo từng trang. Hình nhận diện được giữ nguyên từ ảnh gốc; mở Đối chiếu trang gốc để xem đầy đủ.</small></div><div id="source-figure-grid" class="source-figure-grid"></div></details>
+   <details id="source-figures" class="source-figures" hidden><summary>Trang gốc</summary><div id="source-figure-grid" class="source-figure-grid"></div></details>
    <div id="translation-parts" class="translation-parts" aria-live="polite" hidden></div>
-   <details class="combined-output"><summary><span>Bản dịch gộp toàn bộ</span><small>Dùng để tải xuống hoặc so sánh với bản dịch mẫu</small></summary><textarea id="translation" readonly placeholder="Bản dịch gộp sẽ xuất hiện tại đây sau từng phần…" aria-label="Bản dịch gộp toàn bộ"></textarea></details>
-   <p id="warnings" class="warnings" role="status"></p>
-   <details class="evaluation"><summary><span>Nâng cao · So sánh với bản dịch mẫu</span><small>Chấm độ giống và kiểm tra công thức · không tốn token</small></summary><div class="evaluation-body"><label for="reference">Bản dịch mẫu tiếng Việt (của giáo viên hoặc sách)</label><textarea id="reference" rows="7" placeholder="Dán bản dịch mẫu để so sánh với bản dịch của AI…"></textarea><div class="actions"><button id="evaluate" type="button">So sánh với bản mẫu</button></div><div id="evaluation-result" class="evaluation-result" role="status"></div><p class="hint">Điểm độ giống tính theo thang BLEU-4 (0–100): càng cao, cách dùng từ càng gần bản mẫu. Điểm chỉ để tham khảo; một bản dịch đúng vẫn có thể diễn đạt khác.</p></div></details>
+   <details class="more combined-output" hidden><summary>Toàn văn</summary><textarea id="translation" readonly aria-label="Toàn văn"></textarea></details>
+   <details class="more evaluation" hidden><summary>So sánh với bản dịch mẫu <span class="summary-note">· không tốn token</span></summary><div class="evaluation-body"><label for="reference">Bản dịch mẫu</label><textarea id="reference" rows="7" placeholder="Dán bản dịch của giáo viên hoặc sách…"></textarea><div class="actions"><button id="evaluate" class="secondary" type="button">So sánh</button></div><div id="evaluation-result" class="evaluation-result" role="status"></div></div></details>
   </section>
  </main>
- <dialog id="book-dialog" class="book-dialog" aria-labelledby="book-dialog-title"><form id="book-dialog-form" method="dialog"><h2 id="book-dialog-title" tabindex="-1"></h2><div id="book-dialog-body" class="book-dialog-body"></div><p id="book-dialog-status" class="hint" role="status"></p><div class="book-dialog-actions"><button id="book-dialog-cancel" type="button">Hủy</button><button id="book-dialog-submit" class="primary" type="submit">Lưu</button></div></form></dialog>
+ <dialog id="book-dialog" class="book-dialog" aria-labelledby="book-dialog-title"><form id="book-dialog-form" method="dialog"><h2 id="book-dialog-title" tabindex="-1"></h2><div id="book-dialog-body" class="book-dialog-body"></div><p id="book-dialog-status" class="field-hint" role="status"></p><div class="book-dialog-actions"><button id="book-dialog-cancel" class="secondary" type="button">Hủy</button><button id="book-dialog-submit" class="primary" type="submit">Lưu</button></div></form></dialog>
  <footer class="site-footer" data-site-footer></footer>
  <script src="/browser-check.js" defer></script>
  <script type="module" src="/study.js"></script>

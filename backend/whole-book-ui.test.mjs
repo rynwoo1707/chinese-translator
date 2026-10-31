@@ -191,13 +191,23 @@ async function pickBook(page,pdf,{translateCover=false,resume=false}={}){
  if(resume){await page.waitForFunction(()=>document.querySelector('#page-grid .page-cell')?.dataset.state==='cover',null,{timeout:20000});return;}
  await page.waitForFunction(()=>document.querySelector('#cover-label').textContent==='Bìa: trang 1',null,{timeout:20000});
  assert.equal(await page.$eval('#cover-translate',node=>node.checked),true,'the cover\'s text is translated by default');
- assert.equal(await page.$eval('#page-grid .page-cell',cell=>cell.dataset.state),'pending');assert.match(await page.$eval('#whole-book-summary',node=>node.textContent),/bìa: trang 1 \(dịch chữ trên bìa\)/u);
- assert.match(await page.$eval('#cover-note',node=>node.textContent),/Chữ trên bìa được dịch như các trang khác; ảnh gốc của trang bìa vẫn là ảnh bìa sách/u);
+ assert.equal(await page.$eval('#page-grid .page-cell',cell=>cell.dataset.state),'pending');assert.equal(await page.$eval('#whole-book-summary',node=>node.textContent),'','no summary of what the page shows already');
+ assert.equal(await page.$eval('#cover-note',node=>node.textContent),'','a translated cover needs no note');
  if(translateCover)return;
  await page.uncheck('#cover-translate');
  await page.waitForFunction(()=>document.querySelector('#page-grid .page-cell')?.dataset.state==='cover',null,{timeout:20000});
+ assert.equal(await page.$eval('#cover-note',node=>node.textContent),'Bìa giữ nguyên ảnh gốc.');
 }
 const statusText=page=>page.$eval('#whole-book-status',node=>node.textContent);
+// Cần xem lại: each note is one row (data-note keeps its whole line), as the warnings box held them, one per line.
+const warningsText=page=>page.evaluate(()=>[...document.querySelectorAll('#warnings [data-note]')].map(row=>`${row.dataset.note}\n`).join(''));
+// A control in a row's ⋯ menu: the menu's button is pressed first, as a student does.
+async function inMenu(page,selector){if(!await page.$eval(selector,node=>node.closest('details.menu').open))await page.$eval(selector,node=>node.closest('details.menu').querySelector(':scope>summary').click());await page.click(selector);}
+// S12: an unfinished book keeps one line under the folded history, with Dịch tiếp.
+async function resumeBook(page,title){
+ await page.waitForSelector('#study-resume:not([hidden])',{timeout:30000});assert.equal(await page.$eval('#study-history',node=>node.open),false,'the history stays folded');
+ assert.match(await page.textContent('#study-resume p'),new RegExp(`^“${title}” đang dừng ở \\d+/\\d+ trang$`,'u'));await page.click('#study-resume [data-book-resume]');
+}
 
 // Each scenario has its own fake server and browser context, so they run side by side.
 // At most four pages at a time, like study-ui-layout: every run here draws PDFs with pdf.js, and too many at once can
@@ -211,9 +221,13 @@ test('Dịch cả quyển: upload once, chunks of at most 20 pages with their of
  try{
   await pickBook(page,pdf);
   const estimate=await page.$eval('#whole-book-estimate',node=>node.textContent);
-  assert.match(estimate,/Ước tính token Gemini/u);assert.match(estimate,/chỉ là ước tính/u);assert.match(estimate,/× [\d.]+–[\d.]+ token/u);assert.match(estimate,/Số token thật tùy lượng chữ/u);assert.doesNotMatch(estimate,/Số đo thật|867/u);assert.match(estimate,/Bìa giữ nguyên, trang trống và trang bỏ qua: 0 token/u);
-  assert.match(await page.$eval('#whole-book-summary',node=>node.textContent),/26 trang .* bìa: trang 1/u);
-  assert.equal(await page.$eval('#translate',node=>node.textContent.trim()),'Dịch cả quyển →');assert.equal(await page.$eval('#stop',node=>node.textContent),'Dừng sau trang hiện tại');
+  assert.match(await page.$eval('#whole-book-estimate .estimate-total',node=>node.textContent),/^Ước tính còn khoảng [\d.,]+(?:–[\d.,]+)?(?: nghìn| triệu)? token \(Tiết kiệm\)$/u);
+  assert.equal(await page.$eval('#whole-book-estimate details.more',node=>[node.open,node.querySelector('summary').textContent].join()),'false,Cách tính');
+  assert.match(estimate,/Chỉ là ước tính/u);assert.match(estimate,/× [\d.]+–[\d.]+ token/u);assert.match(estimate,/số token thật tùy lượng chữ/u);assert.doesNotMatch(estimate,/Số đo thật|867/u);assert.match(estimate,/Bìa giữ nguyên, trang trống và trang bỏ qua: 0 token/u);
+  assert.match(await page.textContent('#file-status'),/^26 trang · /u);
+  assert.equal(await page.$eval('#translate',node=>node.textContent),'Dịch cả quyển');assert.equal(await page.$eval('#stop',node=>node.textContent),'Dừng sau trang này');
+  // S34: the legend names only what the grid shows (pages to translate, the cover kept, a blank page is known later).
+  assert.deepEqual(await page.$$eval('.page-legend li',items=>items.filter(item=>!item.hidden).map(item=>item.dataset.state)),['pending','cover']);
   await page.fill('#content-title','Sách thử nghiệm');await page.fill('#api-key',KEY);await page.click('#translate');
   await page.waitForFunction(()=>/Đã dịch xong cả quyển/u.test(document.querySelector('#whole-book-status').textContent),null,{timeout:120000});
   const state=fake.state,[job]=state.jobs;
@@ -243,14 +257,19 @@ test('Dịch cả quyển: upload once, chunks of at most 20 pages with their of
   assert.deepEqual(await page.$$eval('#page-grid .page-cell',cells=>cells.map(cell=>cell.dataset.state[0]).join('')),'c'+'d'.repeat(BLANK-2)+'b'+'d'.repeat(TOTAL-BLANK));
   assert.equal(await page.$eval('#whole-book-count',node=>node.textContent),'Đã dịch 24/24 trang');
   assert.match(await page.$eval('#whole-book-tokens',node=>node.textContent),/Quyển này đã dùng 3\.234 token Gemini/u);
-  assert.equal(await page.$eval('#translate',node=>node.disabled),true);
-  // History: the two chunk sessions sit under their book, not as two cards.
+  assert.equal(await page.isHidden('#translate'),true,'nothing is left to translate');
+  // S3: what the run made is the book. The session in view is only the last chunk, so its own downloads are not offered (a
+  // "Tải .txt" named after the book would hold pages 22–26 only); the book in Thư viện riêng is the one primary and takes the
+  // focus the run button had.
+  await page.waitForFunction(()=>document.activeElement?.id==='book-read',null,{timeout:10000});
+  assert.deepEqual(await page.evaluate(()=>{const read=document.querySelector('#book-read');return {exports:document.querySelector('.result-actions').hidden,read:[read.className,read.getAttribute('href')],primary:[...document.querySelectorAll('main .primary')].filter(node=>node.offsetParent).map(node=>node.id)};}),{exports:true,read:['button primary',`/?read=${encodeURIComponent(job.storyId)}`],primary:['book-read']});
+  // History: the two chunk sessions sit under their book, not as two rows; one line under its title.
   const row=await page.$eval('#study-books-list .book-job',node=>node.textContent);
-  assert.match(row,/Dịch cả quyển · Đã dịch 24\/24 trang · Hoàn tất · 3\.234 token · bìa giữ nguyên · 1 trang trống/u);assert.match(row,/Các phần đã lưu \(2\)/u);
+  assert.equal(await page.textContent('#study-books-list .book-job .row-meta'),'24/24 trang · Hoàn tất · 3.234 token');assert.match(row,/Các phần đã lưu \(2\)/u);
   assert.equal(await page.$$eval('#study-history-list .history-card',cards=>cards.length),0);
   // Deleting one part from the book row asks first, then removes it.
   await page.click('#study-history > summary');await page.click('#study-books-list .book-job-parts summary');await page.click('#study-books-list .book-job-parts li:last-child .history-delete');
-  await page.waitForSelector('#book-dialog[open]');assert.match(await page.$eval('#book-dialog-body',node=>node.textContent),/khỏi lịch sử và Thư viện riêng\? .*xóa vĩnh viễn/u);
+  await page.waitForSelector('#book-dialog[open]');assert.match(await page.$eval('#book-dialog-body',node=>node.textContent),/^“[^”]+” \(trang 22–26\) sẽ bị xóa vĩnh viễn khỏi lịch sử và Thư viện riêng/u);
   await page.click('#book-dialog-submit');await page.waitForFunction(()=>document.querySelector('#progress').textContent==='Đã xóa bản dịch.');
   assert.equal(state.history.size,1);assert.match(await page.$eval('#study-books-list .book-job',node=>node.textContent),/Các phần đã lưu \(1\)/u);
   // Phone width: the panel and its grid stay inside the screen.
@@ -269,7 +288,7 @@ test('Dịch cả quyển: with "Dịch chữ trên bìa" ticked, as it starts, 
   await page.waitForFunction(()=>/Đã dịch xong cả quyển/u.test(document.querySelector('#whole-book-status').textContent),null,{timeout:120000});
   const state=fake.state,[job]=state.jobs;
   assert.deepEqual(state.chunks.map(({offset,count})=>[offset,count]),[[0,3]],'the cover goes with the first chunk');assert.equal(job.pageStates.slice(0,3),'ddd');assert.equal(state.coverUploads,1,'the original page is the book cover');
-  assert.match(await page.$eval('#whole-book-summary',node=>node.textContent),/bìa: trang 1 \(dịch chữ trên bìa\)/u);assert.deepEqual(errors,[]);
+  assert.deepEqual(errors,[]);
  }finally{await context.close();await fake.close();}
 });
 
@@ -280,28 +299,26 @@ test('Dịch cả quyển: a day quota pauses with the reset time; after a reloa
  let {context,page,errors}=await openStudy(base);
  try{
   await pickBook(page,pdf);await page.fill('#content-title','Sách tạm dừng');await page.fill('#api-key',KEY);await page.click('#translate');
-  await page.waitForFunction(()=>/hết hạn mức trong ngày/u.test(document.querySelector('#whole-book-status').textContent),null,{timeout:120000});
-  const paused=await statusText(page);assert.match(paused,/Dán khóa khác rồi bấm Tiếp tục dịch cả quyển, hoặc đợi hạn mức đặt lại lúc khoảng \d\d:\d\d (hôm nay|ngày mai) \(giờ Việt Nam\)/u);
+  await page.waitForFunction(()=>/hết lượt hôm nay/u.test(document.querySelector('#whole-book-status').textContent),null,{timeout:120000});
+  const paused=await statusText(page);assert.match(paused,/^Khóa đã hết lượt hôm nay \(đặt lại lúc \d\d:\d\d (?:hôm nay|ngày mai)\)\. Phần đã dịch đã lưu; dán khóa khác để dịch tiếp\.$/u);
   const [job]=fake.state.jobs;assert.equal(job.status,'paused');assert.equal(job.pauseReason,'quota_day');assert.equal(job.pageStates,'c'+'d'.repeat(BLANK-2)+'b'+'d'.repeat(21-BLANK)+'.....');
   // Chunk 1: the scanned page's reading, the refused answer and the accepted one.
   assert.equal(job.usage.total,1500+500+867);assert.equal(job.usage.requests,3);
-  assert.equal(await page.$eval('#translate',node=>node.textContent.trim()),'Tiếp tục dịch cả quyển →');assert.deepEqual(errors,[]);
-  // Reload: the key and the picked file are gone; the history offers to continue.
+  assert.equal(await page.$eval('#translate',node=>node.textContent),'Dịch tiếp');assert.deepEqual(errors,[]);
+  // Reload: the key and the picked file are gone; the line under the folded history offers to continue.
   await context.close();({context,page,errors}=await openStudy(base));
-  // An unfinished book opens the history by itself after a reload.
-  await page.waitForFunction(()=>document.querySelector('#study-history').open);
-  const row=await page.$eval('#study-books-list .book-job',node=>node.textContent);assert.match(row,/Đã dịch 19\/24 trang · Tạm dừng · hết hạn mức ngày/u);
-  dayQuota=false;await page.fill('#api-key',KEY);await page.click('#study-books-list [data-book-resume]');
+  assert.equal(await page.textContent('#study-books-list .book-job .row-meta'),'19/24 trang · Tạm dừng: hết hạn mức hôm nay · 2.867 token');
+  dayQuota=false;await page.fill('#api-key',KEY);await resumeBook(page,'Sách tạm dừng');
   await page.waitForFunction(()=>/Đã dịch xong cả quyển/u.test(document.querySelector('#whole-book-status').textContent),null,{timeout:120000});
   const log=fake.state.log;
   // No second upload, the original came back from the account, and the paused chunk was continued, not extracted again.
   assert.equal(log.filter(line=>line.startsWith('PUT /api/my/study/sources')).length,1);assert.equal(log.filter(line=>line==='GET /api/my/study/sources/<sha>').length,1);
   assert.equal(fake.state.chunks.length,2);assert.equal(fake.state.history.size,2);
   assert.equal(job.status,'done');assert.equal(job.pageStates,'c'+'d'.repeat(BLANK-2)+'b'+'d'.repeat(TOTAL-BLANK));
-  assert.match(await page.$eval('#whole-book-summary',node=>node.textContent),/sach-thu\.pdf · 26 trang · bìa: trang 1 · bản gốc lấy từ tài khoản/u);
+  assert.equal(await page.$eval('#whole-book-summary',node=>node.textContent),'Bản gốc lấy từ tài khoản');assert.equal(await page.textContent('#file-status'),'sach-thu.pdf');
   // Deleting the run's progress keeps every translation: its parts go back to the plain history list.
   if(!await page.$eval('#study-history',node=>node.open))await page.click('#study-history > summary');
-  await page.click('#study-books-list [data-book-delete]');await page.waitForSelector('#book-dialog[open]');
+  await inMenu(page,'#study-books-list [data-book-delete]');await page.waitForSelector('#book-dialog[open]');assert.equal(await page.textContent('#book-dialog-submit'),'Xóa tiến độ');
   assert.match(await page.$eval('#book-dialog-body',node=>node.textContent),/Các phần đã dịch vẫn nằm trong Lịch sử dịch và Thư viện riêng/u);
   await page.click('#book-dialog-submit');await page.waitForFunction(()=>document.querySelector('#progress').textContent==='Đã xóa tiến độ dịch cả quyển.');
   assert.equal(fake.state.jobs.length,0);assert.equal(fake.state.history.size,2);
@@ -318,14 +335,14 @@ test('Dịch cả quyển: a Cách dịch chosen while the book waits is saved w
  fake.state.translateHook=async input=>{seen.push([input.blocks[0].id,input.mode,await page.inputValue('#mode')]);return dayQuota?[429,{error:'Gemini báo khóa này đã dùng hết hạn mức trong ngày.',code:'quota_day',retryAfter:null}]:null;};
  try{
   await pickBook(page,pdf);await page.selectOption('#mode','premium');await page.fill('#content-title','Sách đổi cách dịch');await page.fill('#api-key',KEY);await page.click('#translate');
-  await page.waitForFunction(()=>/hết hạn mức trong ngày/u.test(document.querySelector('#whole-book-status').textContent),null,{timeout:120000});
+  await page.waitForFunction(()=>/hết lượt hôm nay/u.test(document.querySelector('#whole-book-status').textContent),null,{timeout:120000});
   const [job]=fake.state.jobs;assert.equal(job.mode,'premium');assert.equal(job.status,'paused');
   // The book waits: Tiết kiệm chosen now goes with the job at once, for this device after a reload and for any other.
   await page.selectOption('#mode','economy');
   await page.waitForFunction(()=>/^Đã lưu Cách dịch Tiết kiệm cho quyển này/u.test(document.querySelector('#whole-book-status').textContent),null,{timeout:30000});
   assert.equal(job.mode,'economy');assert.deepEqual(errors,[]);
-  await context.close();({context,page,errors}=await openStudy(base));await page.waitForFunction(()=>document.querySelector('#study-history').open);
-  await page.click('#study-books-list [data-book-resume]');await page.waitForFunction(()=>/Dán khóa Gemini rồi bấm Tiếp tục dịch cả quyển/u.test(document.querySelector('#progress').textContent),null,{timeout:30000});
+  await context.close();({context,page,errors}=await openStudy(base));
+  await resumeBook(page,'Sách đổi cách dịch');await page.waitForFunction(()=>document.querySelector('#progress').textContent==='Dán khóa Gemini rồi bấm Dịch tiếp.',null,{timeout:30000});
   assert.equal(await page.inputValue('#mode'),'economy','the book comes back in the mode saved with it');
   dayQuota=false;await page.fill('#api-key',KEY);await page.click('#translate');
   await page.waitForFunction(()=>/Đã dịch xong cả quyển/u.test(document.querySelector('#whole-book-status').textContent),null,{timeout:120000});
@@ -351,7 +368,7 @@ test('Dịch cả quyển: Cách dịch stepped through with the arrow keys whil
  fake.state.translateHook=async input=>{seen.push([input.blocks[0].id,input.mode]);return dayQuota?[429,{error:'Gemini báo khóa này đã dùng hết hạn mức trong ngày.',code:'quota_day',retryAfter:null}]:null;};
  try{
   await pickBook(page,pdf);await page.selectOption('#mode','economy');await page.fill('#content-title','Sách đổi cách dịch bằng phím');await page.fill('#api-key',KEY);await page.click('#translate');
-  await page.waitForFunction(()=>/hết hạn mức trong ngày/u.test(document.querySelector('#whole-book-status').textContent),null,{timeout:120000});
+  await page.waitForFunction(()=>/hết lượt hôm nay/u.test(document.querySelector('#whole-book-status').textContent),null,{timeout:120000});
   const [job]=fake.state.jobs;assert.equal(job.mode,'economy');
   // Each arrow key on the closed field is a change (Edge and Chrome on Windows), and the first save is slow to arrive:
   // the later ones wait for it and send the field as it is by then, so none lands after the student's last choice.
@@ -388,7 +405,7 @@ test('Dịch cả quyển: a chosen page range, and "Dừng sau trang hiện t�
   await page.waitForFunction(()=>/Đã dừng theo yêu cầu/u.test(document.querySelector('#whole-book-status').textContent),null,{timeout:60000});
   assert.deepEqual(fake.state.translations.map(input=>input.blocks.map(block=>block.id).join()),['p2-b1','p2-b2']);
   const [job]=fake.state.jobs;assert.equal(job.status,'paused');assert.equal(job.pauseReason,'stopped');assert.equal(job.pageStates,'c'+'.'.repeat(7)+'s'.repeat(18));
-  assert.equal(await page.$eval('#translate',node=>node.textContent.trim()),'Tiếp tục dịch cả quyển →');
+  assert.equal(await page.$eval('#translate',node=>node.textContent),'Dịch tiếp');
   await page.click('#translate');
   await page.waitForFunction(()=>/Đã dịch xong cả quyển/u.test(document.querySelector('#whole-book-status').textContent),null,{timeout:120000});
   // The same chunk went on: one extraction, one session, every block sent to Gemini exactly once.
@@ -397,9 +414,10 @@ test('Dịch cả quyển: a chosen page range, and "Dừng sau trang hiện t�
   assert.equal(job.mode,'premium');assert.deepEqual(fake.state.chunks.map(chunk=>chunk.mode),['premium']);assert.ok(fake.state.translations.every(input=>input.mode==='premium'));
   assert.equal(job.pageStates,'c'+'d'.repeat(BLANK-2)+'b'+'d'.repeat(8-BLANK)+'s'.repeat(TOTAL-8));
   assert.equal(await page.$eval('#whole-book-count',node=>node.textContent),'Đã dịch 6/6 trang');
-  // The offline dictionary (no Gemini, no /api) looks up the Chinese source of the chunk.
-  const calls=fake.state.log.length;assert.equal(await page.$eval('#source-lookup',node=>node.disabled),false);
-  await page.click('#source-lookup');await page.waitForSelector('#hanzi-panel:not([hidden])');assert.equal(fake.state.log.length,calls);
+  // The offline dictionary (no Gemini, no /api) looks up the Chinese source of the chunk, from a block of the original
+  // (the source box is not shown in a book).
+  const calls=fake.state.log.length;assert.equal(await page.isHidden('#source'),true);assert.equal(await page.isHidden('#source-lookup'),true);
+  await page.click('#pdf-dual-viewer [data-source-block]');await page.waitForSelector('#hanzi-panel:not([hidden])');assert.equal(fake.state.log.length,calls);
   assert.deepEqual(errors,[]);assert.deepEqual(fake.state.failures,undefined);
  }finally{await context.close();await fake.close();}
 });
@@ -410,11 +428,11 @@ test('Dịch cả quyển: the pages chosen for a run survive a reload; Tiếp t
  let {context,page,errors}=await openStudy(base);
  try{
   await pickBook(page,pdf);await page.fill('#book-pages','2-8');await page.fill('#content-title','Sách chọn trang');await page.fill('#api-key',KEY);await page.click('#translate');
-  await page.waitForFunction(()=>/hết hạn mức trong ngày/u.test(document.querySelector('#whole-book-status').textContent),null,{timeout:120000});
+  await page.waitForFunction(()=>/hết lượt hôm nay/u.test(document.querySelector('#whole-book-status').textContent),null,{timeout:120000});
   const [job]=fake.state.jobs;assert.equal(job.pageStates,'c'+'.'.repeat(7)+'s'.repeat(TOTAL-8));
   // Reload: the key, the picked file and the typed range are gone; the run continues from the history.
-  await context.close();({context,page,errors}=await openStudy(base));await page.waitForFunction(()=>document.querySelector('#study-history').open);
-  dayQuota=false;await page.fill('#api-key',KEY);await page.click('#study-books-list [data-book-resume]');
+  await context.close();({context,page,errors}=await openStudy(base));
+  dayQuota=false;await page.fill('#api-key',KEY);await resumeBook(page,'Sách chọn trang');
   await page.waitForFunction(()=>/Đã dịch xong cả quyển/u.test(document.querySelector('#whole-book-status').textContent),null,{timeout:120000});
   // Pages 9-26 stay left out: nothing past page 8 was extracted, translated or paid for.
   assert.equal(job.pageStates,'c'+'d'.repeat(BLANK-2)+'b'+'d'.repeat(8-BLANK)+'s'.repeat(TOTAL-8));
@@ -434,13 +452,12 @@ test('Dịch cả quyển: a second device never runs the book another device is
   while(fake.state.translateCalls<1)await new Promise(resolve=>setTimeout(resolve,50));
   // The phone is another browser (its own storage, so its own run id); it opens the history while the laptop translates.
   phone=await openStudy(base);const [job]=fake.state.jobs,holder=job.runnerId;assert.ok(holder);
-  await phone.page.waitForFunction(()=>document.querySelector('#study-history').open);
   assert.match(await phone.page.$eval('#study-books-list .book-job',node=>node.textContent),/Đang dịch ở thiết bị khác/u);
   const spent=()=>({chunks:fake.state.chunks.length,translations:fake.state.translateCalls,downloads:fake.state.log.filter(line=>line==='GET /api/my/study/sources/<sha>').length}),before=spent();
-  await phone.page.fill('#api-key',KEY);await phone.page.click('#study-books-list [data-book-resume]');
+  await phone.page.fill('#api-key',KEY);await resumeBook(phone.page,'Sách hai thiết bị');
   await phone.page.waitForFunction(()=>/^Quyển này đang được dịch ở một thiết bị khác/u.test(document.querySelector('#whole-book-status').textContent),null,{timeout:60000});
   assert.match(await phone.page.$eval('#progress',node=>node.textContent),/Bấm Chờ rồi dịch tiếp/u);
-  assert.equal(await phone.page.$eval('#translate',node=>node.textContent.trim()),'Chờ rồi dịch tiếp →');
+  assert.equal(await phone.page.$eval('#translate',node=>node.textContent),'Chờ rồi dịch tiếp');
   // Nothing was downloaded, extracted or translated by the phone, and the book is still the laptop's.
   assert.deepEqual(spent(),before);assert.equal(job.runnerId,holder);assert.equal(job.status,'running');
   // The phone waits; the laptop finishes the book; the phone then finds nothing left and spends nothing.
@@ -464,14 +481,14 @@ test('Dịch cả quyển: a tab opened before the chunk was saved, with over 10
  const stale=await openStudy(base),other=await openStudy(base);
  try{
   await pickBook(other.page,pdf);await other.page.fill('#content-title','Sách hai thẻ');await other.page.fill('#api-key',KEY);await other.page.click('#translate');
-  await other.page.waitForFunction(()=>/hết hạn mức trong ngày/u.test(document.querySelector('#whole-book-status').textContent),null,{timeout:120000});
+  await other.page.waitForFunction(()=>/hết lượt hôm nay/u.test(document.querySelector('#whole-book-status').textContent),null,{timeout:120000});
   const [job]=fake.state.jobs,[paused]=[...fake.state.history.values()];assert.equal(job.status,'paused');assert.equal(paused.state.done,2);assert.equal(fake.state.chunks.length,1);
   // 101 sessions of other documents are saved after it: the newest 100 the history lists no longer hold the paused chunk.
   for(let i=0;i<101;i++){const id=`9a0b1c2d-3e4f-4a5b-8c6d-${String(i).padStart(12,'0')}`;fake.state.history.set(id,{row:{id,title:`Bài khác ${i+1}`,filename:'khac.txt',domain:'general',mode:'economy',status:'complete',translated_parts:1,total_parts:1,library_story_id:null,library_chapter_id:null,page_start:null,page_end:null,source_total_pages:null,source_sha256:null,created_at:'2099-01-01 00:00:00',updated_at:`2099-01-01 0${Math.floor(i/60)}:${String(i%60).padStart(2,'0')}:00`,revision:1},state:{}});}
   await other.context.close();
   // The old tab picks the same file: the run goes on in the paused chunk instead of extracting it again.
   dayQuota=false;await pickBook(stale.page,pdf,{resume:true});await stale.page.fill('#api-key',KEY);
-  await stale.page.waitForFunction(()=>document.querySelector('#translate').textContent.trim()==='Tiếp tục dịch cả quyển →');await stale.page.click('#translate');
+  await stale.page.waitForFunction(()=>document.querySelector('#translate').textContent==='Dịch tiếp');await stale.page.click('#translate');
   await stale.page.waitForFunction(()=>/Đã dịch xong cả quyển/u.test(document.querySelector('#whole-book-status').textContent),null,{timeout:120000});
   assert.equal(fake.state.chunks.length,2,'chunk 1 extracted once, chunk 2 once');
   const paid=fake.state.translations.flatMap(input=>input.blocks.map(block=>block.id));
@@ -500,10 +517,10 @@ test('Dịch cả quyển: a block Gemini will not translate is asked for once m
   // Asked for once more on its own before the chunk was exported, and never again.
   assert.deepEqual(fake.state.translations.filter(input=>input.blocks.some(block=>block.id==='p5-b1')).map(input=>input.blocks.length>1),[true,false]);
   // The note is kept past the chunk, once: it is still there once the book is finished, with the chunk's count.
-  const warnings=await page.$eval('#warnings',node=>node.textContent);
-  assert.equal(warnings.match(/Trang 5 · đoạn 1: giữ nguyên chữ gốc\. Gemini không trả kết quả vì đoạn này trùng khớp nguyên văn với nội dung có bản quyền\. Có thể dịch tay đoạn này trong “Chỉnh bản dịch từng đoạn”\./gu)?.length,1,warnings);
+  const warnings=await warningsText(page);
+  assert.equal(warnings.match(/^Trang 5 · đoạn 1: giữ nguyên chữ gốc\. Gemini không trả kết quả vì đoạn này trùng khớp nguyên văn với nội dung có bản quyền\.$/gmu)?.length,1,warnings);
   assert.match(warnings,/Trang 2–\d+: cần xem lại 1 đoạn giữ nguyên chữ gốc vì Gemini không dịch được/u);
-  assert.match(await statusText(page),/^Đã dịch xong cả quyển: [^;]*; cần xem lại 1 đoạn giữ nguyên chữ gốc vì Gemini không dịch được \(chi tiết trong phần cảnh báo\)\./u);
+  assert.equal(await statusText(page),'Đã dịch xong cả quyển: 24/24 trang · 1 đoạn cần xem lại.');
   assert.equal(fake.state.renders,2);assert.deepEqual(errors,[]);assert.deepEqual(fake.state.failures,undefined);
  }finally{await context.close();await fake.close();}
 });
@@ -518,7 +535,7 @@ test('Dịch cả quyển: a scanned block Gemini could not read keeps its machi
   assert.equal(fake.state.ocrSlim.length,2,'the scanned page is read, and the block it could not read once more');
   const chunk=[...fake.state.history.values()].find(entry=>entry.row.page_start===2);assert.ok(chunk.state.parts.includes(`第${SCANNED}页（扫描）第1段`),'its machine text is translated');
   // The note is kept past the chunk: it is still there once the book is finished.
-  assert.match(await page.$eval('#warnings',node=>node.textContent),/Trang 3 · đoạn 1: Gemini không trả bản đọc vì trùng khớp nguyên văn với nội dung có bản quyền\. Đoạn này giữ chữ OCR máy, có thể sai; hãy đối chiếu với trang gốc\./u);
+  assert.match(await warningsText(page),/Trang 3 · đoạn 1: Gemini không trả bản đọc vì trùng khớp nguyên văn với nội dung có bản quyền\. Đoạn này giữ chữ OCR máy, có thể sai; hãy đối chiếu với trang gốc\./u);
   assert.deepEqual(errors,[]);assert.deepEqual(fake.state.failures,undefined);
  }finally{await context.close();await fake.close();}
 });
@@ -535,18 +552,18 @@ test('Dịch cả quyển: a chunk whose export finds translations longer than t
   const failure=serviceFailure(422,{error:overflowMessage(entries),code:'overflow',blocks:entries.map(({page,id})=>({page,id}))});return [failure.status,{error:failure.message,code:failure.code,blocks:failure.blocks}];
  };
  let {context,page,errors}=await openStudy(base);
- const MISSING='Trang 2–21 chưa có PDF tiếng Việt, nên “Tải cả quyển (PDF)” còn giữ các trang đó như bản gốc. Mở phần đó trong Sách của tôi (Lịch sử dịch) để xem cần sửa gì, rồi bấm Xuất PDF tiếng Việt; không tốn token.';
+ const MISSING='Trang 2–21 chưa có PDF tiếng Việt. Mở phần đó trong Lịch sử dịch rồi bấm Xuất PDF tiếng Việt.';
  const bookRow=()=>page.$eval('#study-books-list .book-job',node=>node.textContent);
  try{
   await pickBook(page,pdf);await page.fill('#content-title','Sách có đoạn dài');await page.fill('#api-key',KEY);await page.click('#translate');
   await page.waitForFunction(()=>/Đã dịch xong cả quyển|Tạm dừng|Tiến độ đã lưu/u.test(document.querySelector('#whole-book-status').textContent),null,{timeout:120000});
   const [job]=fake.state.jobs;assert.equal(job.status,'done');assert.equal(job.pageStates,'c'+'d'.repeat(BLANK-2)+'b'+'d'.repeat(TOTAL-BLANK));assert.equal(fake.state.renders,1,'the second chunk is exported');
-  const warnings=await page.$eval('#warnings',node=>node.textContent);
-  assert.match(warnings,/^Trang 2–21: chưa xuất được PDF tiếng Việt vì bản dịch của Trang 5 · đoạn 1 dài hơn khung chữ, kể cả khi đã thu nhỏ chữ hết mức\. Mở phần này trong Lịch sử dịch, viết ngắn lại đoạn đó trong “Chỉnh bản dịch từng đoạn”, bấm “Lưu đoạn đã sửa” rồi bấm Xuất PDF tiếng Việt; không tốn token\.$/mu);
+  const warnings=await warningsText(page);
+  assert.match(warnings,/^Trang 2–21: chưa xuất được PDF vì Trang 5 · đoạn 1 dài hơn khung chữ\. Mở phần này trong Lịch sử dịch, viết ngắn lại rồi bấm Xuất PDF tiếng Việt\.$/mu);
   assert.doesNotMatch(warnings,/Ở phần “Đối chiếu kết quả”/u,'the service\'s long advice is for an open part, not for a note in the middle of a book');
   // Finished, but not ready to download: the part without its PDF is named, in the message, the book's row and the grid.
   assert.equal(await statusText(page),`Đã dịch xong cả quyển: 24/24 trang. ${MISSING}`);assert.equal(await page.textContent('#progress'),`Đã dịch xong cả quyển: 24/24 trang. ${MISSING}`);
-  assert.match(await bookRow(),/Dịch cả quyển · Đã dịch 24\/24 trang · Còn phần chưa có PDF tiếng Việt/u);
+  assert.match(await bookRow(),/24\/24 trang · Còn phần chưa có PDF tiếng Việt/u);assert.doesNotMatch(await statusText(page),/Tải cả quyển|tải được cả quyển/u,'never pointed to a download it does not have');
   assert.equal(await page.$eval('#study-books-list .book-job-parts',node=>node.open),true,'the parts open by themselves');
   assert.deepEqual(await page.$$eval('#study-books-list .book-job-parts [data-history-open]',buttons=>buttons.map(button=>button.textContent)),['Trang 2–21 · Hoàn tất · chưa có PDF tiếng Việt','Trang 22–26 · Hoàn tất']);
   assert.equal(await page.$$eval('#page-grid .page-cell',cells=>cells.map(cell=>cell.dataset.state[0]).join('')),'c'+'n'.repeat(BLANK-2)+'b'+'n'.repeat(21-BLANK)+'d'.repeat(TOTAL-21));
@@ -557,15 +574,16 @@ test('Dịch cả quyển: a chunk whose export finds translations longer than t
   await page.waitForFunction(()=>document.querySelector('#study-history').open);
   assert.match(await bookRow(),/Còn phần chưa có PDF tiếng Việt/u);
   await page.click('#study-books-list .book-job-parts [data-history-open]');
-  await page.waitForFunction(()=>/^Phần này chưa có PDF tiếng Việt vì bản dịch của Trang 5 · đoạn 1 dài hơn khung chữ, kể cả khi đã thu nhỏ chữ hết mức\./u.test(document.querySelector('#progress').textContent),null,{timeout:60000});
+  await page.waitForFunction(()=>document.querySelector('#progress').textContent==='1 đoạn dài hơn khung chữ. Viết ngắn lại rồi bấm Xuất PDF tiếng Việt.',null,{timeout:60000});
+  assert.equal(await warningsText(page),'Trang 5 · đoạn 1: dài hơn khung chữ.\n');
   await page.waitForFunction(()=>!document.querySelector('#translate').disabled,null,{timeout:60000});
   const viewer=await page.evaluate(()=>{const root=document.querySelector('#pdf-dual-viewer');return {page:root.querySelector('[data-pdf-page]').textContent,open:root.querySelector('.pdf-block-editor').open,block:root.querySelector('[data-pdf-edit-select]').value,outlined:[...root.querySelectorAll('.is-overflow')].map(node=>node.dataset.blockId)};});
   assert.deepEqual(viewer,{page:'Trang 5 · 4/20',open:true,block:'p5-b1',outlined:['p5-b1']});assert.equal(fake.state.renders,1,'opening the part asks nothing of the PDF service');
   // Shortened, saved and exported: the book is complete again.
   await page.fill('[data-pdf-edit-text]','Bản dịch ngắn.');await page.click('[data-pdf-edit-save]');await page.waitForFunction(()=>/^Đã lưu đoạn sửa\./u.test(document.querySelector('#progress').textContent));
   const download=page.waitForEvent('download');await page.click('#download-pdf');const file=await download;assert.ok(await file.path());
-  await page.waitForFunction(()=>/^PDF tiếng Việt đã được lưu vào Thư viện riêng/u.test(document.querySelector('#progress').textContent),null,{timeout:60000});
-  await page.waitForFunction(()=>/Dịch cả quyển · Đã dịch 24\/24 trang · Hoàn tất/u.test(document.querySelector('#study-books-list .book-job').textContent),null,{timeout:30000});
+  await page.waitForFunction(()=>/^Xong · PDF đã lưu vào Thư viện riêng/u.test(document.querySelector('#progress').textContent),null,{timeout:60000});
+  await page.waitForFunction(()=>document.querySelector('#study-books-list .book-job .row-meta').textContent.startsWith('24/24 trang · Hoàn tất'),null,{timeout:30000});
   assert.equal(fake.state.renders,2);assert.deepEqual(errors,[]);assert.deepEqual(fake.state.failures,undefined);
  }finally{await context.close();await fake.close();}
 });
@@ -576,7 +594,7 @@ test('Dịch cả quyển: a book of one part whose export is refused is finishe
  fake.state.renderHook=(input,document)=>{const page=document.pages.find(entry=>entry.number===5),entries=[{page:5,id:'p5-b1',label:blockLabel(page,'p5-b1')}];const failure=serviceFailure(422,{error:overflowMessage(entries),code:'overflow',blocks:entries.map(({page,id})=>({page,id}))});return [failure.status,{error:failure.message,code:failure.code,blocks:failure.blocks}];};
  // The reader offers “Tải cả quyển (PDF)” only beside a part that has its PDF (frontend/app.js wholeBookPdf): this book
  // has none, so it is not named.
- const MISSING='Trang 2–6 chưa có PDF tiếng Việt, nên chưa tải được cả quyển dạng PDF; bản dịch dạng chữ vẫn đọc được trong Thư viện riêng. Mở phần đó trong Sách của tôi (Lịch sử dịch) để xem cần sửa gì, rồi bấm Xuất PDF tiếng Việt; không tốn token.';
+ const MISSING='Trang 2–6 chưa có PDF tiếng Việt. Mở phần đó trong Lịch sử dịch rồi bấm Xuất PDF tiếng Việt.';
  let {context,page,errors}=await openStudy(base);
  try{
   await pickBook(page,pdf);await page.fill('#book-pages','2-6');await page.fill('#content-title','Sách một phần');await page.fill('#api-key',KEY);await page.click('#translate');
@@ -584,7 +602,7 @@ test('Dịch cả quyển: a book of one part whose export is refused is finishe
   const [job]=fake.state.jobs;assert.equal(job.status,'done');assert.equal(fake.state.renders||0,0);
   assert.deepEqual(fake.state.books.map(book=>book.parts.map(part=>part.mime)),[['text/plain']]);
   assert.equal(await statusText(page),`Đã dịch xong cả quyển: 5/5 trang. ${MISSING}`);
-  assert.match(await page.$eval('#study-books-list .book-job',node=>node.textContent),/Đã dịch 5\/5 trang · Còn phần chưa có PDF tiếng Việt/u);
+  assert.match(await page.$eval('#study-books-list .book-job',node=>node.textContent),/5\/5 trang · Còn phần chưa có PDF tiếng Việt/u);assert.doesNotMatch(await statusText(page),/Tải cả quyển|tải được cả quyển|đọc được trong/u,'never called ready to read or download as a PDF');
   assert.deepEqual(errors,[]);
   // The same file picked again, in another tab: the finished run it binds says the same.
   await context.close();({context,page,errors}=await openStudy(base));
@@ -603,7 +621,7 @@ test('Dịch cả quyển: a save the server refuses pauses the book with the se
  try{
   await pickBook(page,pdf);await page.fill('#content-title','Sách hết chỗ');await page.fill('#api-key',KEY);await page.click('#translate');
   await page.waitForFunction(()=>/Tiến độ của quyển đã lưu/u.test(document.querySelector('#whole-book-status').textContent),null,{timeout:120000});
-  assert.equal(await statusText(page),`${FULL} Tiến độ của quyển đã lưu; dọn bớt xong, bấm Tiếp tục dịch cả quyển.`);
+  assert.equal(await statusText(page),`${FULL} Tiến độ của quyển đã lưu; dọn bớt xong, bấm Dịch tiếp.`);
   const [job]=fake.state.jobs;assert.equal(job.status,'paused');assert.equal(job.pauseReason,'history_full');assert.equal(fake.state.translateCalls,0,'nothing is sent to Gemini that could not be saved');
   assert.deepEqual(errors,[]);assert.deepEqual(fake.state.failures,undefined);
  }finally{await context.close();await fake.close();}
@@ -619,12 +637,12 @@ test('Dịch cả quyển: a save refused after Gemini translated part of a chun
  try{
   await pickBook(page,pdf);await page.fill('#content-title','Sách hết chỗ');await page.fill('#api-key',KEY);await page.click('#translate');
   await page.waitForFunction(full=>document.querySelector('#whole-book-status').textContent.startsWith(full),FULL,{timeout:120000});
-  const PAUSE=`${FULL} Phần đã dịch vẫn hiện trong tab này: đừng đóng tab. Các trang đã xong trước đó đã lưu; dọn bớt xong, bấm Tiếp tục dịch cả quyển ở tab này.`;
+  const PAUSE=`${FULL} Phần đã dịch vẫn hiện trong tab này: đừng đóng tab. Các trang đã xong trước đó đã lưu; dọn bớt xong, bấm Dịch tiếp ở tab này.`;
   assert.equal(await statusText(page),PAUSE);assert.equal(await page.textContent('#progress'),PAUSE);
   const [job]=fake.state.jobs;assert.equal(job.status,'paused');assert.equal(job.pauseReason,'history_full');assert.equal(fake.state.translateCalls,1);assert.equal(sent('p2-b1'),1);
   // Room made, the same tab goes on: the chunk it holds is saved first, so no block is sent to Gemini again.
   fake.state.saveHook=null;
-  await page.waitForFunction(()=>/Tiếp tục dịch cả quyển/u.test(document.querySelector('#translate').textContent)&&!document.querySelector('#translate').disabled,null,{timeout:30000});
+  await page.waitForFunction(()=>document.querySelector('#translate').textContent==='Dịch tiếp'&&!document.querySelector('#translate').disabled&&!document.querySelector('#translate').hidden,null,{timeout:30000});
   await page.click('#translate');
   await page.waitForFunction(()=>/Đã dịch xong cả quyển|Tạm dừng/u.test(document.querySelector('#whole-book-status').textContent),null,{timeout:180000});
   assert.match(await statusText(page),/^Đã dịch xong cả quyển: 24\/24 trang\./u);

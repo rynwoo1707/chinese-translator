@@ -20,7 +20,7 @@
 .shell .content{background:rgba(248,248,243,.97)}.shell .workspace{align-items:start;grid-template-columns:minmax(0,1fr) 300px}
 .shell .workspace>section{min-width:0}.shell .panel{border-radius:12px}.shell .aside-panel h3{line-height:1.5}
 .shell .page-heading{gap:20px;align-items:center}.shell .page-heading h1{font-size:30px}.shell .button-row{flex-wrap:wrap}
-.shell .form-grid{gap:20px}.shell input:not([type="checkbox"]):not([type="file"]),.shell select{min-height:42px}
+.shell .form-grid{gap:20px}.shell input:not([type="checkbox"]):not([type="file"]),.shell select{min-height:44px}
 .shell .upload-footer{gap:16px;flex-wrap:wrap}.shell .upload-footer>small{flex:1 1 200px;line-height:1.8}
 .upload-actions{display:flex;align-items:center;gap:10px;flex-wrap:wrap}.upload-actions button{min-height:42px;white-space:nowrap}
 .shell button:disabled{cursor:not-allowed}.shell .formats{flex-wrap:wrap}.shell .dropzone{padding:28px 18px}.shell .dropzone .upload-limit{line-height:1.8;margin-bottom:0}
@@ -41,28 +41,11 @@ input[type="checkbox"]{width:18px!important;height:18px;min-width:18px;padding:0
  input,select,textarea{transition:border-color .2s ease,box-shadow .2s ease}
  .shell .nav button svg,.upload-symbol,.book-cover,.cover-placeholder{transition:transform .25s ease,color .2s ease,filter .25s ease}
 }
+/* Pointer feedback stays flat (minimal pass): a tint on hover, never a lift or a shadow. */
 @media(hover:hover) and (pointer:fine){
- .shell button:not(:disabled):hover,.login-card button:not(:disabled):hover{border-color:#a5af95;box-shadow:0 4px 12px #34452c14}
- .shell .primary:not(:disabled):hover,.public-shell .primary:not(:disabled):hover,.login-card .primary:not(:disabled):hover{background:#913d30;border-color:#913d30;box-shadow:0 6px 18px #a446362b}
- .shell .nav button:not(:disabled):hover{background:#e7ecdf;color:#354b2e;box-shadow:inset 3px 0 #8b9a76}
- .shell .nav button:hover svg{color:#69824f}
- .shell .tabs button:hover{background:#f5f6ee;color:var(--red);box-shadow:none}
- .dropzone:hover,.dropzone:focus-visible{border-color:#85996a;background:#f3f7ec;box-shadow:inset 0 0 0 1px #a6b59233,0 6px 20px #526b3310}
- .dropzone:hover .upload-symbol{color:#617d43;border-color:#b9c5a8;box-shadow:0 6px 16px #526b331a}
- .selected-file:hover{border-color:#b7c3a4;background:#fbfcf7}
- .shell .stat:hover{background:#f7f9f1}
+ .shell .nav button:not(:disabled):hover{background:#e7ecdf;color:#354b2e}
+ .dropzone:hover,.dropzone:focus-visible{border-color:#85996a;background:#f3f7ec}
  input:not(:disabled):not([type="checkbox"]):hover,select:not(:disabled):hover,textarea:not(:disabled):hover{border-color:#a4b18f}
- .confirm-check:hover{color:#435d32}.confirm-check input:hover{box-shadow:0 0 0 4px #8199651a}
- .public-content .book:hover .book-cover{filter:brightness(1.04) saturate(1.08)}
- .public-header .brand:hover,.login-back:hover{color:#5b7046;box-shadow:0 5px 18px #35472b12}
- .danger:not(:disabled):hover{background:#fff0ec!important;border-color:#b96659!important;box-shadow:0 4px 12px #a03c3214!important}
-}
-@media(hover:hover) and (pointer:fine) and (prefers-reduced-motion:no-preference){
- .shell button:not(:disabled):hover,.login-card button:not(:disabled):hover{transform:translateY(-2px)}
- .shell .nav button:not(:disabled):hover{transform:translateX(3px)}
- .shell .tabs button:hover{transform:none}
- .dropzone:hover .upload-symbol{transform:translateY(-4px) rotate(-4deg)}
- .shell button:not(:disabled):active,.public-shell button:not(:disabled):active,.login-card button:not(:disabled):active{transform:translateY(0);box-shadow:none}
 }
 input:focus-visible,select:focus-visible,textarea:focus-visible{border-color:#819665;outline:2px solid #819665;outline-offset:2px;box-shadow:0 0 0 4px #81966515}
 .chapter-source{margin-top:10px;font-size:12px;color:var(--muted)}.chapter-source a{color:#586f45;text-decoration:underline;text-underline-offset:3px}
@@ -152,10 +135,8 @@ h1,h2,h3,.serif{font-family:var(--font-ui);letter-spacing:normal}
 @media(max-width:900px){.reader-chapter-picker{order:4;width:100%;padding-top:10px;border-top:1px solid #e6e7dc}.reader-chapter-picker select{flex:1;width:auto}.reader-toolbar{flex-wrap:wrap}}
 @media(max-width:680px){.reader-chapter-picker span{position:absolute;width:1px;height:1px;overflow:hidden;clip-path:inset(50%)}.reader-chapter-picker select{width:100%}.chapter-admin-list>div{align-items:flex-start}.chapter-admin-list .danger{padding:8px 10px}}
 
-/* Compact story actions. */
-.story-card{position:relative;overflow:visible}.story-card>.book-cover,.story-card>.book-art{margin-bottom:18px}.story-actions{position:absolute;top:36px;right:36px;z-index:8}.story-actions summary{display:grid;place-items:center;width:42px;height:42px;border:1px solid #dfe1d7;border-radius:50%;background:rgba(255,255,250,.94);color:#55644c;cursor:pointer;box-shadow:0 5px 18px #2635241c;list-style:none;transition:transform .2s ease,background .2s ease,box-shadow .2s ease}.story-actions summary::-webkit-details-marker{display:none}.story-actions summary svg{width:20px;height:20px}.story-actions[open] summary,.story-actions summary:hover{transform:rotate(28deg);background:#eef2e7;box-shadow:0 7px 20px #2635242b}.story-actions-menu{position:absolute;top:50px;right:0;display:grid;width:220px;padding:8px;border:1px solid #dcdfd3;border-radius:12px;background:#fffef9;box-shadow:0 18px 45px #23301f2c}.story-actions-menu button{display:flex;align-items:center;gap:10px;width:100%;padding:10px 12px;border:0;background:transparent;text-align:left;font-size:12px}.story-actions-menu button:hover{background:#f0f3e9;transform:none}.story-actions-menu button svg{width:17px;height:17px;color:#6c7e5e}.story-actions-menu .danger{color:#a03c32;border-top:1px solid #ebe1dc;border-radius:4px}.story-actions-menu .danger svg{color:inherit;transform:rotate(45deg)}
-@media(hover:hover) and (pointer:fine){.story-actions:not([open]):hover .story-actions-menu{display:grid}.story-actions:not([open]) .story-actions-menu{display:none}}
-@media(max-width:680px){.story-actions{top:30px;right:30px}.story-actions-menu{position:fixed;top:auto;right:18px;left:18px;bottom:18px;width:auto;z-index:50}}
+/* A book card of the console holds its ⋯ menu (details.menu, below); the menu opens on a click only. */
+.story-card{position:relative;overflow:visible}.story-card>.book-cover,.story-card>.book-art{margin-bottom:18px}
 
 /* Balanced Chinese-inspired library introduction. */
 .library-intro{position:relative;width:min(100%,860px);margin:0 auto 34px;padding:8px 64px 28px;text-align:center}.library-intro .eyebrow{margin:8px 0 5px;letter-spacing:.28em}.library-intro h1{font-family:var(--font-reading);font-size:clamp(30px,3.6vw,46px);font-weight:600;line-height:1.3;letter-spacing:-.02em;color:#2f352d;text-wrap:balance}.library-intro>.subtitle{margin-top:12px}.library-chinese{font-family:var(--font-reading);font-size:14px;letter-spacing:.32em;color:#616e51;margin-bottom:13px}.library-ornament{display:flex;align-items:center;justify-content:center;gap:14px;color:#a44636}.library-ornament span{width:72px;height:1px;background:linear-gradient(90deg,transparent,#b85a47)}.library-ornament span:last-child{background:linear-gradient(90deg,#b85a47,transparent)}.library-ornament i{display:grid;place-items:center;width:29px;height:29px;border:1px solid #b85a47;transform:rotate(45deg);font-family:var(--font-reading);font-size:13px;font-style:normal}.library-ornament i::first-letter{transform:rotate(-45deg)}.library-seal{position:absolute;right:10px;top:76px;width:42px;height:48px;padding-top:4px;border:2px solid #ac4939;border-radius:3px;color:#ac4939;font-family:var(--font-reading);font-size:14px;font-weight:700;line-height:1.25;opacity:.95;transform:rotate(4deg)}.library-section .library-filters{align-items:center;margin:30px auto 12px}.library-section .library-search{max-width:680px}.library-section .genre-filter{justify-content:center}.library-section .library-result-count{margin:13px 0 0;text-align:center}.library-intro::after{content:"";display:block;width:min(100%,680px);height:1px;margin:24px auto 0;background:linear-gradient(90deg,transparent,#c9cdbd 20%,#c9cdbd 80%,transparent)}
@@ -177,7 +158,7 @@ h1,h2,h3,.serif{font-family:var(--font-ui);letter-spacing:normal}
 @media(max-width:1000px){.personal-library,.my-requests{grid-template-columns:1fr 1fr}.account-auth{grid-template-columns:1fr;gap:28px}.auth-intro h1{font-size:48px}}@media(max-width:680px){.public-header nav .reader-account-link span,.public-header nav .reader-login-link{font-size:0}.personal-library,.my-requests,.visibility-choice{grid-template-columns:1fr}.account-heading{align-items:flex-start}.personal-book{grid-template-columns:90px 1fr}.personal-book>.book-cover,.personal-book>.book-art{width:90px;height:135px}.account-auth{padding:30px 0}.auth-intro h1{font-size:38px}.auth-forms{padding:22px}}
 
 /* Phân tách kho học liệu chung và thư viện của người học */
-.collection-summary{display:flex;flex-wrap:wrap;gap:10px;margin:0 0 22px}.collection-summary span{display:flex;align-items:center;gap:8px;padding:10px 14px;border:1px solid #dfe2d7;border-radius:22px;background:#fff;color:#636d59;font-size:12px}.collection-summary svg{width:17px}.user-stats{display:grid;grid-template-columns:repeat(3,1fr);gap:16px;margin-bottom:24px}.user-stats>div{display:flex;align-items:baseline;gap:12px;padding:20px 24px}.user-stats strong{font:600 30px var(--font-reading);color:#42513a}.user-stats span{color:#666b61;font-size:12px}.user-management{display:grid;gap:22px}.user-block{padding:0;overflow:visible}.user-block>header{display:flex;align-items:center;justify-content:space-between;gap:20px;padding:20px 24px;border-bottom:1px solid var(--line);background:#fbfcf7;border-radius:9px 9px 0 0}.user-identity{display:flex;align-items:center;gap:13px;min-width:0}.user-identity img,.user-identity>span{width:44px;height:44px;border-radius:50%;object-fit:cover}.user-identity>span{display:grid;place-items:center;background:#e8edde;color:#526647;font:700 18px var(--font-reading)}.user-identity h2{font-family:inherit;font-size:14px;font-weight:650}.user-identity p{margin-top:5px;color:#666b61;font-size:12px;overflow-wrap:anywhere}.user-identity>div{min-width:0}.user-badges{display:flex;flex-wrap:wrap;justify-content:flex-end;gap:7px}.user-badges span,.owner-chip{display:inline-flex;align-items:center;gap:5px;padding:6px 9px;border-radius:20px;background:#edf1e7;color:#5b6f4f;font-size:12px;font-weight:700}.user-request-line{padding:13px 24px;border-bottom:1px solid #eceee6;color:#666b60;font-size:12px}.user-books{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:18px;padding:20px}.user-books .story-card{min-width:0;padding:18px;background:#fff}.user-books .story-card>.book-cover,.user-books .story-card>.book-art{height:220px;min-height:0;object-fit:cover}.user-books .story-actions{top:28px;right:28px}.owner-chip{margin:0 0 12px}.owner-chip svg{width:13px}
+.collection-summary{display:flex;flex-wrap:wrap;gap:10px;margin:0 0 22px}.collection-summary span{display:flex;align-items:center;gap:8px;padding:10px 14px;border:1px solid #dfe2d7;border-radius:22px;background:#fff;color:#636d59;font-size:12px}.collection-summary svg{width:17px}.user-stats{display:grid;grid-template-columns:repeat(3,1fr);gap:16px;margin-bottom:24px}.user-stats>div{display:flex;align-items:baseline;gap:12px;padding:20px 24px}.user-stats strong{font:600 30px var(--font-reading);color:#42513a}.user-stats span{color:#666b61;font-size:12px}.user-management{display:grid;gap:22px}.user-block{padding:0;overflow:visible}.user-block>header{display:flex;align-items:center;justify-content:space-between;gap:20px;padding:20px 24px;border-bottom:1px solid var(--line);background:#fbfcf7;border-radius:9px 9px 0 0}.user-identity{display:flex;align-items:center;gap:13px;min-width:0}.user-identity img,.user-identity>span{width:44px;height:44px;border-radius:50%;object-fit:cover}.user-identity>span{display:grid;place-items:center;background:#e8edde;color:#526647;font:700 18px var(--font-reading)}.user-identity h2{font-family:inherit;font-size:14px;font-weight:650}.user-identity p{margin-top:5px;color:#666b61;font-size:12px;overflow-wrap:anywhere}.user-identity>div{min-width:0}.user-badges{display:flex;flex-wrap:wrap;justify-content:flex-end;gap:7px}.user-badges span,.owner-chip{display:inline-flex;align-items:center;gap:5px;padding:6px 9px;border-radius:20px;background:#edf1e7;color:#5b6f4f;font-size:12px;font-weight:700}.user-request-line{padding:13px 24px;border-bottom:1px solid #eceee6;color:#666b60;font-size:12px}.user-books{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:18px;padding:20px}.user-books .story-card{min-width:0;padding:18px;background:#fff}.user-books .story-card>.book-cover,.user-books .story-card>.book-art{height:220px;min-height:0;object-fit:cover}.owner-chip{margin:0 0 12px}.owner-chip svg{width:13px}
 @media(max-width:1050px){.user-books{grid-template-columns:repeat(2,minmax(0,1fr))}}@media(max-width:680px){.user-stats{grid-template-columns:1fr}.user-block>header{align-items:flex-start;flex-direction:column}.user-badges{justify-content:flex-start}.user-books{grid-template-columns:1fr}}
 @keyframes left-page-reveal{0%,50%{opacity:0;transform:translateZ(3px) rotateY(0)}55%{opacity:1}100%{opacity:1;transform:translateZ(3px) rotateY(-180deg)}}
 @keyframes page-turn{0%{opacity:.8;background:#f8f2df;transform:translateZ(4px) rotateY(0)}100%{opacity:0;transform:translateZ(4px) rotateY(-165deg)}}
@@ -293,7 +274,6 @@ h1,h2,h3,.serif{font-family:var(--font-ui);letter-spacing:normal}
 .bilingual-toggle svg{width:18px;height:18px}
 .bilingual-toggle[aria-pressed="true"]{border-color:#536b43;background:#edf3e5;color:#2f4426;box-shadow:inset 0 0 0 1px #536b43}
 .bilingual-toggle-hint{color:#5f6758;font-size:13px}
-.bilingual-original-link{display:inline-flex;align-items:center;min-height:44px;color:#8f3b2e;font-size:13px;text-decoration:underline;text-underline-offset:2px}
 .bilingual{display:grid;gap:10px;margin-top:16px}
 .bilingual-bar{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:10px}
 .bilingual-nav,.bilingual-zoom{display:flex;flex-wrap:wrap;align-items:center;gap:8px}
@@ -327,7 +307,6 @@ h1,h2,h3,.serif{font-family:var(--font-ui);letter-spacing:normal}
 .reader.night .bilingual-scroll{background:#1a201e}
 .reader.night :is(.bilingual-side figcaption,.bilingual-position,.bilingual-zoom output,.bilingual-hint,.bilingual-status,.bilingual-empty,.bilingual-toggle-hint){color:#c6cdc4}
 .reader.night .bilingual-toggle[aria-pressed="true"]{border-color:#a9c48f;background:#2e3d2c;color:#e3eedb}
-.reader.night .bilingual-original-link{color:#f0b3a3}
 @media(max-width:760px){.bilingual-grid{grid-template-columns:1fr}.bilingual-hint{display:none}.bilingual-bar{justify-content:center}}
 @media(max-width:480px){.bilingual-label{display:none}.bilingual-nav,.bilingual-zoom{justify-content:center}}
 
@@ -559,3 +538,513 @@ main#noi-dung:focus{outline:none}
 .run-mode{display:inline-flex;align-items:center;gap:8px;white-space:nowrap}
 .run-mode select{width:auto;margin-top:0;min-height:42px}
 @media(max-width:680px){.admin-accounts li{flex-wrap:wrap}.admin-accounts .admin-account{flex-basis:calc(100% - 46px)}.admin-accounts .danger{margin-left:46px}.run-mode{white-space:normal}}
+
+/* Minimal pass (2026-10-31). One set of tokens, three button styles (primary, secondary, quiet; .danger is quiet in red),
+   one menu (details.menu), one row list, one chip, one note, one status line and one disclosure (details.more): the same
+   block as study.css, so the two pages look alike. These rules come last and win over the older layers above. */
+:root{--ink:#282a27;--muted:#62675d;--line:#e1e1d8;--line-strong:#c9cabd;--surface:#fffffd;--surface-2:#f4f3ec;--accent:#a44636;--accent-hover:#8e3a2c;--link:#35472f;--danger:#a03c32;--ok:#3f6b3a;--warn-ink:#8a5a12;--warn-bg:#fbf3e2;--err-bg:#fbeceb;--s1:4px;--s2:8px;--s3:12px;--s4:16px;--s5:24px;--s6:32px;--s7:48px;--r:8px;--r-surface:12px;--red:#a44636}
+body{line-height:1.5}
+h1{font-size:28px;font-weight:600;line-height:1.25;letter-spacing:normal}h2{font-size:20px;font-weight:600;line-height:1.25}h3{font-size:16px;font-weight:600;line-height:1.3}
+/* Buttons. A bare button is the secondary style; .primary is the one filled action of a view or dialog. */
+button,.button{display:inline-flex;align-items:center;justify-content:center;gap:var(--s2);min-height:44px;padding:0 var(--s4);border:1px solid var(--line-strong);border-radius:var(--r);background:transparent;color:var(--ink);font:600 14px/1.25 var(--font-ui);text-align:center;text-decoration:none;box-shadow:none;transform:none}
+button:hover,.button:hover{border-color:var(--line-strong);background:var(--surface-2);color:var(--ink);box-shadow:none;transform:none}
+button:disabled{opacity:.55;cursor:not-allowed}
+:is(button,a,summary).primary,.button.primary{border-color:var(--accent);background:var(--accent);color:#fff}
+:is(button,a,summary).primary:not(:disabled):hover,.button.primary:hover{border-color:var(--accent-hover);background:var(--accent-hover);color:#fff}
+.secondary{border-color:var(--line-strong);background:transparent;color:var(--ink)}
+:is(button,a,summary).quiet,:is(button,a,summary).danger{border-color:transparent;background:transparent;padding:0 var(--s2);color:var(--link)}
+:is(button,a,summary).danger{color:var(--danger)}
+:is(button,a,summary):is(.quiet,.danger):not(:disabled):hover{border-color:transparent;background:transparent;text-decoration:underline;text-underline-offset:3px}
+:is(button,a).primary.danger,.primary.danger-solid{padding:0 var(--s4);border-color:var(--danger);background:var(--danger);color:#fff}
+:is(button,a).primary.danger:not(:disabled):hover,.primary.danger-solid:not(:disabled):hover{border-color:#86302a;background:#86302a;color:#fff;text-decoration:none}
+.icon-btn{width:44px;min-width:44px;padding:0!important}
+@media(pointer:fine) and (min-width:900px){.dense :is(button,.button,details.menu>summary){min-height:36px}}
+:is(a,button,input,select,textarea,summary,[tabindex]):focus-visible{outline:2px solid var(--link);outline-offset:2px}
+.sr-only{position:absolute!important;width:1px;height:1px;margin:-1px;padding:0;overflow:hidden;clip:rect(0 0 0 0);clip-path:inset(50%);white-space:nowrap;border:0}
+/* Section header: one h2, a muted count, the actions at the right. */
+.section-head{display:flex;flex-wrap:wrap;align-items:center;gap:var(--s2);margin:0 0 var(--s4)}
+.section-head h2{margin:0;color:var(--ink);font:600 20px/1.25 var(--font-ui)}
+.section-head .count{color:var(--muted);font-size:14px;font-weight:400}
+.section-actions{display:flex;flex-wrap:wrap;align-items:center;gap:var(--s2);margin-left:auto}
+/* Menu (Tải về, ⋯ row menus): plain buttons and links in tab order; app.js closes it (Escape, outside, after a choice). */
+details.menu{position:relative;display:inline-block}
+details.menu[open]{z-index:31}
+details.menu>summary{display:inline-flex;align-items:center;justify-content:center;gap:var(--s2);min-height:44px;padding:0 var(--s4);border:1px solid var(--line-strong);border-radius:var(--r);background:transparent;color:var(--ink);font:600 14px/1.25 var(--font-ui);list-style:none;cursor:pointer;user-select:none}
+details.menu>summary::-webkit-details-marker{display:none}
+details.menu>summary::marker{content:''}
+details.menu>summary:hover,details.menu[open]>summary{background:var(--surface-2)}
+details.menu>summary.icon-btn{width:44px;padding:0;font-size:18px;letter-spacing:1px}
+.menu-list{position:absolute;top:calc(100% + 4px);right:0;z-index:30;display:grid;min-width:200px;max-width:calc(100vw - 32px);padding:var(--s1);border:1px solid var(--line);border-radius:var(--r);background:var(--surface);box-shadow:0 8px 24px rgba(0,0,0,.12);text-align:left}
+details.menu.menu-start>.menu-list{right:auto;left:0}
+.menu-list>:is(button,a){display:flex;flex-direction:column;align-items:flex-start;justify-content:center;gap:2px;width:100%;min-height:44px;padding:6px var(--s3);border:0;border-radius:6px;background:transparent;color:var(--ink);font:400 14px/1.35 var(--font-ui);text-align:left;text-decoration:none;white-space:normal}
+.menu-list>:is(button,a):hover,.menu-list>:is(button,a):focus-visible{background:var(--surface-2);color:var(--ink);text-decoration:none}
+.menu-list>:is(button,a) small{color:var(--muted);font-size:12px;font-weight:400}
+.menu-list>.danger,.menu-list>.danger:hover{color:var(--danger)}
+.menu-list>.menu-sep{height:1px;margin:var(--s1) 0;background:var(--line)}
+.menu-list>.menu-note{display:block;padding:10px var(--s3);color:var(--muted);font-size:13px;line-height:1.4;cursor:default}
+/* Row list: rows divided by a hairline; the title button stretches over the row, chips and menus sit above it. */
+.rows{display:grid;grid-template-columns:minmax(0,1fr);margin:0;padding:0;list-style:none}
+.row{position:relative;display:flex;align-items:center;gap:var(--s3);min-height:56px;padding:var(--s2) 0;border-top:1px solid var(--line)}
+.rows>.row:last-child{border-bottom:1px solid var(--line)}
+.row>:not(.row-main){position:relative;z-index:1}
+/* The row whose menu is open rises above the rows after it, so their chips and ⋯ never cover the list. */
+.row:has(details.menu[open]){z-index:31}
+.row-main{flex:1 1 auto;display:grid;justify-content:stretch;justify-items:start;align-content:center;gap:2px;min-width:0;min-height:44px;padding:0;border:0;background:transparent;color:var(--ink);font:600 15px/1.35 var(--font-ui);text-align:left;text-decoration:none}
+button.row-main:hover,a.row-main:hover{border:0;background:transparent;text-decoration:underline;text-underline-offset:3px}
+.row-main::after{content:'';position:absolute;inset:0}
+/* The ring goes round the whole row where :has() works; elsewhere the button keeps its own ring. */
+@supports selector(.row:has(>.row-main)){.row-main:focus-visible{outline:none}}
+.row:has(>.row-main:focus-visible){outline:2px solid var(--link);outline-offset:2px;border-radius:4px}
+.row-title{max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.row-meta{max-width:100%;overflow:hidden;color:var(--muted);font-size:12px;font-weight:400;text-overflow:ellipsis;white-space:nowrap}
+.row-side{display:flex;flex-wrap:wrap;align-items:center;justify-content:flex-end;gap:var(--s2)}
+/* Chip: only a state worth noticing; never a zero count. */
+.chip{display:inline-flex;align-items:center;min-height:22px;padding:2px var(--s2);border-radius:999px;background:var(--surface-2);color:var(--ink);font:600 12px/1.4 var(--font-ui);white-space:nowrap}
+.chip[data-tone="warn"]{background:var(--warn-bg);color:var(--warn-ink)}
+.chip[data-tone="danger"]{background:var(--err-bg);color:var(--danger)}
+.chip[data-tone="ok"]{background:#e9f1e4;color:var(--ok)}
+/* Note: one sentence and at most two buttons, for a decision or an error. Status line: unframed, gone while empty. */
+.note{display:block;margin:0;padding:var(--s3) var(--s4);border:0;border-radius:var(--r);background:var(--surface-2);color:var(--ink);font-size:14px;line-height:1.55}
+.note[data-tone="warn"]{background:var(--warn-bg);color:var(--warn-ink)}
+.note[data-tone="error"]{background:var(--err-bg);color:var(--danger)}
+.note a{color:inherit;text-decoration:underline;text-underline-offset:2px}
+.note>button{margin:var(--s2) var(--s2) 0 0}
+.status{margin:0;color:var(--ink);font-size:14px;line-height:1.5}
+.status:empty{display:none}
+.status[data-tone="error"]{color:var(--danger)}
+.status[data-tone="ok"]{color:var(--ok)}
+/* Field help and errors. */
+.field-hint{display:block;margin-top:var(--s1);color:var(--muted);font-size:12px;font-weight:400;line-height:1.5}
+.field-error{margin:var(--s1) 0 0;color:var(--danger);font-size:13px;line-height:1.5}
+.field-error:empty{display:none}
+/* Disclosure: closed by default, never a fact needed before acting. */
+details.more>summary{display:inline-flex;align-items:center;gap:6px;min-height:44px;color:var(--link);font:600 14px/1.25 var(--font-ui);list-style:none;cursor:pointer}
+details.more>summary::-webkit-details-marker{display:none}
+details.more>summary::before{content:'▸';display:inline-block;font-size:12px}
+details.more[open]>summary::before{transform:rotate(90deg)}
+/* "Quên mật khẩu?" is a disclosure like the others: no underline (it would also turn with the ▸ into a stray bar). */
+.auth-forgot.more>summary{text-decoration:none}
+.more-body{padding:var(--s1) 0 var(--s2) 18px;color:var(--muted);font-size:14px;line-height:1.6}
+.more-body p{margin:0}.more-body p+p{margin-top:var(--s1)}
+/* Empty states: one muted line, at most one button, no box. */
+.empty-line{display:flex;flex-wrap:wrap;align-items:center;gap:var(--s3);margin:0;padding:var(--s3) 0;color:var(--muted);font-size:14px}
+/* Dialogs: the question as the title, at most two sentences, Hủy then the action; on phones the actions stay in view. */
+dialog#modal{width:min(520px,calc(100vw - 32px));max-width:none;max-height:calc(100dvh - 32px);padding:var(--s5);border:1px solid var(--line);border-radius:var(--r-surface);background:var(--surface);color:var(--ink);box-shadow:0 12px 40px rgba(0,0,0,.18)}
+#modal h2{margin:0 0 var(--s3);font:600 20px/1.3 var(--font-ui);color:var(--ink)}
+#modal .subtitle,#modal .dialog-body{margin:0 0 var(--s2);color:var(--ink);font-size:14px;line-height:1.6}
+#modal .button-row{display:flex;flex-wrap:wrap;justify-content:flex-end;gap:var(--s2);margin-top:var(--s5)}
+#modal label{margin-top:var(--s4);color:var(--ink);font-size:14px}
+#modal .confirm-check{display:flex;align-items:center;gap:var(--s3);min-height:44px;margin-top:var(--s4)}
+@media(max-width:680px){#modal .button-row{position:sticky;bottom:calc(-1 * var(--s5));margin:var(--s5) calc(-1 * var(--s5)) calc(-1 * var(--s5));padding:var(--s3) var(--s5);border-top:1px solid var(--line);background:var(--surface)}#modal .button-row>button{flex:1 1 auto}}
+/* Toasts only report background events: bottom-left on desktop, top-centre on phones, clear of the main action. */
+#toast{right:auto;bottom:24px;left:24px;max-width:min(420px,calc(100vw - 48px));padding:var(--s3) var(--s4);border-radius:var(--r);background:#2f3a2b;font-size:14px;line-height:1.5;transform:none}
+@media(max-width:680px){#toast{top:12px;bottom:auto;left:50%;max-width:calc(100vw - 32px);transform:translateX(-50%)}}
+/* Surfaces: one per section, no shadow; nothing clips a menu. */
+.panel{overflow:visible;border-color:var(--line);border-radius:var(--r-surface);box-shadow:none}
+/* Public pages (minimal pass). The painting shows as a band on the home page only; every other page starts 32 px under
+   the header on plain paper, without an outer panel. */
+:root.is-public:not(.is-home),:root:has(>body.legal-body){background:#f6f5ef}
+:root.is-public:not(.is-home) .public-content{margin-top:var(--s6);margin-bottom:var(--s7);padding:0 var(--s5);border:0;border-radius:0;background:transparent;box-shadow:none;backdrop-filter:none}
+@media(max-width:680px){:root.is-public:not(.is-home) .public-content{width:100%;padding:0 var(--s4)}:root.is-public.is-reading .public-content{margin-top:var(--s3);padding:0 var(--s2)}}
+.public-content label{color:var(--ink);font-size:14px}
+.public-content :where(input:not([type="checkbox"]):not([type="radio"]),select,textarea),#modal :where(input:not([type="checkbox"]):not([type="radio"]),select,textarea){min-height:44px;border-color:var(--line-strong);border-radius:var(--r);font-size:16px}
+/* Links that act as buttons: the same three styles. */
+.hero-cta,.public-content a.button,#modal a.button{display:inline-flex;align-items:center;justify-content:center;gap:var(--s2);min-height:44px;padding:0 var(--s4);border:1px solid var(--line-strong);border-radius:var(--r);background:transparent;color:var(--ink);font:600 14px/1.25 var(--font-ui);text-decoration:none;box-shadow:none}
+.hero-cta:hover{border-color:var(--line-strong);background:var(--surface-2);color:var(--ink)}
+.hero-cta.hero-cta-primary,.public-content a.button.primary{border-color:var(--accent);background:var(--accent);color:#fff}
+.hero-cta.hero-cta-primary:hover,.public-content a.button.primary:hover{border-color:var(--accent-hover);background:var(--accent-hover);color:#fff}
+.public-content a.button.quiet{border-color:transparent;padding:0 var(--s2);color:var(--link)}
+.public-content a.button.quiet:hover{background:transparent;text-decoration:underline;text-underline-offset:3px}
+/* Home: the audience line, the title, two actions; then the library. */
+.library-intro{width:min(100%,820px);margin:0 auto var(--s6);padding:var(--s2) var(--s4) var(--s5)}
+.library-intro .eyebrow{margin:0 0 var(--s3);color:var(--muted);font-size:12px;font-weight:600;letter-spacing:.2em}
+.library-intro h1{margin:0;color:var(--ink);font:600 40px/1.25 var(--font-reading);letter-spacing:-.01em;text-wrap:balance}
+.hero-actions{gap:var(--s2);margin-top:var(--s5)}
+.library-heading{margin:0 auto var(--s4)}
+.library-heading h2{color:var(--ink);font:600 20px/1.25 var(--font-ui)}
+.library-filters{gap:var(--s3);margin:0 0 var(--s4)}
+.library-search{max-width:560px;margin:0 auto}
+.library-search input{padding-left:40px}
+.genre-filter{justify-content:center;gap:var(--s2)}
+.genre-filter button{min-height:44px;padding:0 var(--s4);border:1px solid var(--line);border-radius:999px;background:var(--surface);color:var(--ink);font:500 14px/1.25 var(--font-ui);box-shadow:none}
+.genre-filter button:hover{border-color:var(--line-strong);background:var(--surface-2)}
+.genre-filter button[aria-pressed="true"]{border-color:var(--link);background:var(--link);color:#fff}
+.library-result-count{margin:0 0 var(--s4);color:var(--muted);font-size:14px;text-align:center}
+#library-no-results,.library-empty{justify-content:center;text-align:center}
+.book-genre{color:var(--muted);font-weight:600}
+.book-title{margin:var(--s1) 0;color:var(--ink);font:600 16px/1.4 var(--font-ui)}
+.book-chapters{gap:0;color:var(--muted);font-size:14px}
+.book-reveal .sample-card-note{color:var(--muted);font-style:normal}
+.book-reveal .book-author{margin:0}
+.book-actions{padding-top:var(--s3)}
+.book-actions .secondary{width:100%}
+@media(max-width:680px){
+ .library-intro{padding:0 0 var(--s4)}
+ .library-intro h1{font-size:28px}
+ .hero-actions{flex-direction:row;flex-wrap:wrap;justify-content:center}
+ /* One row of genre chips that scrolls inside itself; the page never scrolls sideways. */
+ .library-filters{align-items:stretch}
+ .genre-filter{flex-wrap:nowrap;justify-content:flex-start;align-self:stretch;width:auto;min-width:0;margin:0 calc(-1 * var(--s4));padding:0 var(--s4) var(--s1);overflow-x:auto;scrollbar-width:none;-webkit-overflow-scrolling:touch}
+ .genre-filter::-webkit-scrollbar{display:none}
+ .genre-filter button{flex:none}
+}
+/* The part picker: the book's title, one tappable row per part. */
+.chapter-rows{display:grid;max-height:min(60vh,480px);margin:var(--s3) 0 0;padding:0;overflow:auto;border-top:1px solid var(--line);list-style:none}
+.chapter-rows li{border-bottom:1px solid var(--line)}
+.chapter-rows li[hidden]{display:none}
+.chapter-row{justify-content:flex-start;gap:var(--s3);width:100%;min-height:48px;padding:var(--s2);border:0;border-radius:0;background:transparent;font-weight:400;text-align:left}
+.chapter-row:hover{background:var(--surface-2)}
+.chapter-row-number{flex:none;min-width:2em;color:var(--muted);font-variant-numeric:tabular-nums}
+.chapter-row-title{flex:1 1 auto;min-width:0;overflow-wrap:anywhere}
+#modal .chapter-search{display:grid;gap:var(--s1);margin-top:var(--s2)}
+/* Sign-in, registration and password reset: one card, form first. */
+.account-auth{display:block;min-height:0;padding:0}
+.account-auth .auth-forms{width:min(100%,440px);margin:0 auto;padding:var(--s5);border:1px solid var(--line);border-radius:var(--r-surface);background:var(--surface);box-shadow:none}
+.auth-forms h1{margin:0;color:var(--ink);font:600 28px/1.25 var(--font-ui)}
+.auth-lead{margin:var(--s1) 0 var(--s4);color:var(--muted);font-size:14px}
+.auth-tabs{margin:0 0 var(--s4);padding:var(--s1);border-radius:var(--r);background:var(--surface-2)}
+.auth-tabs button{min-height:44px;border:0;border-radius:6px;background:transparent;color:var(--muted)}
+.auth-tabs button.active{background:var(--surface);color:var(--ink);box-shadow:0 1px 2px rgba(0,0,0,.08)}
+.auth-form{gap:var(--s4)}
+.auth-form .primary{width:100%}
+.auth-note{margin:0;padding:var(--s3) var(--s4);border-radius:var(--r);background:var(--surface-2);color:var(--ink);font-size:14px;line-height:1.55}
+.auth-pending{margin:0 0 var(--s4)}
+.auth-divider{margin:var(--s5) 0 var(--s3)}
+.auth-forms .terms-check{display:flex;align-items:flex-start;gap:var(--s3);min-height:44px;color:var(--ink);font-size:14px}
+.auth-forms .terms-check input{margin-top:3px}
+.google-login{display:flex;width:100%;min-height:44px;margin-top:var(--s3);padding:0 var(--s4);border:1px solid var(--line-strong);border-radius:var(--r);background:transparent;color:var(--ink);font:600 14px/1.25 var(--font-ui)}
+.google-login:hover{background:var(--surface-2)}
+.auth-forms .google-login[aria-disabled="true"]{opacity:1;cursor:pointer}
+.google-terms{text-align:left}
+.form-error{padding:var(--s3) var(--s4);border:0;border-radius:var(--r);background:var(--err-bg);color:var(--danger);font-size:14px;line-height:1.55}
+.reset-ready,.reset-unavailable{display:grid;justify-items:start;gap:var(--s4);margin-top:var(--s4)}
+.reset-ready p,.reset-unavailable p{color:var(--ink);line-height:1.6}
+.reset-auth form{margin-top:var(--s4)}
+.account-loading{padding:0}
+/* Account: a plain profile row, then sections with one heading each; lists are rows. */
+.account-heading{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:var(--s4);margin:0 0 var(--s6);padding:0;border:0;border-radius:0;background:transparent;backdrop-filter:none}
+.account-profile{display:flex;align-items:center;gap:var(--s3);min-width:0}
+.account-profile>span,.account-profile>img{flex:none;width:48px;height:48px;border-radius:50%;font-size:18px}
+.account-heading h1{margin:0;color:var(--ink);font:600 28px/1.25 var(--font-ui)}
+.account-email{margin:2px 0 0;color:var(--muted);font-size:14px}
+.personal-section{margin:0 0 var(--s6)}
+.rows.personal-library,.rows.my-requests{display:grid;grid-template-columns:minmax(0,1fr);gap:0}
+.row.personal-book,.row.request-row{display:flex;gap:var(--s3);padding:var(--s3) 0;border:0;border-top:1px solid var(--line);border-radius:0;background:transparent;box-shadow:none}
+.rows>.row.personal-book:last-child,.rows>.row.request-row:last-child{border-bottom:1px solid var(--line)}
+.personal-cover{flex:none;width:40px}
+.personal-cover :is(img,.book-art){display:grid;place-items:center;width:40px;height:60px;margin:0;border-radius:4px;object-fit:cover;font-size:18px}
+.personal-cover .cover-placeholder{background:#e4e9d8;color:#3f4e35}
+.row-text{flex:1 1 auto;min-width:0}
+.row-text h3.row-title{margin:0;color:var(--ink);font:600 15px/1.35 var(--font-ui)}
+.row-text .row-meta{margin:2px 0 0}
+.layout-outdated{margin:2px 0 0;color:var(--warn-ink);font-size:13px;line-height:1.5}
+.layout-outdated a{color:inherit;text-decoration:underline;text-underline-offset:2px}
+.request-row.is-new{background:var(--warn-bg)}
+@media(prefers-reduced-motion:no-preference){.request-row{transition:background-color .6s ease}}
+.account-empty{margin:0}
+.account-security,.account-delete{max-width:none;padding:0;border:0;border-radius:0;background:transparent}
+.account-security h3{margin:0 0 var(--s3);font:600 16px/1.3 var(--font-ui)}
+.account-password{max-width:420px;margin-top:0}
+.account-password button[type="submit"]{justify-self:start}
+.account-sessions{display:grid;justify-items:start;gap:var(--s2);margin-top:var(--s5);padding-top:0;border-top:0}
+.account-security-note{color:var(--muted);font-size:14px}
+.account-delete h2{color:var(--ink)}
+.account-delete p{margin:0;color:var(--ink);font-size:14px}
+.account-delete-links{display:flex;flex-wrap:wrap;align-items:center;gap:var(--s2);margin-top:var(--s3)!important}
+.account-delete .danger{min-height:44px;margin:0}
+.account-notice{display:block;max-width:none;margin:0 0 var(--s5);padding:0;border:0;background:transparent;color:var(--ok);font-size:14px}
+.account-warning{display:flex;flex-wrap:wrap;align-items:center;gap:var(--s2) var(--s3);max-width:none;margin:0 0 var(--s5)}
+.account-warning button{margin:0}
+@media(max-width:680px){.row.personal-book,.row.request-row{flex-wrap:wrap}.row.personal-book .row-text{flex-basis:0}.row.personal-book .row-side,.row.request-row .row-side{flex-basis:100%;justify-content:flex-start;padding-left:52px}.row.request-row .row-side{padding-left:0}.account-heading{margin-bottom:var(--s5)}}
+/* The request dialog: a file button, one hint, the error right under the two sources. */
+.request-source{margin:var(--s4) 0 0;padding:0;border:0}
+.request-source legend,.visibility-choice legend{margin:0 0 var(--s2);padding:0;color:var(--ink);font:600 14px/1.4 var(--font-ui)}
+.request-file{display:flex;flex-wrap:wrap;align-items:center;gap:var(--s3)}
+.file-pick{position:relative;margin:0!important;cursor:pointer}
+.file-pick:focus-within{outline:2px solid var(--link);outline-offset:2px}
+.file-name{color:var(--ink);font-size:14px;overflow-wrap:anywhere}
+.request-source .request-file-again{color:var(--warn-ink)}
+.visibility-choice{display:grid;grid-template-columns:1fr;gap:0;margin:var(--s4) 0 0}
+.visibility-choice label{display:flex;align-items:center;gap:var(--s3);min-height:44px;margin:0!important}
+.visibility-choice input{position:static;width:18px;height:18px;margin:0;opacity:1;accent-color:var(--link)}
+.visibility-choice label>span{display:inline;height:auto;padding:0;border:0;border-radius:0;background:transparent;box-shadow:none;color:var(--ink);font-size:14px}
+.visibility-choice input:checked+span{border:0;background:transparent;box-shadow:none}
+.visibility-choice .visibility-rights{grid-column:1/-1;margin:-4px 0 0 30px;color:var(--muted);font-weight:400}
+#modal .visibility-choice input:focus-visible+span{outline:none}
+#modal .visibility-choice input:focus-visible{outline:2px solid var(--link);outline-offset:2px}
+/* Error cards (a list or a book that did not load). */
+.load-error{max-width:640px;margin:var(--s5) auto 0;padding:var(--s5);border:1px solid var(--line);border-radius:var(--r-surface);background:var(--surface)}
+.load-error :is(h1,h2){margin:0 0 var(--s2);color:var(--ink);font:600 20px/1.3 var(--font-ui)}
+.load-error p{color:var(--ink)}
+.load-error .button-row{gap:var(--s2);margin-top:var(--s4)}
+/* Reader: no outer panel; a slim toolbar, then the paper card as the only surface. */
+.reader-toolbar{gap:var(--s2);padding:var(--s1) 0 var(--s2);border:0;border-bottom:1px solid var(--line);border-radius:0;background:transparent;box-shadow:none}
+.reader-toolbar .reader-back,.reader-toolbar .reader-share{min-height:44px;padding:0 var(--s3)!important;border-color:transparent;background:transparent;color:var(--link);font-size:14px}
+.reader-toolbar .reader-back:hover,.reader-toolbar .reader-share:hover{background:var(--surface-2)}
+.reader-control-group{gap:var(--s1);padding:0;border-radius:0;background:transparent}
+.reader-toolbar .reader-icon{width:44px;height:44px;min-height:44px;border:0;border-radius:var(--r);background:transparent;color:var(--ink);box-shadow:none}
+.reader-toolbar .reader-icon:hover{background:var(--surface-2)}
+.reader-icon.theme-paper,.reader-icon.theme-light,.reader-icon.theme-night{background:transparent;color:var(--ink)}
+.reader-toolbar .theme-options{gap:0;border:1px solid var(--line-strong);border-radius:var(--r);overflow:hidden}
+.reader-toolbar .theme-options .reader-icon{border-radius:0}
+.reader-toolbar .reader-icon[aria-pressed="true"]{background:var(--link);color:#fff;box-shadow:none}
+.reader-listen,.reader-toolbar .reader-listen{gap:6px;padding:0 var(--s3)}
+.reader-listen.is-speaking{border-color:var(--link);background:var(--link);color:#fff}
+.reader-listen svg{width:18px;height:18px}
+.reader-toolbar .reader-audio{flex:none;margin-left:0}
+.reader-listen{flex:none;white-space:nowrap}
+.reader-audio{margin-left:0}
+@media(min-width:681px){
+ .reader-toolbar{flex-wrap:wrap}
+ /* 180 px: with "Nghe" the whole toolbar stays on one row in the 860 px column; the list still grows into what is left. */
+ .reader-toolbar .reader-chapter-picker{order:0;flex:1 1 180px;width:auto;max-width:420px;padding-top:0;border-top:0}
+ .reader-toolbar .reader-chapter-picker select{margin-top:0}
+ .reader-options{order:0;width:auto;gap:var(--s3);padding-top:0;border-top:0}
+}
+.reader-pagination{margin-top:var(--s4)}
+.reader-pagination button:disabled{visibility:hidden}
+.reader .chapter-source a{color:var(--link)}
+/* 44 px to tap without moving the line: the source link and the footnotes' summary. */
+.reader .chapter-source a{display:inline-block;padding:13px 0;margin:-13px 0}
+.footnotes-panel summary{min-height:44px}
+.reader .sample-notice{margin:var(--s4) 0 0;padding:var(--s3) var(--s4);border:0;border-radius:var(--r);background:var(--surface-2);color:var(--ink);font-size:14px}
+.reader .sample-notice.layout-outdated{background:var(--warn-bg);color:var(--warn-ink)}
+.reader .sample-notice a{color:inherit}
+.reader.night .sample-notice{background:#2b2a24;color:#e7ddc8}
+.reader.night .sample-notice.layout-outdated{background:#3a3222;color:#f0d9a8}
+/* A PDF part: "Bản dịch | Song ngữ" and "Tải về" in one row; the whole-book report under it only while it says something. */
+.reader-pdf-tools{display:flex;flex-wrap:wrap;align-items:center;gap:var(--s2);margin-top:var(--s4)}
+.reader-pdf-tools .reader-download{margin-left:auto}
+.segmented{display:inline-flex;border:1px solid var(--line-strong);border-radius:var(--r);overflow:hidden}
+.segmented button{min-height:44px;border:0;border-radius:0;background:transparent;color:var(--ink);font-weight:600;box-shadow:none}
+.segmented button+button{border-left:1px solid var(--line-strong)}
+.segmented button[aria-pressed="true"],.bilingual-toggle[aria-pressed="true"]{border-color:var(--line-strong);background:var(--link);color:#fff;box-shadow:none}
+.reader.night .segmented button:not([aria-pressed="true"]){color:#edf0e9}
+.reader.night .reader-pdf-tools details.menu>summary{border-color:#526059;color:#edf0e9}
+.reader.night .reader-pdf-tools details.menu>summary:hover,.reader.night .reader-pdf-tools details.menu[open]>summary{background:#303a36}
+.book-download{display:grid;gap:var(--s2);margin-top:var(--s2)}
+.book-download .status{color:var(--ink)}
+.reader.night .book-download .status{color:#c6cdc4}
+.book-pick{display:grid;gap:var(--s2);border:0;border-left:0}
+.book-pick-file{min-height:44px}
+.book-cover-offer{display:flex;flex-wrap:wrap;align-items:center;gap:var(--s3);border:0}
+.book-download-notes{color:var(--ink);font-size:13px}
+/* Đọc song ngữ: the page bar stays in view while the pages scroll; a step that cannot be taken keeps its room. */
+.bilingual-bar{position:sticky;top:73px;z-index:5;padding:var(--s1) 0;background:#f7efdf}
+.reader.light .bilingual-bar{background:#fff}
+.reader.night .bilingual-bar{background:#1f2425}
+@media(max-width:800px){.bilingual-bar{top:0}}
+.bilingual-nav button[hidden],.bilingual-zoom button[hidden]{display:inline-flex!important;visibility:hidden}
+/* Legal pages and 404: one surface; the contents list is a "Mục lục" disclosure on phones, an open list elsewhere. */
+.legal-page{margin:var(--s6) auto var(--s7);border-color:var(--line);border-radius:var(--r-surface);box-shadow:none}
+.legal-article h1{margin:0 0 var(--s1);color:var(--ink);font:600 28px/1.25 var(--font-ui)}
+.legal-meta{color:var(--muted);font-size:14px}
+.legal-summary{border:0;border-radius:var(--r);background:var(--surface-2)}
+.legal-toc{margin:0 0 var(--s5);padding:0;border:0;background:transparent}
+.legal-toc ol{margin-top:var(--s1)}
+@media(min-width:681px){.legal-toc-more[open]>summary{display:none}}
+@media(max-width:680px){.legal-page{margin:var(--s4) auto var(--s6)}}
+/* Admin console (minimal pass): a quiet sidebar, one heading per view with its actions at the right, rows instead of
+   tables and cards, one note per state. */
+.shell .sidebar{padding:var(--s5) var(--s3);background:#f3f3ea}
+.shell .sidebar .brand{margin:0 var(--s2) var(--s5)}
+.shell .brand strong{font-size:22px}
+.shell .brand-dot{color:var(--accent)}
+.shell .nav{gap:2px}
+.shell .nav button,.shell .nav .side-library{display:flex;align-items:center;justify-content:flex-start;gap:10px;min-height:44px;padding:0 var(--s3);border:0;border-radius:var(--r);background:transparent;color:var(--muted);font:500 14px/1.25 var(--font-ui);text-align:left;text-decoration:none;box-shadow:none}
+.shell .nav button svg{width:18px;height:18px}
+.shell .nav button.active{background:#e4e9d9;color:var(--ink);font-weight:600;box-shadow:none}
+.shell .nav button.active svg{color:var(--link)}
+.shell .nav .side-library:hover{background:#e7ecdf;color:var(--ink)}
+.shell .side-bottom{padding-top:var(--s5)}
+/* One line of text that wraps as text; "Cài đặt" never breaks and its target is 44 px tall without changing the line. */
+.side-key{margin:0 var(--s3) var(--s3);color:var(--warn-ink);font-size:13px;line-height:1.4}
+.side-key .dot{display:inline-block;width:8px;height:8px;margin:0 var(--s2) 0 0;border-radius:50%;background:#c58b2a;vertical-align:1px}
+.side-key a{display:inline-block;padding:13px 0;margin:-13px 0;color:inherit;text-decoration:underline;text-underline-offset:2px;white-space:nowrap}
+.shell .profile{gap:var(--s2);margin-top:var(--s3);padding:var(--s3) var(--s2) 0;font-size:13px}
+.shell .profile small{margin-top:2px;font-size:12px}
+/* The console has no top bar any more: the content fills the screen's height, so the artwork never shows as a band under
+   a short view (the old rule took a 77 px top bar off). */
+.shell .content{max-width:1180px;min-height:100vh;min-height:100dvh;padding:var(--s6) var(--s6) var(--s7);background:rgba(248,248,243,.97)}
+.shell .page-heading{display:flex;flex-wrap:wrap;align-items:flex-start;justify-content:space-between;gap:var(--s3) var(--s5);margin:0 0 var(--s5)}
+.shell .page-heading h1{margin:0;color:var(--ink);font:600 28px/1.25 var(--font-ui);letter-spacing:normal;overflow-wrap:anywhere}
+.shell .page-heading .button-row{display:flex;flex-wrap:wrap;align-items:center;gap:var(--s2)}
+.page-title{min-width:0}
+.page-meta{margin:var(--s1) 0 0;color:var(--muted);font-size:14px;overflow-wrap:anywhere}
+.title-row{display:flex;flex-wrap:wrap;align-items:center;gap:var(--s2) var(--s3)}
+.back-link{margin:0 0 var(--s2)}
+.back-link .quiet{margin-left:calc(-1 * var(--s2))}
+.login-back{display:inline-flex;align-items:center;min-height:44px;padding:0 var(--s2);background:transparent;color:var(--link);font-weight:600}
+.login-back:hover{text-decoration:underline;text-underline-offset:3px}
+/* Xưởng dịch. */
+.shell .stats{display:flex;flex-wrap:wrap;align-items:center;gap:0 var(--s1);margin:calc(-1 * var(--s3)) 0 var(--s4);padding:0;border:0;border-radius:0;background:transparent}
+.shell .stats .quiet{padding:0 var(--s2);font-weight:600}
+.stats-dot{color:var(--muted)}
+.translate-panel .panel-heading{padding:var(--s4) var(--s5);border-bottom:0}
+.translate-panel .panel-heading h2{font:600 20px/1.25 var(--font-ui)}
+.shell .tabs{gap:var(--s5);padding:0 var(--s5)}
+.shell .tabs button{min-height:44px;padding:0;border:0;border-bottom:2px solid transparent;border-radius:0;background:transparent;color:var(--muted);font-size:14px}
+.shell .tabs button.active{border-bottom-color:var(--link);color:var(--ink)}
+.upload-area{padding:var(--s4) var(--s5)}
+.shell .dropzone{display:grid;justify-items:center;gap:var(--s2);padding:var(--s5) var(--s4);border:1px solid var(--line);border-radius:var(--r);background:var(--surface-2);text-align:center}
+.shell .dropzone p{margin:0;color:var(--ink);font-size:14px}
+.shell .dropzone .upload-limit{color:var(--muted);font-size:12px;line-height:1.5}
+.shell .dropzone.drag{border-color:var(--link);background:#eef3e6}
+.selected-file{justify-content:space-between;margin-top:var(--s3);padding:var(--s2) var(--s3);border:1px solid var(--line);border-radius:var(--r);font-size:14px}
+.shell .form-grid{gap:var(--s4) var(--s5);padding:0 var(--s5) var(--s5)}
+.story-pick{display:flex;flex-wrap:wrap;align-items:flex-end;gap:var(--s2)}
+.story-pick label{flex:1 1 220px}
+.story-pick .field-label{flex-basis:100%;color:var(--ink);font-size:14px}
+.mode-help{align-self:end}
+.form-grid .mode-hint,.shell .mode-hint{margin:0;color:var(--muted);font-size:13px;line-height:1.5}
+.upload-cover{display:flex;align-items:center;gap:var(--s3)}
+.upload-cover .book-cover,.upload-cover .book-art{width:48px;height:72px;margin:0;border-radius:4px;font-size:22px}
+.upload-cover>div{display:flex;flex-wrap:wrap;align-items:center;gap:var(--s2) var(--s3)}
+.shell .upload-footer{justify-content:flex-end;padding:var(--s4) var(--s5);border-top:1px solid var(--line);background:transparent}
+.shell .recent{margin-top:var(--s6)}
+.shell label{color:var(--ink);font-size:14px}
+.shell :where(input:not([type="checkbox"]):not([type="radio"]):not([type="file"]),select,textarea){min-height:44px;border-color:var(--line-strong);border-radius:var(--r);font-size:15px}
+/* Rows of jobs, books, students, admins. */
+.row-side .row-day{min-width:3.2em;color:var(--muted);font-size:13px;text-align:right;font-variant-numeric:tabular-nums}
+.job-rows .row-main .row-title{font-size:15px}
+.review-books .row{gap:var(--s3)}
+.review-book-cover{flex:none;width:40px}
+.review-book-cover :is(.book-cover,.book-art){display:grid;place-items:center;width:40px;height:60px;margin:0;border-radius:4px;font-size:18px}
+.row-chevron{color:var(--muted);font-size:22px;line-height:1}
+.review-section{margin:0 0 var(--s5)}
+.review-section .section-head h2{font-size:18px}
+details.fold{margin:0 0 var(--s4)}
+details.fold>summary{display:flex;align-items:center;gap:var(--s2);min-height:44px;color:var(--ink);font:600 16px/1.3 var(--font-ui);list-style:none;cursor:pointer}
+details.fold>summary::-webkit-details-marker{display:none}
+details.fold>summary::before{content:'▸';color:var(--muted);font-size:12px}
+details.fold[open]>summary::before{transform:rotate(90deg)}
+/* A job's page. */
+.job-actions{justify-content:flex-end}
+.job-actions .run-mode{display:inline-flex;align-items:center;gap:var(--s2);color:var(--muted);font-size:13px;white-space:nowrap}
+.job-actions .run-mode select,.note-actions .run-mode select{width:auto;min-height:44px;margin:0}
+.job-alert p{margin:0}
+.note-actions{display:flex;flex-wrap:wrap;align-items:center;gap:var(--s2);margin-top:var(--s3)}
+.note-actions .run-mode{display:inline-flex;align-items:center;gap:var(--s2);color:inherit;font-size:13px}
+.shell .note+.note,.shell .note+.status,.shell .status+.note{margin-top:var(--s2)}
+.shell .page-heading+.note,.shell .page-heading+.status{margin-bottom:var(--s3)}
+.job-long button{margin:0 0 0 var(--s2)}
+.job-warnings{margin:0;padding-left:18px}
+.shell .editor-grid{gap:var(--s4);margin-top:var(--s4)}
+.editor-pane{display:grid;gap:var(--s2);min-width:0}
+.editor-pane label{font-weight:600}
+.editor-pane textarea{width:100%;min-height:420px;margin:0;font-size:16px;line-height:1.75}
+.editor-pane textarea[readonly]{background:var(--surface-2)}
+.shell .job-audit{display:block;margin-top:var(--s4);padding:0;border:0;border-radius:0;background:transparent}
+/* Kho tài liệu: a grid of covers, each with its ⋯. */
+.shell .library{gap:var(--s5)}
+.shell .story-card{position:relative;padding:var(--s4)}
+.shell .story-card>details.menu{position:absolute;top:var(--s2);right:var(--s2);z-index:2}
+.shell .story-card>details.menu>summary{background:var(--surface);border-color:var(--line)}
+.shell .story-card>details.menu[open]{z-index:31}
+.shell .story-card .book-cover,.shell .story-card .book-art{margin-bottom:var(--s3)}
+.shell .story-card h2{margin:0;font:600 16px/1.35 var(--font-ui)}
+.story-meta{margin:var(--s1) 0 0!important;color:var(--muted);font-size:13px}
+.story-counts{margin:var(--s1) 0 0!important;color:var(--ink);font-size:13px}
+.story-flags{display:flex;flex-wrap:wrap;gap:var(--s1);margin:0 0 var(--s2)}
+.story-flags .chip{padding:2px var(--s2);border-radius:999px;font-size:12px}
+.story-flags .sample-flag{background:#f6e4dc;color:#8a3b2e}
+.story-flags .draft-flag{background:var(--surface-2);color:var(--ink)}
+/* Học sinh. */
+.user-management{display:grid;margin:0;padding:0;list-style:none}
+.user-block{border-top:1px solid var(--line)}
+.user-block:last-child{border-bottom:1px solid var(--line)}
+.user-row{border-top:0}
+.user-row .avatar{flex:none;width:36px;height:36px;font:600 14px/1 var(--font-ui)}
+.user-row .avatar img{width:100%;height:100%;border-radius:50%;object-fit:cover}
+.user-identity .row-title,.request-item .row-title{margin:0;font:600 15px/1.35 var(--font-ui)}
+.user-identity .row-meta{margin:2px 0 0;white-space:normal}.user-identity .nowrap{white-space:nowrap}
+.user-block .user-books{display:block;padding:0 0 var(--s3) 48px}
+.row-text{display:grid;flex:1 1 auto;gap:2px;min-width:0}
+.user-row .user-identity{display:grid;gap:2px;min-width:0}
+.user-books .rows{margin-bottom:var(--s2)}
+.user-books .load-more{justify-content:flex-start;margin:var(--s2) 0 0}
+/* Yêu cầu dịch. */
+.request-list{display:grid;grid-template-columns:minmax(0,1fr);margin:0;padding:0;list-style:none}
+.request-item{display:grid;grid-template-columns:minmax(0,1fr);gap:var(--s1);padding:var(--s3) 0;border-top:1px solid var(--line)}
+.request-item .row-title{white-space:normal;overflow-wrap:anywhere}
+.request-list>.request-item:last-child{border-bottom:1px solid var(--line)}
+.request-head{display:flex;flex-wrap:wrap;align-items:center;gap:var(--s2)}
+.request-item .row-meta{white-space:normal}
+.request-notes{margin:var(--s1) 0 0;color:var(--ink);font-size:14px;line-height:1.55}
+.request-links{display:flex;flex-wrap:wrap;align-items:center;gap:var(--s2) var(--s3);font-size:14px}
+.request-item .request-links a{display:inline-flex;align-items:center;min-height:44px;color:var(--link);text-decoration:underline;text-underline-offset:2px}
+.file-row{max-width:100%;min-height:44px;padding:0 var(--s3);overflow:hidden;font-weight:500;text-overflow:ellipsis;white-space:nowrap}
+.request-actions{display:flex;flex-wrap:wrap;align-items:center;gap:var(--s2);margin-top:var(--s2)}
+.request-done{margin-top:var(--s5)}
+/* Cài đặt. */
+.shell .settings-grid{grid-template-columns:repeat(auto-fit,minmax(min(100%,420px),1fr));gap:var(--s5)}
+.shell .settings-card{display:grid;grid-template-columns:minmax(0,1fr);align-content:start;gap:var(--s3);padding:var(--s5)}
+.shell .settings-card h2{margin:0;font:600 20px/1.25 var(--font-ui)}
+.shell .settings-card .section-head{margin:0}
+.key-status{display:flex;align-items:center;gap:var(--s2);margin:0;padding:0;border:0;background:transparent;color:var(--ink);font-size:14px}
+.key-status .dot{flex:none;width:8px;height:8px;margin:0;border-radius:50%;background:var(--ok)}
+.key-status.missing{background:transparent;color:var(--warn-ink)}.key-status.missing .dot{background:#c58b2a}
+.settings-meta{margin:0;color:var(--muted);font-size:13px;line-height:1.5}
+.secret-field{display:flex;gap:var(--s2);margin-top:var(--s1)}
+.secret-field input{flex:1;margin:0}
+.secret-field #toggle-api-key{top:0;right:0;height:44px}
+.shell .admin-password,.shell .admin-add{max-width:460px;margin:var(--s2) 0 0;padding-top:var(--s4);border-top:1px solid var(--line)}
+.settings-card .auth-form h3{margin:0;font:600 16px/1.3 var(--font-ui)}
+.admin-accounts.rows .row{padding:var(--s2) 0}
+.admin-accounts li{border:0;border-radius:0;background:transparent}
+.admin-accounts .avatar{width:32px;height:32px;font:600 12px/1 var(--font-ui)}
+/* The name with its "Bạn" chip on one line, the username and last sign-in under them. */
+.shell .admin-account{display:flex;flex-wrap:wrap;align-items:center;gap:2px var(--s2)}
+.admin-account .row-meta{display:block;flex-basis:100%;margin-top:0}
+.admin-self{flex:none;margin-left:0}
+/* Thuật ngữ. */
+.glossary-panel{display:grid;gap:var(--s4);max-width:760px;padding:var(--s5)}
+.glossary-panel textarea{margin-top:var(--s2);font-size:16px;line-height:1.7}
+.glossary-panel #save-glossary{justify-self:start}
+/* Dialogs of the console: a list to read, a delete that asks first. */
+.chapter-admin-list{display:grid;margin-top:var(--s3);border-top:1px solid var(--line)}
+.chapter-admin-list>div{display:flex;align-items:center;gap:var(--s3);padding:var(--s2) 0;border-bottom:1px solid var(--line)}
+.chapter-admin-title{flex:1;min-width:0}
+.pdf-parts li{padding:var(--s2) 0}
+.login-card{padding:var(--s5);border-radius:var(--r-surface);box-shadow:none}
+.login-card h1{margin:0 0 var(--s2);font:600 28px/1.25 var(--font-ui)}
+.login-lead{margin:0;color:var(--ink);font-size:14px;line-height:1.6}
+.login-card .note{margin-top:var(--s3)}
+.admin-auth-switch .link-button{min-height:44px}
+/* Every control of the console is at least 44 px tall, as on the public pages. */
+.login-card :where(input:not([type="checkbox"]):not([type="radio"]),select,textarea){min-height:44px}
+.shell .sidebar .brand,.upload-actions button,.admin-accounts .danger{min-height:44px}
+@media(max-width:1150px){.shell .content{padding:var(--s5)}}
+/* Phones: the sections as a 3-column grid of 44 px cells, the library, settings and signing out as its last row; the
+   page never scrolls sideways. */
+@media(max-width:680px){
+ .shell .sidebar{padding:var(--s3) var(--s4)}
+ .shell .sidebar .brand{margin:0 0 var(--s2)}
+ .shell .nav{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:var(--s1);overflow:visible}
+ .shell .nav button,.shell .nav .side-library{justify-content:center;gap:var(--s1);min-width:0;padding:0 var(--s1);font-size:13px;white-space:normal;text-align:center}
+ .shell .nav button svg{display:none}
+ .shell .nav .count{margin-left:var(--s1)}
+ .shell .side-bottom{padding-top:var(--s1)}
+ .shell .side-bottom .profile{display:none}
+ .side-key{margin:var(--s2) 0}
+ .shell{background:rgba(248,248,243,.97)}
+ .shell .content{min-height:0;padding:var(--s4) var(--s4) var(--s6)}
+ .shell .page-heading .button-row{display:flex;width:100%}
+ .shell .page-heading h1{font-size:24px}
+ .translate-panel .panel-heading,.shell .tabs,.upload-area,.shell .upload-footer{padding-inline:var(--s4)}
+ .shell .form-grid{padding:0 var(--s4) var(--s4)}
+ .upload-actions{width:100%}.upload-actions button{flex:1}
+ .job-rows .row{flex-wrap:wrap;row-gap:var(--s1)}
+ /* A book of Đối chiếu keeps cover, title and › on one line; the title shortens with … instead. */
+ .review-books .row{flex-wrap:nowrap}
+ .job-rows .row-side{flex-basis:100%;justify-content:flex-start}
+ .user-row{flex-wrap:wrap}.user-row .row-side{flex-basis:100%;justify-content:flex-start;padding-left:48px}
+ /* A student's ⋯ stays at the right of the name, so it never wraps onto a line of its own under the chips. */
+ .user-row .user-identity{flex:1 1 0;padding-right:52px}
+ .user-row>.row-side{position:static}
+ .user-row>.row-side>details.menu{position:absolute;top:var(--s2);right:0}
+ .user-block .user-books{padding-left:0}
+ .admin-accounts li{flex-wrap:nowrap}.admin-accounts .admin-account{flex-basis:auto}.admin-accounts .danger{margin-left:0}
+ .editor-pane textarea{min-height:280px}
+ .shell .settings-card,.glossary-panel{padding:var(--s4)}
+}

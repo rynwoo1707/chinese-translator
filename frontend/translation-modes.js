@@ -2,6 +2,8 @@
 // A profile says how hard Gemini is asked to work: thinking level per step, batch sizes, how scanned pages are cut into
 // OCR sheets, and which readings are read again. economy/balanced/quality keep the names stored since migration 0011;
 // premium is the school's default (admin) and a student's choice. estimate multiplies the economy token estimate.
+// label is the mode's name everywhere; brief is the one line under the field (what it does, about how many times Tiết
+// kiệm's tokens: estimate, written as the line says it); hint is the full description ("So sánh các Cách dịch").
 // Every mode spends one more try on a block only when it needs one: a translation that keeps Chinese or drops a line is
 // asked for again (backend/pdf-block-translation.js), and a reading again (reread) takes the blocks Gemini could not read
 // (kept: true, or those codes of backend/pdf-block-ocr.js OCR_KEPT_CODES) and the doubtful readings (doubt: true, or those
@@ -10,16 +12,16 @@ export const MODES=['economy','balanced','quality','premium'];
 export const DEFAULT_MODE='economy';
 export const ADMIN_DEFAULT_MODE='premium';
 const PROFILES={
- economy:{label:'Tiết kiệm (ít token nhất)',hint:'Đọc và dịch theo lượt lớn, không suy luận thêm; chỉ thử lại một lần những đoạn còn sót chữ Trung, thiếu dòng hoặc đọc chưa đủ. Hợp với khóa Gemini miễn phí.',
+ economy:{label:'Tiết kiệm',brief:'Ít token nhất; hợp với khóa miễn phí.',hint:'Đọc và dịch theo lượt lớn, không suy luận thêm; chỉ thử lại một lần những đoạn còn sót chữ Trung, thiếu dòng hoặc đọc chưa đủ. Hợp với khóa Gemini miễn phí.',
   translateThinking:'minimal',ocrThinking:'minimal',retryThinking:'low',allowRepair:true,strict:false,reread:{kept:['empty','unread','refused','truncated','malformed'],doubt:['han'],thinking:'low',maxPerPage:2},
   layoutBatch:{chars:5000,blocks:48},ocrBatch:{images:6,blocks:48},sheets:'standard',textOcr:'hybrid',textChunk:10000,estimate:1},
- balanced:{label:'Cân bằng',hint:'Như Tiết kiệm, thêm một lượt đọc lại mọi đoạn máy chưa đọc được và dịch lại đoạn thiếu số hoặc ngắn bất thường.',
+ balanced:{label:'Cân bằng',brief:'Đọc lại chỗ máy đọc sót · khoảng 1,1× token.',hint:'Như Tiết kiệm, thêm một lượt đọc lại mọi đoạn máy chưa đọc được và dịch lại đoạn thiếu số hoặc ngắn bất thường.',
   translateThinking:'minimal',ocrThinking:'minimal',retryThinking:'low',allowRepair:true,strict:true,reread:{kept:true,doubt:['han'],thinking:'low',maxPerPage:2},
   layoutBatch:{chars:5000,blocks:48},ocrBatch:{images:6,blocks:48},sheets:'standard',textOcr:'hybrid',textChunk:10000,estimate:1.1},
- quality:{label:'Kỹ hơn (tốn token hơn)',hint:'Bật suy luận ngắn, chia lượt nhỏ hơn, đọc lại đoạn đáng ngờ và dịch lại đoạn còn sót chữ Trung.',
+ quality:{label:'Kỹ hơn',brief:'Suy luận ngắn, đọc lại chỗ đáng ngờ · khoảng 1,5× token.',hint:'Bật suy luận ngắn, chia lượt nhỏ hơn, đọc lại đoạn đáng ngờ và dịch lại đoạn còn sót chữ Trung.',
   translateThinking:'low',ocrThinking:'low',retryThinking:'low',allowRepair:true,strict:true,reread:{kept:true,doubt:true,thinking:'low',maxPerPage:3},
   layoutBatch:{chars:3000,blocks:24},ocrBatch:{images:4,blocks:24},sheets:'standard',textOcr:'hybrid',textChunk:8000,estimate:1.5},
- premium:{label:'Kỹ nhất (tốn nhiều token nhất)',hint:'Chụp chữ nhỏ và công thức ở độ phân giải cao, suy luận kỹ hơn, đọc lại đoạn đáng ngờ và soát bản dịch từng đoạn. Tốn nhiều token nhất; khóa miễn phí hết lượt trong ngày nhanh hơn.',
+ premium:{label:'Kỹ nhất',brief:'Soát kỹ từng đoạn, Gemini đọc lại mọi trang scan · khoảng 2,5× token; khóa miễn phí hết lượt nhanh hơn.',hint:'Chụp chữ nhỏ và công thức ở độ phân giải cao, suy luận kỹ hơn, đọc lại đoạn đáng ngờ và soát bản dịch từng đoạn. Tốn nhiều token nhất; khóa miễn phí hết lượt trong ngày nhanh hơn.',
   translateThinking:'medium',ocrThinking:'low',retryThinking:'medium',allowRepair:true,strict:true,reread:{kept:true,doubt:true,thinking:'medium',maxPerPage:4},
   layoutBatch:{chars:2000,blocks:16},ocrBatch:{images:3,blocks:16},sheets:'fine',textOcr:'gemini',textChunk:6000,estimate:2.5},
 };

@@ -66,16 +66,16 @@ function libraryMarkup(){
  vm.runInContext(source,context);
  return vm.runInContext(`state.loaded=true;state.route='library';state.library=[{id:'a',title:'Toán THPT (bản A) – Tự chọn bắt buộc, quyển 1',author:'Nhà xuất bản Giáo dục',genre:'Toán học · STEM',chapters:1,sample:1,translated_pages:3},{id:'b',title:'Sử ký',genre:'Lịch sử Trung Hoa',chapters:2}];publicLayout()`,context);
 }
-for(const width of [390,1440])test(`Library cards at ${width} px: the title and "Mở tài liệu" are visible and can be tapped without hovering`,{skip},async()=>{
+for(const width of [390,1440])test(`Library cards at ${width} px: the title and "Mở" are visible and can be tapped without hovering`,{skip},async()=>{
  const {context,page,errors}=await open(width,libraryMarkup());
  const cards=await page.$$eval('.cover-book',cards=>cards.map(card=>{
-  const title=card.querySelector('.book-title'),action=card.querySelector('.book-actions .primary'),author=card.querySelector('.book-author');
+  const title=card.querySelector('.book-title'),action=card.querySelector('.book-actions .secondary'),author=card.querySelector('.book-author');
   action.scrollIntoView({block:'center'});const box=action.getBoundingClientRect(),hit=document.elementFromPoint(box.left+box.width/2,box.top+box.height/2);
-  return {title:title.getBoundingClientRect().height>0&&getComputedStyle(title).visibility==='visible',actionHeight:Math.round(box.height),hit:hit?.closest('button')===action,author:getComputedStyle(author.closest('.book-reveal')).opacity,cover:card.querySelector('.cover-trigger').getAttribute('aria-label')};
+  return {title:title.getBoundingClientRect().height>0&&getComputedStyle(title).visibility==='visible',actionHeight:Math.round(box.height),hit:hit?.closest('button')===action,label:action.textContent.trim(),author:author?getComputedStyle(author.closest('.book-reveal')).opacity:null,cover:card.querySelector('.cover-trigger').getAttribute('aria-label')};
  }));
  for(const card of cards){
   assert.equal(card.title,true,'title visible');assert.ok(card.actionHeight>=44,'a 44 px action');assert.equal(card.hit,true,'the action takes the tap');
-  assert.match(card.cover,/^Mở tài liệu /u);
+  assert.match(card.cover,/^Mở tài liệu /u);assert.equal(card.label,'Mở','a secondary "Mở" under each card');
  }
  // A phone shows the details under the title; a mouse reveals them over the cover on hover.
  assert.equal(cards[0].author,width<500?'1':'0');
@@ -98,7 +98,7 @@ test('PDF part on a phone: every page drawn with pdf.js at the column width, wit
  await page.evaluate(()=>document.querySelector('.pdf-pages-page:last-child').scrollIntoView());
  await page.waitForFunction(()=>document.querySelector('.pdf-pages-page:last-child .textLayer')?.textContent.includes('Ban dich trang 3'),null,{timeout:30000});
  assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),'no sideways scroll');
- assert.equal(await page.locator('.pdf-pages [role="status"]').textContent(),'3 trang · kéo xuống để đọc tiếp.');
+ assert.equal(await page.locator('.pdf-pages [role="status"]').textContent(),'3 trang');
  await page.evaluate(()=>globalThis.viewer.destroy());assert.equal(await page.$eval('#root',root=>root.childElementCount),0);
  assert.deepEqual(errors,[]);
  await context.close();

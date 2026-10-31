@@ -51,7 +51,7 @@ test('A daily quota fails at once and says when it resets in Vietnam time',async
  assert.deepEqual([error.status,error.code],[429,'quota_day']);assert.equal(calls.length,1);assert.deepEqual(delays,[]);
  // Pacific midnight is 14:00 or 15:00 in Vietnam; retryAfter counts down to it.
  assert.ok(error.retryAfter>=1&&error.retryAfter<=86400,String(error.retryAfter));
- assert.match(error.message,/hết hạn mức yêu cầu trong ngày.*đến 1[45]:00 \(giờ Việt Nam\)/u);
+ assert.match(error.message,/^Khóa Gemini đã hết lượt hôm nay \(đặt lại lúc 1[45]:00\)\. Phần đã dịch đã được lưu\.$/u);
  gemini(t,[quota('GenerateRequestsPerDayPerProjectPerModel','3600s')]);assert.equal((await rejected(generate(env,[{text:'x'}],'i'))).retryAfter,3600);
 });
 

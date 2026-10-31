@@ -15,14 +15,13 @@ test('"Ví dụ mẫu": flagged by the server field or a sample: source, never b
 test('Sample card note, library intro and reader notice say the translation is AI-made and not reviewed',()=>{
  assert.equal(sampleCardNote({sample:0,translated_pages:4}),'');
  const note=sampleCardNote({sample:1,translated_pages:'4'});
- assert.match(note,/4 trang dịch mẫu · giữ bố cục gốc/u);assert.match(note,/do AI thực hiện để minh họa, chưa qua giáo viên duyệt/u);
- assert.doesNotMatch(sampleCardNote({sample:1}),/trang dịch mẫu/u,'no page count when the server does not send one');
+ assert.equal(note,'<p class="sample-card-note">AI dịch · chưa qua giáo viên duyệt</p>','one muted line: AI-made, not reviewed');
+ assert.equal(sampleCardNote({sample:1}),note,'the same line with or without a page count');
  assert.equal(sampleReaderNotice({sample:0},{mime:'application/pdf'}),'');
  const pdf=sampleReaderNotice({id:'s1',sample:true},{mime:'application/pdf',source_sha256:SHA,source_pages:[5,6]});
- assert.match(pdf,/^<aside class="sample-notice" role="note"><strong>Ví dụ mẫu\.<\/strong> Bản dịch do AI thực hiện để minh họa cách Hoa Trí giữ bố cục trang; chưa được giáo viên duyệt\./u);
- assert.match(pdf,/Hãy đối chiếu với bản gốc khi dùng để học\.<\/aside>$/u);assert.doesNotMatch(pdf,/<a /u);
+ assert.equal(pdf,'<aside class="note sample-notice" role="note"><strong>Ví dụ mẫu.</strong> AI dịch, chưa qua giáo viên duyệt; hãy đối chiếu bản gốc.</aside>');assert.doesNotMatch(pdf,/<a /u);
  // A text part does not claim a page layout; a part flagged by /api/read alone is enough.
- assert.match(sampleReaderNotice({id:'s1'},{sample:1,mime:'text/plain'}),/minh họa cách Hoa Trí dịch tài liệu; chưa được giáo viên duyệt/u);
+ assert.match(sampleReaderNotice({id:'s1'},{sample:1,mime:'text/plain'}),/AI dịch, chưa qua giáo viên duyệt; hãy đối chiếu bản gốc\./u);
 });
 
 test('Đọc song ngữ: a part has an original only with a PDF, page numbers and a stored file of the same hash',()=>{

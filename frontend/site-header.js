@@ -11,3 +11,6 @@ if(login)fetch('/api/me',{credentials:'same-origin',headers:{Accept:'application
  else avatar.textContent=initials;
  link.append(avatar,label);login.replaceWith(link);
 }).catch(()=>{});
+// The legal pages' table of contents: a closed "Mục lục" on a phone, an open list on wider screens (style.css hides its
+// summary there). Without this script it stays a closed "Mục lục" that opens on a tap.
+if(globalThis.matchMedia?.('(min-width: 681px)').matches)for(const toc of document.querySelectorAll('details.legal-toc-more'))toc.open=true;

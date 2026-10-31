@@ -99,6 +99,12 @@ test('Enter on a block of the original PDF page opens the lookup over its Chines
  for(let i=0;i<4;i++)await page.keyboard.press('ArrowRight');
  await page.keyboard.press('Enter');
  assert.deepEqual(await card(page,'银行'),{word:'银行',pinyin:'yínháng',hanViet:'ngân hàng'});
+ // The data's credit stays in view with each licence, and its link opens the LICENSE.txt deployed with the data (the
+ // notices, the changes and the licences in full) once the manifest names it.
+ const credit=await text(page,'#hanzi-panel .hz-attribution');
+ assert.match(credit,/CC-CEDICT \(MDBG\), CVDICT \(Phong Phan\) · CC BY-SA 4\.0/u);assert.match(credit,/hanviet-pinyin-wordlist \(Phong Phan, MIT\)/u);assert.match(credit,/Unihan © Unicode, Inc\. \(Unicode License v3\)/u);
+ await page.waitForFunction(href=>document.querySelector('#hanzi-panel .hz-license')?.getAttribute('href')===href,`${dictionary.manifest.base}LICENSE.txt`);
+ assert.ok(dictionary.files.has('LICENSE.txt'),'the file it links is built with the data');
  // A translated batch re-renders the page under the open panel: the block stays pressed and gets the focus back.
  assert.deepEqual(await page.evaluate(async()=>{const old=document.querySelector('#pdf-source-p1-b1');await globalThis.dualViewer.update([{id:'p1-b1',translation:'Chúng tôi làm việc ở ngân hàng.'}]);return [old.isConnected,document.querySelector('#pdf-source-p1-b1').getAttribute('aria-pressed')];}),[false,'true']);
  await page.keyboard.press('Escape');

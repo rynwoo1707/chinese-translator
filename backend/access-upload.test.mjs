@@ -46,7 +46,7 @@ test('Upload accepts exactly 25 MB and rejects larger files before storage',asyn
 test('Reader and admin layouts stay separated, including direct hashes and logout',async()=>{
  const source=(await readFile(new URL('../frontend/app.js',import.meta.url),'utf8')).replace(/^import .*\r?\n/gmu,'');
  const runJobSource=source.slice(source.indexOf('async function runJob'),source.indexOf('function requestStory'));
- assert.match(runJobSource,/chờ người quản trị đối chiếu/);
+ assert.match(runJobSource,/chờ duyệt/);
  assert.doesNotMatch(runJobSource,/\/publish/,'Hoàn tất dịch không được tự động công bố');
  assert.doesNotMatch(source,/import-website|data-ai-cover|generateAiCover|\/web-import|\/generate-cover/);
  function browser(pathname,hash=''){
@@ -273,5 +273,5 @@ test('Admin jobs keep the "Cách dịch" chosen for them, on upload, on acceptin
 
 test('Daily quota exhaustion is explained without repeatedly calling Gemini',async t=>{
  let calls=0;t.mock.method(globalThis,'fetch',async()=>{calls++;return Response.json({error:{details:[{violations:[{quotaId:'GenerateRequestsPerDayPerProjectPerModel-FreeTier'}]}]}},{status:429});});
- await assert.rejects(()=>generate({GEMINI_API_KEY:'test'},[{text:'你好'}],'Translate ONLY the source'),/hết hạn mức yêu cầu trong ngày/);assert.equal(calls,1);
+ await assert.rejects(()=>generate({GEMINI_API_KEY:'test'},[{text:'你好'}],'Translate ONLY the source'),/Khóa Gemini đã hết lượt hôm nay/);assert.equal(calls,1);
 });

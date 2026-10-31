@@ -1,50 +1,53 @@
-/* Shared masthead for the library and student translation workspace. */
+/* Shared masthead for the library and student translation workspace. Values follow the site tokens (style.css :root,
+   study.css :root): ink #282a27, muted #62675d, line #e1e1d8, line-strong #c9cabd, link #35472f, accent #a44636. */
 .site-masthead {
  position:sticky;top:0;z-index:30;display:block;min-height:0;padding:0;
- border:0;border-bottom:1px solid #dfe2d8;
- background:rgba(250,249,243,.97);box-shadow:0 2px 12px #26362005;
+ border:0;border-bottom:1px solid #e1e1d8;
+ background:rgba(250,249,243,.97);box-shadow:none;
  backdrop-filter:blur(16px);-webkit-backdrop-filter:blur(16px);
 }
 .site-masthead::after { content:none; }
 .site-masthead-inner {
  display:flex;align-items:center;gap:32px;width:min(100%,1440px);
- min-height:84px;margin:0 auto;padding:16px 36px;
+ min-height:72px;margin:0 auto;padding:12px 32px;
 }
 .site-masthead .brand { display:flex;flex-shrink:0;align-items:center;gap:12px;min-height:44px;margin:0; }
-.site-masthead .brand>img { width:40px;height:40px; }
+.site-masthead .brand>img { width:36px;height:36px; }
 .site-masthead .brand strong {
- display:block;font-family:'Be Vietnam Pro','Segoe UI',sans-serif;font-size:24px;
- font-weight:700;line-height:1.2;letter-spacing:-.65px;color:#32412e;
+ display:block;font-family:'Be Vietnam Pro','Segoe UI',sans-serif;font-size:22px;
+ font-weight:700;line-height:1.2;letter-spacing:-.5px;color:#32412e;
 }
 .site-masthead .brand-dot { color:#a44636; }
-.site-masthead .brand small { display:block;margin-top:6px;font-size:12px;line-height:1.4;letter-spacing:1.5px;color:#656a60; }
-.site-masthead .site-nav { display:flex;align-items:center;gap:24px;width:auto;margin:0;padding-left:32px;border-left:1px solid #dfe2d8; }
+/* No tagline under the name (a page that still carries one does not show it). */
+.site-masthead .brand small { display:none; }
+.site-masthead .site-nav { display:flex;align-items:center;gap:24px;width:auto;margin:0;padding-left:32px;border-left:1px solid #e1e1d8; }
 .site-masthead .site-nav a {
  position:relative;display:flex;align-items:center;justify-content:center;gap:8px;
  min-height:44px;padding:8px 0;border:0;border-radius:0;background:transparent;
- color:#646c5b;font-size:13px;font-weight:500;white-space:nowrap;box-shadow:none;
+ color:#62675d;font-size:14px;font-weight:500;white-space:nowrap;box-shadow:none;
 }
 .site-masthead .site-nav a svg { width:18px;height:18px;flex-shrink:0; }
 .site-masthead .site-nav a::after {
  content:'';position:absolute;right:0;bottom:0;left:0;height:2px;
- border-radius:2px;background:#536b43;opacity:0;
+ border-radius:2px;background:#35472f;opacity:0;
 }
 .site-masthead .site-nav a[aria-current='page'] { color:#35472f;font-weight:600; }
 .site-masthead .site-nav a[aria-current='page']::after { opacity:1; }
 .site-masthead .site-nav a:hover { color:#35472f;background:transparent;box-shadow:none; }
-.site-masthead .site-header-actions { display:flex;align-items:center;gap:24px;margin-left:auto; }
+.site-masthead .site-header-actions { display:flex;align-items:center;gap:16px;margin-left:auto; }
+/* "Yêu cầu dịch" is a secondary button on every page: the page's own primary stays the only filled one. */
 .site-masthead .header-request {
  display:inline-flex;align-items:center;justify-content:center;gap:8px;min-height:44px;
- padding:10px 17px;border:1px solid #a44636;border-radius:8px;
- background:#a44636;color:#fff;font-size:12px;font-weight:600;white-space:nowrap;
- box-shadow:0 2px 3px #5a211512;transform:none;
+ padding:0 16px;border:1px solid #c9cabd;border-radius:8px;
+ background:transparent;color:#282a27;font:600 14px/1.25 'Be Vietnam Pro','Segoe UI',sans-serif;white-space:nowrap;text-decoration:none;
+ box-shadow:none;transform:none;
 }
-.site-masthead .header-request svg { width:17px;height:17px; }
-.site-masthead .header-request:hover { border-color:#8f3b2e;background:#8f3b2e;box-shadow:0 3px 8px #5a211518;transform:none; }
+.site-masthead .header-request svg { display:none; }
+.site-masthead .header-request:hover { border-color:#c9cabd;background:#f4f3ec;color:#282a27;box-shadow:none;transform:none; }
 .site-masthead .header-account,.site-masthead .header-login {
- display:flex;align-items:center;justify-content:center;gap:9px;min-width:44px;min-height:44px;
+ display:flex;align-items:center;justify-content:center;gap:8px;min-width:44px;min-height:44px;
  padding:4px 0;border:0;border-radius:8px;background:transparent;
- color:#4b5744;font-size:12px;font-weight:500;white-space:nowrap;
+ color:#35472f;font-size:14px;font-weight:500;white-space:nowrap;
 }
 .site-masthead .header-account-name { max-width:150px;overflow:hidden;text-overflow:ellipsis; }
 .site-masthead .header-avatar {
@@ -53,45 +56,43 @@
  font-size:12px;font-weight:700;letter-spacing:.03em;
 }
 .site-masthead .header-avatar img { width:100%;height:100%;object-fit:cover; }
-.site-masthead .header-account:hover,.site-masthead .header-login:hover { color:#a44636; }
-.site-masthead .header-account[aria-current='page'] .header-avatar { border-color:#536b43;box-shadow:0 0 0 3px #536b4314; }
+.site-masthead .header-account:hover,.site-masthead .header-login:hover { color:#35472f;text-decoration:underline;text-underline-offset:4px; }
+.site-masthead .header-account[aria-current='page'] .header-avatar { border-color:#35472f;box-shadow:0 0 0 2px #35472f24; }
 .site-masthead .header-login[aria-current='page'] { color:#35472f;text-decoration:underline;text-underline-offset:6px; }
-.site-masthead a:focus-visible,.site-masthead button:focus-visible { outline:3px solid #536b43;outline-offset:4px; }
-html { scroll-padding-top:104px; }
+.site-masthead a:focus-visible,.site-masthead button:focus-visible { outline:2px solid #35472f;outline-offset:2px; }
+html { scroll-padding-top:96px; }
 @media(max-width:1100px) {
  .site-masthead-inner { gap:24px;padding-inline:24px; }
  .site-masthead .site-nav { gap:20px;padding-left:24px; }
- .site-masthead .site-header-actions { gap:16px; }
  .site-masthead .header-account-name { max-width:105px; }
- .site-masthead .brand small { letter-spacing:.6px; }
 }
+/* Phones and tablets: two rows. The name and the account (or "Đăng nhập") on the first, the two sections and
+   "Yêu cầu dịch" on the second, so nothing pushes past the screen edge. */
 @media(max-width:800px) {
- .site-masthead-inner { display:grid;grid-template-columns:minmax(0,1fr) auto;gap:12px 20px;padding:14px 20px 10px; }
+ .site-masthead-inner { display:grid;grid-template-columns:minmax(0,1fr) auto;gap:8px 16px;padding:8px 16px; }
  .site-masthead .brand { grid-column:1;grid-row:1; }
  .site-masthead .site-header-actions { display:contents; }
  .site-masthead .header-account,.site-masthead .header-login { grid-column:2;grid-row:1;justify-self:end; }
  .site-masthead .site-nav { grid-column:1;grid-row:2;justify-self:start;gap:20px;width:auto;padding:0;border:0; }
  .site-masthead .header-request { grid-column:2;grid-row:2;justify-self:end; }
  .site-masthead .header-account-name { max-width:130px; }
- html { scroll-padding-top:145px; }
+ html { scroll-padding-top:136px; }
 }
 @media(max-width:480px) {
- .site-masthead-inner { gap:10px 12px;padding:12px 16px 8px; }
- .site-masthead .brand { gap:9px; }
- .site-masthead .brand>img { width:36px;height:36px; }
- .site-masthead .brand strong { font-size:22px; }
- .site-masthead .brand small { font-size:12px;letter-spacing:1px;margin-top:5px; }
+ .site-masthead .brand { gap:8px; }
+ .site-masthead .brand>img { width:32px;height:32px; }
+ .site-masthead .brand strong { font-size:20px; }
  .site-masthead .site-nav { gap:16px; }
- .site-masthead .site-nav a { gap:6px;font-size:12px; }
+ .site-masthead .site-nav a { gap:6px; }
  .site-masthead .site-nav a svg { width:16px;height:16px; }
- .site-masthead .header-request { gap:5px;padding-inline:10px;font-size:12px; }
+ .site-masthead .header-request { padding-inline:12px; }
  .site-masthead .header-account-name { display:none; }
- .site-masthead .header-login { font-size:12px; }
 }
+/* Very narrow screens keep the request's words: the section icons go first. */
 @media(max-width:360px) {
- .site-masthead-inner { padding-inline:12px;gap:10px 8px; }
+ .site-masthead-inner { padding-inline:12px;gap:8px; }
  .site-masthead .site-nav { gap:12px; }
- .site-masthead .header-request svg { display:none; }
+ .site-masthead .site-nav a svg { display:none; }
 }
 @media(forced-colors:active) {
  .site-masthead { background:Canvas;border-bottom-color:CanvasText; }
@@ -101,44 +102,40 @@ html { scroll-padding-top:104px; }
 }
 /* Shared footer (site-footer.js; app.js adds the music switch after it). The inner wrapper steps aside (display:contents),
    so the name, the links and the switch share one row as wide as the page content (.public-content, 1250px): the name on
-   the left, the links and the switch on the right. Below 1180px two centred rows; from 800px down, as the masthead, the
-   switch takes a row of its own. Rules carry a class so the study page's bare footer and footer span rules do not restyle it. */
-.site-footer { display:flex;flex-wrap:wrap;align-items:center;gap:0 24px;margin-top:auto;padding:12px max(24px,calc((100% - 1250px)/2));border-top:1px solid #dfe2d8;background:rgba(250,249,243,.96);color:#5f6656;font-size:13px;line-height:1.5;letter-spacing:normal;text-align:left; }
+   the left, the links and the switch on the right. Below 1180px the name takes a row of its own; from 800px down the
+   links wrap left-aligned and the switch is a 44 px icon button at the end of their line (its words stay its name).
+   Rules carry a class so the study page's bare footer and footer span rules do not restyle it. */
+.site-footer { display:flex;flex-wrap:wrap;align-items:center;gap:0 24px;margin-top:auto;padding:12px max(24px,calc((100% - 1250px)/2));border-top:1px solid #e1e1d8;background:rgba(250,249,243,.96);color:#62675d;font-size:14px;line-height:1.5;letter-spacing:normal;text-align:left; }
 .site-footer-inner { display:contents; }
 .site-footer .site-footer-brand { margin:0 auto 0 0; }
-.site-footer .site-footer-brand strong { color:#35432d;font-weight:600; }
+.site-footer .site-footer-brand strong { color:#282a27;font-weight:600; }
 .site-footer span { margin:0;color:inherit; }
 .site-footer-links { display:flex;flex-wrap:wrap;justify-content:center;gap:0 24px; }
 .site-footer-links a,.site-footer .background-music button { display:inline-flex;align-items:center;min-height:44px;border-radius:6px;color:#4f5849;font-weight:500;white-space:nowrap;text-decoration:none; }
-.site-footer-links a:hover,.site-footer .background-music button:hover { color:#a44636;text-decoration:underline;text-underline-offset:4px; }
+.site-footer-links a:hover,.site-footer .background-music button:hover { color:#35472f;text-decoration:underline;text-underline-offset:4px; }
 /* The music switch (music.js): a quiet control after a hairline, as tall as the links and wide enough for either label,
    so nothing moves when it is pressed. The negative margin takes back its padding and border (kept for forced colours),
-   so its words meet the content edge and the hairline sits midway. No colour fade, as on the links. */
+   so its words meet the content edge and the hairline sits midway. */
 .site-footer .background-music { display:flex;align-items:center;gap:24px; }
-.site-footer .background-music::before { content:'';height:16px;border-left:1px solid #cfd5c4; }
-.site-footer .background-music button { justify-content:center;gap:6px;min-width:8.9em;margin:0 -5px;padding:0 4px;border:1px solid transparent;background:transparent;box-shadow:none;transform:none;transition:none; }
+.site-footer .background-music::before { content:'';height:16px;border-left:1px solid #c9cabd; }
+.site-footer .background-music button { justify-content:center;gap:6px;min-width:8.9em;margin:0 -5px;padding:0 4px;border:1px solid transparent;background:transparent;box-shadow:none;font:500 14px/1.25 'Be Vietnam Pro','Segoe UI',sans-serif;transform:none;transition:none; }
 .site-footer .background-music button:hover { border-color:transparent;background:transparent;box-shadow:none;transform:none; }
 .site-footer .background-music svg { width:15px;height:15px;flex:none; }
 .site-footer .background-music button[aria-pressed='true'] { color:#35472f;font-weight:600; }
-.site-footer a:focus-visible,.site-footer button:focus-visible { outline:3px solid #536b43;outline-offset:3px; }
+.site-footer a:focus-visible,.site-footer button:focus-visible { outline:2px solid #35472f;outline-offset:2px; }
 @media(max-width:1179px) {
- .site-footer { justify-content:center;padding-top:20px;padding-bottom:8px; }
- .site-footer .site-footer-brand { flex-basis:100%;margin:0 0 12px;text-align:center;text-wrap:balance; }
+ .site-footer { justify-content:center;padding-top:16px;padding-bottom:8px; }
+ .site-footer .site-footer-brand { flex-basis:100%;margin:0 0 8px;text-align:center; }
 }
 @media(max-width:800px) {
- .site-footer-links { flex-basis:100%; }
- /* A full line of its own: from 560px down the links are capped at 27em and would no longer push it to the next line. */
- .site-footer .background-music { flex-basis:100%;justify-content:center; }
+ .site-footer { justify-content:flex-start;gap:0 8px;padding:12px 16px 8px; }
+ .site-footer .site-footer-brand { margin:0 0 4px;text-align:left; }
+ .site-footer-links { flex:1 1 0;min-width:0;justify-content:flex-start;column-gap:20px; }
+ .site-footer .background-music { flex:none;align-self:flex-end; }
  .site-footer .background-music::before { content:none; }
-}
-@media(max-width:560px) {
- .site-footer { padding-inline:16px; }
- .site-footer-links { max-width:27em;column-gap:20px; }
-}
-/* A phone breaks the name line at the dot, never inside "Trung – Việt". */
-@media(max-width:480px) {
- .site-footer .site-footer-dot { display:none; }
- .site-footer .site-footer-tagline { display:block; }
+ .site-footer .background-music button { width:44px;min-width:44px;margin:0;padding:0; }
+ .site-footer .background-music button svg { width:18px;height:18px; }
+ .site-footer .background-music button span { position:absolute;width:1px;height:1px;overflow:hidden;clip-path:inset(50%);white-space:nowrap; }
 }
 @media(forced-colors:active) {
  .site-footer { border-top-color:CanvasText; }

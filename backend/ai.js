@@ -104,7 +104,8 @@ async function quotaFailure(response){
 }
 function quotaError({code,retryAfter,resetAt}){
  const wait=retryAfter?(retryAfter<120?`khoảng ${retryAfter} giây`:`khoảng ${Math.ceil(retryAfter/60)} phút`):'';
- const message=code==='quota_day'?`Gemini đã hết hạn mức yêu cầu trong ngày của dự án. Hãy chờ ${resetAt?`đến ${resetAt} (giờ Việt Nam), khi hạn mức được đặt lại,`:'hạn mức được đặt lại'} hoặc bật Billing trong Google AI Studio, rồi tiếp tục dịch. Nội dung đã được lưu.`
+ // Neutral: the admin pipeline (worker.js) uses it too, where the key is the server's; Xưởng dịch adds the student's way on.
+ const message=code==='quota_day'?`Khóa Gemini đã hết lượt hôm nay${resetAt?` (đặt lại lúc ${resetAt})`:''}. Phần đã dịch đã được lưu.`
   :code==='quota_minute'?`Gemini đang giới hạn số lượt gọi mỗi phút của khóa này. Hãy đợi ${wait||'khoảng một phút'} rồi tiếp tục; nội dung đã được lưu.`
   :`Gemini tạm hết hạn mức của khóa này. Hãy thử lại sau ${wait||'ít phút'}; nội dung đã được lưu.`;
  return new UserError(message,429,code,{retryAfter});

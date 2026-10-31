@@ -58,7 +58,7 @@ test('Password reset link at 390 px under the CSP: the token leaves the address,
  await page.waitForSelector('.account-notice');
  assert.deepEqual(JSON.parse(sent[0].body),{token:FRESH,password:'mat-khau-moi-123'});
  assert.equal(await page.evaluate(()=>location.hash),'#account');
- assert.equal(await page.evaluate(()=>document.activeElement.className),'account-notice','the confirmation is read first');
+ assert.equal(await page.evaluate(()=>document.activeElement.className),'account-notice status','the confirmation is read first');
  assert.equal(await sideways(),0);assert.deepEqual(await csp(),[]);assert.deepEqual(errors,[]);
  await context.close();
 });
@@ -80,27 +80,29 @@ test('Sign-in at 320 px: the error inside the form, focused, fields marked, one 
  await page.fill('#reader-login-form [name=password]','mat-khau-dung-roi');await page.click('#reader-login-form [type=submit]');
  await page.waitForSelector('#reader-logout');
  const layout=await page.evaluate(()=>{const button=document.querySelector('#reader-logout').getBoundingClientRect();return {inside:button.left>=0&&button.right<=document.documentElement.clientWidth,height:Math.round(button.height),header:document.querySelector('.header-avatar').textContent,profile:document.querySelector('.account-profile>span').textContent};});
- assert.deepEqual(layout,{inside:true,height:45,header:'NT',profile:'NT'});
+ assert.deepEqual(layout,{inside:true,height:44,header:'NT',profile:'NT'});
  assert.equal(await sideways(),0,'no sideways scroll at 320 px');assert.deepEqual(await csp(),[]);assert.deepEqual(errors,[]);
  await context.close();
 });
 
-test('Admin at 1440 px: "Tạo link đặt lại mật khẩu" shows the full link once, with its expiry, and copies it',{skip},async()=>{
+test('Admin at 1440 px: "Tạo liên kết đặt lại mật khẩu" (in the student\'s ⋯) shows the full link once, with its expiry, and copies it',{skip},async()=>{
  const users=[{id:'u1',email:'lan@example.test',name:'Trần Ngọc Lan',provider:'local'},{id:'u2',email:'minh@example.test',name:'Lê Minh',provider:'google'}];
  const {context,page,errors,csp}=await open('/admin#users',{width:1440,height:900,api:(method,path)=>path==='/api/users'?[200,users]:path==='/api/users/u1/password-reset'?[201,{resetUrl:`/#dat-lai-mat-khau?token=${TOKEN}`,expiresAt:'2026-10-22T08:30:00.000Z'}]:undefined});
- await page.waitForSelector('[data-user-reset="u1"]');
- assert.equal(await page.$('[data-user-reset="u2"]'),null);assert.match(await page.textContent('.user-management'),/Đăng nhập bằng Google nên không có mật khẩu để đặt lại\./u);
- await page.click('[data-user-reset="u1"]');await page.waitForSelector('#modal[open] #reset-link');
+ await page.waitForSelector('.user-block');
+ assert.equal(await page.$('[data-user-reset="u2"]'),null);assert.equal(await page.getAttribute('.user-block:has-text("Lê Minh") .chip','title'),'Tài khoản Google, không có mật khẩu');
+ const summary='.user-block:has-text("Trần Ngọc Lan") details.menu > summary';
+ await page.click(summary);await page.click('[data-user-reset="u1"]');await page.waitForSelector('#modal[open] #reset-link');
  assert.equal(await page.inputValue('#reset-link'),`${ORIGIN}/#dat-lai-mat-khau?token=${TOKEN}`);
  assert.match(await page.textContent('#modal'),/Liên kết chỉ hiện một lần[\s\S]*hết hạn lúc \d\d:\d\d 22\/10\/2026/u);
  await page.click('#copy-reset-link');await page.waitForFunction(()=>document.querySelector('#reset-link-status').textContent.length>0);
  assert.equal(await page.evaluate(()=>navigator.clipboard.readText()),`${ORIGIN}/#dat-lai-mat-khau?token=${TOKEN}`);
  // The focus is back as the dialog closes, not one task later on its close event: until then it sat on the hidden
  // dialog's button (the opener lost it while disabled during the request, so the browser itself restores nothing).
- await page.evaluate(()=>{const dialog=document.querySelector('#modal');new MutationObserver((list,observer)=>{if(dialog.open)return;observer.disconnect();globalThis.__focusAtClose=document.activeElement?.dataset?.userReset||document.activeElement?.tagName;}).observe(dialog,{attributes:true,attributeFilter:['open']});});
+ // The menu closed when its item was chosen, so the focus goes back to its ⋯.
+ await page.evaluate(()=>{const dialog=document.querySelector('#modal');new MutationObserver((list,observer)=>{if(dialog.open)return;observer.disconnect();globalThis.__focusAtClose=document.activeElement?.getAttribute('aria-label')||document.activeElement?.tagName;}).observe(dialog,{attributes:true,attributeFilter:['open']});});
  await page.click('#modal .primary');await page.waitForFunction(()=>!document.querySelector('#modal').open);
- assert.equal(await page.evaluate(()=>globalThis.__focusAtClose),'u1','the focus is on the button when the dialog closes');
- assert.equal(await page.evaluate(()=>document.activeElement.dataset.userReset),'u1','the focus is back on the button');
+ assert.equal(await page.evaluate(()=>globalThis.__focusAtClose),'Thao tác cho “Trần Ngọc Lan”','the focus is on ⋯ when the dialog closes');
+ assert.equal(await page.evaluate(()=>document.activeElement.getAttribute('aria-label')),'Thao tác cho “Trần Ngọc Lan”','the focus is back on ⋯');
  assert.deepEqual(await csp(),[]);assert.deepEqual(errors,[]);
  await context.close();
 });
@@ -135,7 +137,7 @@ test('A request started signed out survives a reload and the Google round trip (
 test('A Google sign-in that came back with a reason (#account?loi=…): the reason is read first, the address is clean, the way back is kept',{skip},async()=>{
  const {context,page,errors,csp,sideways}=await open('/#account?loi=google_cancelled&sau=xuong-dich');
  await page.waitForSelector('.auth-failure');
- assert.deepEqual(await page.evaluate(()=>({hash:location.hash,focus:document.activeElement.className,text:document.querySelector('.auth-failure').textContent,role:document.querySelector('.auth-failure').getAttribute('role'),google:document.querySelector('#google-login').getAttribute('href')})),{hash:'#account',focus:'form-error auth-failure',text:'Bạn đã hủy đăng nhập bằng Google.',role:'alert',google:'/api/auth/google/start?return_to=%2Fstudy'});
+ assert.deepEqual(await page.evaluate(()=>({hash:location.hash,focus:document.activeElement.className,text:document.querySelector('.auth-failure').textContent,role:document.querySelector('.auth-failure').getAttribute('role'),google:document.querySelector('#google-login').getAttribute('href')})),{hash:'#account',focus:'form-error auth-failure',text:'Bạn đã hủy đăng nhập bằng Google. Bấm “Tiếp tục bằng Google” để thử lại.',role:'alert',google:'/api/auth/google/start?return_to=%2Fstudy'});
  assert.equal(await sideways(),0);assert.deepEqual(await csp(),[]);assert.deepEqual(errors,[]);
  await context.close();
 });

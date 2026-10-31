@@ -35,6 +35,7 @@ async function openStudy({api=()=>undefined,viewport={width:1280,height:900},ini
    let body=await api(path,method,request);
    if(body===undefined)body=path==='/api/me'?USER:path==='/api/my/study/history'&&method==='GET'?[]:path==='/api/my/study/books'?[]:path==='/api/my/study/book-jobs'?{jobs:[]}:path==='/api/my/study/pdf-layout/config'?{configured:true}:path==='/api/my/study/models'?{models:[{id:'gemini-test'}],requested:'gemini-test',selected:'gemini-test'}:undefined;
    if(body===undefined)return route.fulfill({status:404,json:{error:`fake: ${method} ${path}`}});
+   if(body?.fakeAbort)return route.abort('failed');
    if(body?.fakeStatus)return route.fulfill({status:body.fakeStatus,json:body.json});
    return route.fulfill({json:body});
   }
@@ -83,7 +84,7 @@ async function pickScan(page,pdf,name){
  await page.waitForFunction(()=>/trang scan/u.test(document.querySelector('#file-status').textContent)&&!document.querySelector('#warnings').textContent,null,{timeout:30000});
 }
 const tesseractRequested=page=>page.waitForRequest(request=>new URL(request.url()).pathname==='/vendor/tesseract.esm.min.js',{timeout:30000});
-const runFinished=page=>page.waitForFunction(()=>/^Hoàn tất/u.test(document.querySelector('#progress').textContent),null,{timeout:120000});
+const runFinished=page=>page.waitForFunction(()=>/^Xong/u.test(document.querySelector('#progress').textContent),null,{timeout:120000});
 
 describe('Xưởng dịch states in Edge',{concurrency:4},()=>{
 test('Signed out: a sign-in card replaces the form, and the PDF service is not asked (no 401)',{skip},async()=>{
@@ -91,8 +92,14 @@ test('Signed out: a sign-in card replaces the form, and the PDF service is not a
  try{
   assert.equal(await page.evaluate(()=>document.body.dataset.session),'out');
   assert.match(await page.textContent('#session-card'),/Đăng nhập để dùng Xưởng dịch/u);
+  // What the account keeps is said before signing in: the original as well as the translation (S13).
+  assert.match(await page.textContent('#session-card p'),/^Tài liệu gốc và bản dịch được lưu vào tài khoản của bạn\./u);
   assert.equal(await page.getAttribute('#session-card a.primary','href'),'/#account?sau=xuong-dich','signing in comes back to Xưởng dịch');
-  assert.deepEqual(await page.evaluate(()=>['.workspace','.result','.workflow'].map(selector=>getComputedStyle(document.querySelector(selector)).display)),['none','none','none']);
+  assert.deepEqual(await page.evaluate(()=>['.workspace','.result'].map(selector=>getComputedStyle(document.querySelector(selector)).display)),['none','none']);
+  assert.equal(await page.$('.workflow'),null,'no step strip');
+  // One page heading, no slogan; the header names the library "Thư viện" and has no tagline.
+  assert.deepEqual(await page.$$eval('main h1',nodes=>nodes.map(node=>node.textContent)),['Xưởng dịch']);
+  assert.equal((await page.textContent('.site-nav a[href="/"]')).trim(),'Thư viện');assert.doesNotMatch(await page.textContent('.site-masthead'),/TRUNG VĂN|Học liệu/u);
   assert.deepEqual(requests.filter(line=>line.includes('/api/my/')),[]);
   // Contract 6: Yêu cầu dịch links to the library's dialog; signed out, the account link says Đăng nhập.
   assert.equal(await page.getAttribute('.site-header-actions .header-request','href'),'/#yeu-cau');
@@ -115,7 +122,7 @@ test('Start-up loads neither the PDF tools nor the preview font; the viewer fetc
   assert.deepEqual(requests.filter(line=>lazy.test(line)),[]);
   assert.ok(requests.includes('GET /api/my/study/pdf-layout/config'));
   await page.click('#study-history > summary');await page.click(`[data-history-open="${LAYOUT_ITEM.id}"]`);
-  await page.waitForFunction(()=>/Đã dịch 1\/1 đoạn|Bản xem trước/u.test(document.querySelector('#pdf-dual-viewer').textContent));
+  await page.waitForFunction(()=>document.querySelector('#pdf-dual-viewer [data-pdf-render-state]')?.textContent==='1/1 đoạn');
   // The font request follows the first drawn page; with several pages open at once it can trail the text by a moment.
   for(const end=Date.now()+10000;!requests.includes('GET /api/my/study/pdf-layout/font')&&Date.now()<end;)await new Promise(done=>setTimeout(done,50));
   assert.equal(requests.filter(line=>line==='GET /api/my/study/pdf-layout/font').length,1);
@@ -134,10 +141,11 @@ test('A history that fails to load says so in place, with Thử lại',{skip},as
  const {context,page,errors}=await openStudy({api:(path,method)=>path==='/api/my/study/history'&&method==='GET'?++calls===1?{fakeStatus:500,json:{error:'Máy chủ đang bận. Hãy thử lại sau ít phút.'}}:[]:undefined});
  try{
   await historyLoaded(page);
-  assert.equal(await page.textContent('#study-history-count'),'· chưa tải được');assert.equal(await page.evaluate(()=>document.querySelector('#study-history').open),true);
+  assert.equal(await page.textContent('#study-history-count'),'');assert.equal(await page.evaluate(()=>document.querySelector('#study-history').open),true);
   assert.match(await page.textContent('#study-history-list .load-error'),/Chưa tải được lịch sử dịch\.Máy chủ đang bận/u);
   assert.equal(await page.textContent('#warnings'),'');
-  await page.click('#study-history-list .load-error-action');await page.waitForFunction(()=>document.querySelector('#study-history-count').textContent==='· chưa có');
+  await page.click('#study-history-list .load-error-action');await page.waitForSelector('#study-history-list .history-empty');
+  assert.equal(await page.textContent('#study-history-count'),'','no count while nothing is saved');assert.equal(await page.textContent('#study-history-list .history-empty'),'Chưa có bản dịch nào.');
   assert.equal(await page.$('#study-history-list .load-error'),null);assert.deepEqual(errors,[]);
  }finally{await context.close();}
 });
@@ -161,17 +169,19 @@ test('Saves that keep failing stop the run before the next Gemini call; Dừng s
   assert.deepEqual(await page.evaluate(()=>{const bar=document.querySelector('#run-bar'),box=bar.getBoundingClientRect();return [getComputedStyle(bar).position,Math.round(box.bottom),Math.round(document.querySelector('#translate').getBoundingClientRect().width)];}),['fixed',844,358]);
   // The first save fails (three tries): nothing is sent to Gemini.
   await page.click('#translate');
-  await page.waitForFunction(()=>/không gửi thêm yêu cầu tới Gemini/u.test(document.querySelector('#progress').textContent),null,{timeout:30000});
+  await page.waitForFunction(()=>/chưa gửi thêm gì cho Gemini/u.test(document.querySelector('#progress').textContent),null,{timeout:30000});
   assert.equal(translations,0);assert.equal(await page.evaluate(()=>document.querySelector('#save-warning').hidden),false);assert.equal(await leaveListener(page),true);
+  // The warning says what to do (it stays), the progress line what happened (S75).
+  assert.equal(await page.textContent('#progress'),'Đã dừng; chưa gửi thêm gì cho Gemini.');assert.equal(await page.textContent('#save-warning'),'Chưa lưu được vào tài khoản. Đừng đóng tab; kiểm tra mạng rồi bấm Bắt đầu dịch.');
   // The session is created, part 1 is translated, its save fails: the run stops before part 2.
   saves='put-fails';await page.click('#translate');
   await page.waitForFunction(()=>getComputedStyle(document.querySelector('#stop')).display!=='none');
-  await page.waitForFunction(()=>/không gửi thêm yêu cầu tới Gemini/u.test(document.querySelector('#progress').textContent),null,{timeout:30000});
-  assert.equal(translations,1);assert.equal(putAttempts,3);assert.match(await page.textContent('#progress'),/Phần đã dịch vẫn hiện trong tab này/u);
+  await page.waitForFunction(()=>/chưa gửi thêm gì cho Gemini/u.test(document.querySelector('#progress').textContent),null,{timeout:30000});
+  assert.equal(translations,1);assert.equal(putAttempts,3);assert.equal(await page.textContent('#save-warning'),'Chưa lưu được vào tài khoản. Đừng đóng tab; kiểm tra mạng rồi bấm Dịch tiếp.');
   // Saving works again: the run goes on; Dừng ends it with progress saved, and leaving no longer asks.
   saves='ok';await page.click('#translate');await page.waitForFunction(n=>document.querySelectorAll('.translation-part.done').length>n,1);await page.click('#stop');
-  await page.waitForFunction(()=>/^Đã dừng sau|^Hoàn tất/u.test(document.querySelector('#progress').textContent),null,{timeout:30000});
-  assert.match(await page.textContent('#progress'),/Tiến độ đã lưu vào tài khoản|Hoàn tất/u);
+  await page.waitForFunction(()=>/^Đã dừng sau|^Xong/u.test(document.querySelector('#progress').textContent),null,{timeout:30000});
+  assert.match(await page.textContent('#progress'),/; tiến độ đã lưu\.$|^Xong/u);
   assert.equal(await page.evaluate(()=>document.querySelector('#save-warning').hidden),true);assert.equal(await leaveListener(page),false);
   assert.equal(await page.evaluate(()=>getComputedStyle(document.querySelector('#stop')).display),'none');
   assert.deepEqual(errors,[]);
@@ -199,7 +209,7 @@ test('A finished translation whose last save failed: replacing it asks first, an
  try{
   await historyLoaded(page);await page.fill('#content-title','Lưu sau cùng');await page.fill('#api-key',KEY);await page.fill('#source','子曰：学而时习之，不亦说乎？');
   await page.click('#translate');
-  await page.waitForFunction(()=>/Đã dịch xong nhưng chưa lưu được bản dịch/u.test(document.querySelector('#progress').textContent),null,{timeout:30000});
+  await page.waitForFunction(()=>/^Đã dịch xong nhưng chưa lưu được/u.test(document.querySelector('#progress').textContent),null,{timeout:30000});
   assert.equal(translations,1);assert.equal(await page.evaluate(()=>document.querySelector('#save-warning').hidden),false);assert.equal(await leaveListener(page),true);
   // The warning says it all in the floating bar: the repeated progress line steps aside; the page still ends above the bar.
   assert.deepEqual(await page.evaluate(()=>{const bar=document.querySelector('#run-bar').getBoundingClientRect();scrollTo(0,document.documentElement.scrollHeight);const last=[...document.querySelectorAll('.site-footer a')].at(-1).getBoundingClientRect();return [getComputedStyle(document.querySelector('#run-bar-status')).display,last.bottom<=bar.top];}),['none',true]);
@@ -222,7 +232,7 @@ test('A failed session check says so neutrally; Thử lại brings the form back
  const {context,page,errors}=await openStudy({api:path=>path==='/api/me'&&++checks===1?{fakeStatus:503,json:{error:'Máy chủ đang bận.'}}:undefined});
  try{
   assert.equal(await page.evaluate(()=>document.body.dataset.session),'error');
-  assert.match(await page.textContent('#session-card'),/Mạng đang chập chờn hoặc máy chủ tạm thời chưa trả lời/u);
+  assert.equal(await page.textContent('#session-card h2'),'Chưa kết nối được máy chủ');assert.equal(await page.textContent('#session-card .primary'),'Thử lại');
   await page.click('#session-card .primary');await page.waitForFunction(()=>document.body.dataset.session==='in');
   assert.equal(await page.evaluate(()=>document.querySelector('#translate').disabled),false);
   assert.deepEqual(errors,[]);
@@ -236,12 +246,12 @@ test('Phone: without a key the key field takes the focus above the floating bar,
   await page.evaluate(()=>scrollTo(0,document.documentElement.scrollHeight));await page.focus('#translate');await page.keyboard.press('Enter');
   await page.waitForFunction(()=>document.activeElement?.id==='api-key');
   assert.deepEqual(await page.evaluate(()=>{const key=document.querySelector('#api-key').getBoundingClientRect(),bar=document.querySelector('#run-bar').getBoundingClientRect(),mirror=document.querySelector('#run-bar-status');return {above:key.bottom<=bar.top,onScreen:key.top>=0,disabled:document.querySelector('#api-key').disabled,mirror:mirror.textContent,shown:getComputedStyle(mirror).display!=='none'&&mirror.getBoundingClientRect().height>0};}),
-   {above:true,onScreen:true,disabled:false,mirror:'Chưa có khóa Gemini. Hãy nhập khóa API riêng cho phiên này rồi bấm Bắt đầu dịch.',shown:true});
+   {above:true,onScreen:true,disabled:false,mirror:'Dán khóa Gemini rồi bấm Bắt đầu dịch.',shown:true});
   assert.deepEqual(errors,[]);
  }finally{await context.close();}
 });
 
-test('Keyboard: during a run the focus waits on Dừng, and comes back to Bắt đầu dịch when the run ends',{skip,timeout:60000},async()=>{
+test('Keyboard: during a run the focus waits on Dừng; once done (Bắt đầu dịch hidden) it goes to the download, the view\'s one primary',{skip,timeout:60000},async()=>{
  const id='9a8b7c6d-5e4f-4a3b-8c2d-1e0f9a8b7c6d';
  const {context,page,errors}=await openStudy({api:(path,method)=>{
   if(path==='/api/my/study/history'&&method==='POST')return {id,status:'draft',libraryStoryId:null,updatedAt:new Date().toISOString()};
@@ -252,9 +262,10 @@ test('Keyboard: during a run the focus waits on Dừng, and comes back to Bắt 
   await historyLoaded(page);await page.fill('#content-title','Bàn phím');await page.fill('#api-key',KEY);await page.fill('#source','子曰：学而时习之。');
   await page.focus('#translate');await page.keyboard.press('Enter');
   await page.waitForFunction(()=>!document.querySelector('#stop').hidden);
-  assert.equal(await page.evaluate(()=>document.activeElement.id),'stop');
-  await page.waitForFunction(()=>/^Hoàn tất/u.test(document.querySelector('#progress').textContent),null,{timeout:30000});
-  assert.equal(await page.evaluate(()=>document.activeElement.id),'translate');
+  assert.equal(await page.evaluate(()=>document.activeElement.id),'stop');assert.equal(await page.isHidden('#translate'),true,'only Dừng while the run goes');
+  await page.waitForFunction(()=>/^Xong/u.test(document.querySelector('#progress').textContent),null,{timeout:30000});
+  assert.equal(await page.evaluate(()=>document.activeElement.id),'download');assert.equal(await page.isHidden('#translate'),true);
+  assert.deepEqual(await page.evaluate(()=>[...document.querySelectorAll('main .primary')].filter(node=>node.offsetParent).map(node=>node.textContent)),['Tải .txt'],'one primary in view');
   assert.deepEqual(errors,[]);
  }finally{await context.close();}
 });
@@ -271,18 +282,20 @@ test('Without PaddleOCR a scan goes straight to Tesseract: Save-Data asks for it
  const paddle=await paddleMissing(context),paddleLines=()=>paddle.map(entry=>entry.line);
  const notice='Nhận dạng chữ trên thiết bị dùng Tesseract thay cho PaddleOCR. Bản cài Hoa Trí này chưa có PaddleOCR.';
  try{
-  await historyLoaded(page);await page.waitForFunction(()=>/chưa được cấu hình/u.test(document.querySelector('#pdf-layout-service-status').textContent));
+  await historyLoaded(page);await page.waitForFunction(()=>/chưa sẵn sàng/u.test(document.querySelector('#pdf-layout-service-status').textContent));
   assert.equal(await page.isChecked('#pdf-layout-enabled'),false,'without the layout service the browser reads the scan');
   await page.fill('#content-title','Bài scan thử');await page.fill('#api-key',KEY);
   const pdf=await scannedPdf(page);await pickScan(page,pdf,'bai-scan.pdf');
+  assert.equal(await page.textContent('#file-status'),'1 trang scan · nhận dạng chữ khi bấm Bắt đầu dịch.');
   await page.click('#translate');await page.waitForSelector('#ocr-download:not([hidden])',{timeout:30000});
   // The question names the size of the engine this install uses; PaddleOCR was only looked up, never started.
   assert.equal((await page.textContent('#ocr-download-title')).trim(),'Tải bộ nhận dạng chữ về máy (khoảng 9 MB)?');
-  assert.match(await page.textContent('#ocr-download-text'),/lần đầu cần tải khoảng 9 MB trong khi trình duyệt đang bật chế độ tiết kiệm dữ liệu/u);
+  assert.equal(await page.textContent('#ocr-download-text'),'Trang scan được nhận dạng chữ ngay trên máy, không tốn token. Lần đầu cần tải khoảng 9 MB (trình duyệt đang bật tiết kiệm dữ liệu).');
+  assert.equal(await page.textContent('#progress'),'Chọn ở trên để tiếp tục.');assert.equal(await page.isHidden('#stop'),true,'Dừng steps aside for the question\'s own buttons');
   assert.equal(await page.getAttribute('#ocr-download','aria-labelledby'),'ocr-download-title');assert.equal(await page.getAttribute('#ocr-download','role'),'group');
   assert.deepEqual(paddleLines(),['HEAD /vendor/paddle/worker.js']);
   // "Để sau" stops before any download and names the same size; Bắt đầu dịch asks again.
-  await page.click('#ocr-download-no');await page.waitForFunction(()=>/bạn chọn để sau/u.test(document.querySelector('#progress').textContent));
+  await page.click('#ocr-download-no');await page.waitForFunction(()=>/^Đã để sau\./u.test(document.querySelector('#progress').textContent));
   assert.match(await page.textContent('#progress'),/tải bộ nhận dạng chữ \(khoảng 9 MB, một lần\)/u);assert.ok(!requests.some(line=>/tesseract|tessdata/u.test(line)));
   await page.click('#translate');await page.waitForSelector('#ocr-download:not([hidden])',{timeout:30000});
   const tesseract=tesseractRequested(page),chosen=Date.now();await page.click('#ocr-download-yes');await tesseract;
@@ -310,12 +323,82 @@ test('Without PaddleOCR a scan goes straight to Tesseract: Save-Data asks for it
  }finally{await context.close();}
 });
 
+// S74: a key Gemini refuses leaves the tab wherever it is found (here: the model check of a run), the field says so and
+// takes the focus, and where to get a key shows again; Google's terms stay in every state of the key, and so does the
+// promise that the key stays in this tab and is never stored (S1): it is in view while the next key is pasted too.
+test('A key Gemini refuses leaves the tab: the field says so and takes the focus, and where to get a key shows again',{skip,timeout:60000},async()=>{
+ let checks=0;
+ const {context,page,errors}=await openStudy({api:path=>path==='/api/my/study/models'?++checks===1?undefined:{fakeStatus:400,json:{error:'Gemini từ chối yêu cầu (400): khóa Gemini API không hợp lệ hoặc đã hết hạn. Hãy kiểm tra lại khóa trong Google AI Studio.',code:'gemini_key'}}:undefined});
+ const keyHelp=()=>page.evaluate(()=>({status:document.querySelector('#key-status').textContent,link:!document.querySelector('#key-help-link').hidden,steps:!document.querySelector('#key-steps').hidden,terms:document.querySelector('.key-help .key-terms').getBoundingClientRect().height>0,invalid:document.querySelector('#api-key').getAttribute('aria-invalid'),clear:!document.querySelector('#clear-key').hidden}));
+ // Where the promise is in view, wherever on the page it is said.
+ const promise=()=>page.evaluate(()=>[...document.querySelectorAll('main *')].filter(node=>!node.children.length&&/chỉ dùng trong tab này, không (?:được )?lưu/u.test(node.textContent)&&node.checkVisibility()).map(node=>node.id||node.className));
+ try{
+  await historyLoaded(page);
+  // Xóa shows only when there is a key to clear.
+  assert.deepEqual(await keyHelp(),{status:'Khóa chỉ dùng trong tab này, không được lưu.',link:true,steps:true,terms:true,invalid:null,clear:false});
+  assert.deepEqual(await promise(),['key-status']);
+  // A key checked and kept: the promise says it is in this tab only; where to get one steps aside, the terms stay.
+  await page.fill('#api-key',KEY);await page.click('#advanced-settings > summary');await page.click('#check-gemini-model');
+  await page.waitForFunction(()=>/^Khóa dùng được gemini-test\. Bấm Bắt đầu dịch\.$/u.test(document.querySelector('#progress').textContent));
+  assert.deepEqual(await keyHelp(),{status:'Đã nạp khóa · chỉ dùng trong tab này, không lưu.',link:false,steps:false,terms:true,invalid:null,clear:true});
+  assert.deepEqual(await promise(),['key-status']);
+  // Another Cách dịch asks for the model again: Gemini refuses the key. The field names it once; the run says only what to do.
+  await page.selectOption('#mode','quality');await page.fill('#content-title','Thử khóa');await page.fill('#source','子曰：学而时习之。');await page.click('#translate');
+  await page.waitForFunction(()=>document.querySelector('#progress').textContent==='Chưa dịch: dán khóa khác rồi bấm Bắt đầu dịch.');
+  assert.equal(await page.getAttribute('#progress','class'),'error');assert.equal(checks,2);
+  assert.deepEqual(await keyHelp(),{status:'Gemini không nhận khóa này · chỉ dùng trong tab này, không lưu.',link:true,steps:true,terms:true,invalid:'true',clear:false});
+  assert.deepEqual(await promise(),['key-status'],'the promise is in view when another key is asked for');
+  assert.equal(await page.evaluate(()=>document.activeElement.id),'api-key');
+  // A key typed in can be cleared; Xóa then steps aside and the field takes the focus for the next key.
+  await page.fill('#api-key',KEY);assert.equal((await keyHelp()).clear,true);assert.deepEqual(await promise(),['key-status'],'and while it is pasted');
+  await page.click('#clear-key');await page.waitForFunction(()=>document.querySelector('#progress').textContent==='Đã xóa khóa khỏi tab này.');
+  assert.deepEqual(await keyHelp(),{status:'Khóa chỉ dùng trong tab này, không được lưu.',link:true,steps:true,terms:true,invalid:null,clear:false});
+  assert.deepEqual(await page.evaluate(()=>({focus:document.activeElement.id,value:document.querySelector('#api-key').value})),{focus:'api-key',value:''});
+  assert.deepEqual(errors,[]);
+ }finally{await context.close();}
+});
+
+// S78 with S73, S76, S77 and S62: each status is one sentence and its button, short enough for the two lines of the phone's
+// floating bar. A run done leaves the bar in place with no action of its own: the download is then the action (S54).
+test('Phone: no key, a lost connection, the day\'s quota and the end of a run are each said in at most 100 characters; once done the bar stops floating and the download is the primary',{skip,timeout:90000},async()=>{
+ const id='8e9f0a1b-2c3d-4e5f-8a6b-7c8d9e0f1a2b';let calls=0;
+ const answers=[
+  ()=>({translation:'Phần một đã dịch.',context:'',glossary:{},usage:{prompt:10,output:5,total:15,requests:1},warnings:[]}),
+  ()=>({fakeAbort:true}),
+  ()=>({fakeStatus:429,json:{error:'Khóa Gemini đã hết lượt hôm nay (đặt lại lúc 14:00). Phần đã dịch đã được lưu.',code:'quota_day',retryAfter:3600}}),
+  ()=>({translation:'Phần hai đã dịch.',context:'',glossary:{},usage:{prompt:10,output:5,total:15,requests:1},warnings:[]})
+ ];
+ const {context,page,errors}=await openStudy({viewport:{width:390,height:844},init:()=>{window.__statuses=[];addEventListener('DOMContentLoaded',()=>{const line=document.querySelector('#progress');new MutationObserver(()=>window.__statuses.push(line.textContent)).observe(line,{childList:true,characterData:true,subtree:true});});},api:(path,method)=>{
+  if(path==='/api/my/study/history'&&method==='POST')return {id,status:'draft',libraryStoryId:null,updatedAt:new Date().toISOString()};
+  if(path===`/api/my/study/history/${id}`&&method==='PUT')return {id,status:'translating',libraryStoryId:null,updatedAt:new Date().toISOString()};
+  if(path==='/api/my/study/translate'){const answer=answers[calls++]||answers[0];return answer();}
+ }});
+ const progress=()=>page.textContent('#progress');
+ try{
+  await historyLoaded(page);await page.fill('#content-title','Hai phần');await page.fill('#source',Array.from({length:2},(_,i)=>`第${i+1}段。`+'学而时习之不亦说乎'.repeat(600)).join('\n\n'));
+  assert.equal(await progress(),'','nothing is said before anything happens');
+  await page.click('#translate');await page.waitForFunction(()=>document.querySelector('#progress').textContent.startsWith('Dán khóa'));
+  assert.equal(await progress(),'Dán khóa Gemini rồi bấm Bắt đầu dịch.');
+  await page.fill('#api-key',KEY);await page.click('#translate');await page.waitForFunction(()=>document.querySelector('#progress').textContent.startsWith('Mất kết nối'),null,{timeout:30000});
+  assert.equal(await progress(),'Mất kết nối. Kiểm tra mạng rồi bấm Dịch tiếp; phần đã dịch vẫn còn.');assert.equal(await page.textContent('#translate'),'Dịch tiếp');
+  await page.click('#translate');await page.waitForFunction(()=>document.querySelector('#progress').textContent.startsWith('Khóa đã hết lượt'),null,{timeout:30000});
+  assert.equal(await progress(),'Khóa đã hết lượt hôm nay (đặt lại lúc 14:00). Phần đã dịch đã lưu; dán khóa khác để dịch tiếp.');
+  await page.click('#translate');await page.waitForFunction(()=>/^Xong/u.test(document.querySelector('#progress').textContent),null,{timeout:30000});
+  const parts=Number((await page.textContent('#part-count')).split(' ')[0]);assert.ok(parts>=2,String(parts));
+  assert.equal(await progress(),`Xong · ${parts} phần.`);assert.equal(calls,parts+2,'each part once, the lost and the refused calls once more');
+  const long=(await page.evaluate(()=>window.__statuses)).filter(line=>line.length>100);assert.deepEqual(long,[],'every status fits two lines of the phone bar');
+  // Done: nothing is left to run, so the bar no longer floats; the download is the one primary in view.
+  assert.deepEqual(await page.evaluate(()=>({floating:document.querySelector('#run-bar').classList.contains('is-floating'),position:getComputedStyle(document.querySelector('#run-bar')).position,translate:document.querySelector('#translate').hidden,main:document.querySelector('.result-actions .export-main>button')?.id,primary:[...document.querySelectorAll('main .primary')].filter(node=>node.offsetParent).map(node=>node.id)})),{floating:false,position:'static',translate:true,main:'download',primary:['download']});
+  assert.deepEqual(errors,[]);
+ }finally{await context.close();}
+});
+
 test('A PaddleOCR worker that does not load gives way to Tesseract within seconds; the warning blames neither browser nor network',{skip,timeout:120000},async()=>{
  const id='6a5b4c3d-2e1f-4a0b-9c8d-7e6f5a4b3c2d',counts={ocr:0,translate:0};
  const {context,page,errors}=await openStudy({api:scanApi(id,counts),init:()=>Object.defineProperty(navigator,'connection',{configurable:true,value:{saveData:false,effectiveType:'4g'}})});
  const paddle=await paddleMissing(context,{workerFound:true});
  try{
-  await historyLoaded(page);await page.waitForFunction(()=>/chưa được cấu hình/u.test(document.querySelector('#pdf-layout-service-status').textContent));
+  await historyLoaded(page);await page.waitForFunction(()=>/chưa sẵn sàng/u.test(document.querySelector('#pdf-layout-service-status').textContent));
   await page.fill('#content-title','Bài scan thử');await page.fill('#api-key',KEY);await pickScan(page,await scannedPdf(page),'bai-scan.pdf');
   const tesseract=tesseractRequested(page);await page.click('#translate');await tesseract;
   const started=paddle.find(entry=>entry.line==='GET /vendor/paddle/worker.js')?.at,waited=Date.now()-started;

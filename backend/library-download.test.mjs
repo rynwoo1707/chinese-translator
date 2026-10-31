@@ -116,11 +116,11 @@ test('"Tải cả quyển" of a student\'s book names the parts with an older la
  run(`state.route='reader';state.chapters=[{id:'c1',title:'Trang 2–3',mime:'application/pdf'}];state.chapter=0;state.readerStory={id:'book-1',title:'Sách học',cover:false,study:true,sample:false,assembly:false};state.bookDownload=null`);
  await run('downloadWholeBook()');assert.equal(saved.length,1,'downloaded as it is');
  const html=run('bookDownloadPanel()');
- assert.ok(html.includes('<li>Phần “Trang 2–3” · Bố cục cũ: <a href="/study?history=6a1b2c3d-1111-4a2b-8c3d-4e5f6a7b8c90&amp;refresh=1">mở lại để cập nhật</a>.</li>'),html);
+ assert.ok(html.includes('<li>Trang 2–3: bố cục cũ · <a href="/study?history=6a1b2c3d-1111-4a2b-8c3d-4e5f6a7b8c90&amp;refresh=1">Cập nhật</a>.</li>'),html);
  // The refreshed copy begun already is linked instead, with what it still has to translate; a part of this extractor is
  // not named.
  served['/api/my/study/books/book-1/assembly'].parts=[{...part,refresh:{sessionId:'9d4e5f6a-4444-4d5e-9f6a-7b8c9d0e1f23',blocks:7}}];run('state.bookDownload=null');await run('downloadWholeBook()');
- assert.ok(run('bookDownloadPanel()').includes('<a href="/study?history=9d4e5f6a-4444-4d5e-9f6a-7b8c9d0e1f23">mở lại để cập nhật</a> (còn 7 đoạn cần dịch).</li>'));
+ assert.ok(run('bookDownloadPanel()').includes('<a href="/study?history=9d4e5f6a-4444-4d5e-9f6a-7b8c9d0e1f23">Cập nhật</a> (7 đoạn).</li>'));
  served['/api/my/study/books/book-1/assembly'].parts=[{...part,layoutVersion:4,layoutOutdated:false}];run('state.bookDownload=null');await run('downloadWholeBook()');
  assert.doesNotMatch(run('bookDownloadPanel()'),/Bố cục cũ/u);
  // A local database behind the code answers schema_outdated: its own words (start.cmd) are said, when the whole book is
@@ -130,5 +130,5 @@ test('"Tải cả quyển" of a student\'s book names the parts with an older la
  behind.run(`state.route='reader';state.chapters=[{id:'c1',title:'Trang 2–3',mime:'application/pdf'}];state.chapter=0;state.readerStory={id:'book-1',title:'Sách học',cover:false,study:true,sample:false,assembly:false};state.bookDownload=null`);
  const failed=await behind.run('downloadWholeBook()').then(()=>null,error=>error);assert.equal(failed?.message,SCHEMA);
  behind.run('state.readerAssembly=null;readerAssembly()');await new Promise(resolve=>setTimeout(resolve,50));
- assert.ok(behind.run('pdfTools(state.chapters[0])').includes(`<span class="bilingual-toggle-hint" role="status">${SCHEMA}</span>`));
+ assert.ok(behind.run('pdfTools(state.chapters[0])').includes(`<p class="status bilingual-toggle-hint" data-tone="error" role="status">${SCHEMA}</p>`));
 });

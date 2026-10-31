@@ -60,9 +60,9 @@ export function bindTermPopover(root){
  const doc=root.ownerDocument;let popover=doc.querySelector('#term-popover');
  if(!popover){
   popover=doc.createElement('div');popover.id='term-popover';popover.className='term-popover';popover.setAttribute('role','tooltip');popover.hidden=true;
-  const zh=doc.createElement('strong'),vi=doc.createElement('span'),note=doc.createElement('small');
-  zh.lang='zh-Hans';zh.className='term-popover-zh';vi.className='term-popover-vi';note.textContent='Thuật ngữ trong bảng tên của tài liệu';
-  popover.append(zh,vi,note);doc.body.append(popover);
+  const zh=doc.createElement('strong'),vi=doc.createElement('span');
+  zh.lang='zh-Hans';zh.className='term-popover-zh';vi.className='term-popover-vi';
+  popover.append(zh,vi);doc.body.append(popover);
   doc.addEventListener('click',event=>{if(!event.target.closest?.('.term,#term-popover'))closeTerm(doc);});
   doc.addEventListener('keydown',event=>{if(event.key==='Escape')closeTerm(doc,true);});
   doc.defaultView?.addEventListener('resize',()=>closeTerm(doc));

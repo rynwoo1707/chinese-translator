@@ -172,7 +172,7 @@ test('Homepage head and robots.txt',()=>{
 test('Legal pages: header with the two sections, the request link and sign-in; links use /study',()=>{
  for(const [name,html] of Object.entries(pages)){
   const header=/<header class="site-masthead">[\s\S]*?<\/header>/u.exec(html)?.[0]||'';
-  assert.match(header,/<a href="\/">[\s\S]*?<span>Học liệu<\/span><\/a>/u,name);assert.match(header,/<a href="\/study">[\s\S]*?Xưởng dịch/u,name);
+  assert.match(header,/<a href="\/">[\s\S]*?<span>Thư viện<\/span><\/a>/u,name);assert.doesNotMatch(header,/TRUNG VĂN · VIỆT NGỮ|người học/u,name);assert.match(header,/<a href="\/study">[\s\S]*?Xưởng dịch/u,name);
   assert.match(header,/<a class="header-request" href="\/#yeu-cau">[\s\S]*?Yêu cầu dịch/u,name);assert.match(header,/<a class="header-login" href="\/#account">Đăng nhập<\/a>/u,name);
   assert.doesNotMatch(html,/study\.html/u,`${name}: /study, never /study.html (a redirect)`);
   assert.match(html,/<script type="module" src="\/site-header\.js"><\/script>/u,name);

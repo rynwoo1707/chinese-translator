@@ -37,10 +37,10 @@ test('Domain mode: no registration form, Google with the school domain; a server
  const view=reader=>run(`state.loaded=true;state.reader=${JSON.stringify(reader)};accountView()`);
  const domain=view(signedOut({mode:'domain',domains:['truong.edu.vn','<b>x</b>']}));
  assert.doesNotMatch(domain,/reader-register-form|data-auth-tab|acceptTerms|role="tablist"/u,'no local registration in domain mode');
- assert.match(domain,/<form id="reader-login-form" class="auth-form" aria-labelledby="auth-login-title"><h2 class="auth-form-title" id="auth-login-title">Đăng nhập<\/h2>/u,'existing accounts still sign in with their password');
+ assert.match(domain,/<h1 id="auth-title">Đăng nhập<\/h1>[\s\S]*<form id="reader-login-form" class="auth-form" aria-labelledby="auth-title">/u,'existing accounts still sign in with their password');
  assert.match(domain,/<p class="auth-note" role="note">Tài khoản mới chỉ tạo được bằng nút Tiếp tục bằng Google, với email thuộc truong\.edu\.vn hoặc &lt;b&gt;x&lt;\/b&gt;\.<\/p>/u);
- assert.match(domain,/id="google-login" href="\/api\/auth\/google\/start\?return_to=%2F%23account" aria-disabled="true" aria-describedby="google-terms-hint google-domain-hint"/u);
- assert.match(domain,/<small class="google-terms" id="google-domain-hint">Tài khoản Google mới cần email thuộc truong\.edu\.vn hoặc &lt;b&gt;x&lt;\/b&gt;\.<\/small>/u);
+ assert.match(domain,/id="google-login" href="\/api\/auth\/google\/start\?return_to=%2F%23account" aria-disabled="true" aria-describedby="google-terms-error google-domain-hint"/u);
+ assert.match(domain,/<small class="field-hint google-terms" id="google-domain-hint">Tài khoản Google mới cần email thuộc truong\.edu\.vn hoặc &lt;b&gt;x&lt;\/b&gt;\.<\/small>/u);
  assert.match(domain,/id="google-terms-row"><input type="checkbox" data-terms-check>/u,'the Google button still waits for the terms box');
  const noGoogle=view({...signedOut({mode:'domain',domains:['truong.edu.vn']}),googleConfigured:false});
  assert.doesNotMatch(noGoogle,/reader-register-form|google-login|google-later/u);
@@ -65,8 +65,8 @@ test('Deleting a Google-only account: the dialog says it needs a recent sign-in,
  await loaded();run(`state.loaded=true;state.reader={authenticated:true,user:{id:'u',name:'Lan',email:'lan@example.test',provider:'google'}};deleteAccountDialog()`);
  const modal=get('#modal');assert.equal(modal.open,true);
  assert.doesNotMatch(modal.innerHTML,/name="password"/u,'no password to ask');
- assert.match(modal.innerHTML,/<p class="auth-note" role="note" style="margin-top:16px">Tài khoản đăng nhập bằng Google chỉ xóa được trong vòng 10 phút sau khi đăng nhập\. Nếu bạn đã đăng nhập lâu hơn, hãy đăng xuất rồi đăng nhập lại bằng Google trước\.<\/p>/u);
- assert.match(modal.innerHTML,/<p id="reauth-row" style="margin-top:12px" hidden><button type="button" id="reauth-signout">Đăng xuất để đăng nhập lại bằng Google<\/button><\/p>/u);
+ assert.match(modal.innerHTML,/<p class="auth-note" role="note">Tài khoản Google chỉ xóa được trong 10 phút sau khi đăng nhập; nếu lâu hơn, hãy đăng xuất rồi đăng nhập lại bằng Google\.<\/p>/u);
+ assert.match(modal.innerHTML,/<p id="reauth-row" hidden><button type="button" id="reauth-signout">Đăng xuất để đăng nhập lại bằng Google<\/button><\/p>/u);
  const row=get('#reauth-row'),error=get('#modal-error');row.hidden=true;error.hidden=true;
  const submitter={disabled:false},form=element({values:{confirm:'xóa'}});
  await get('#modal-form').onsubmit({preventDefault(){},submitter,target:form});

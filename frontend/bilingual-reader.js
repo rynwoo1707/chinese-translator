@@ -57,14 +57,14 @@ function openPdf(lib,url){
 // Frees the files and the pdf.js worker; called when the reader is left.
 export function releaseBilingual(){for(const file of files.values())file.task.destroy().catch(()=>{});files.clear();worker?.destroy();worker=null;}
 
-// On a phone the page buttons keep only their arrows (the name stays in aria-label), so a toolbar row fits.
-const nav=end=>`<div class="bilingual-nav${end?' bilingual-nav-end':''}" role="group" aria-label="Chuyển trang"><button type="button" data-bi="prev" aria-label="Trang trước"><span aria-hidden="true">←</span><span class="bilingual-label"> Trang trước</span></button>${end?'':'<span class="bilingual-position" data-bi="position"></span>'}<button type="button" data-bi="next" aria-label="Trang sau"><span class="bilingual-label">Trang sau </span><span aria-hidden="true">→</span></button></div>`;
+// On a phone the page buttons keep only their arrows (the name stays in aria-label), so a toolbar row fits. The keys
+// each button answers to are in aria-keyshortcuts and its tooltip, instead of a line of help under the bar.
+const nav=()=>'<div class="bilingual-nav" role="group" aria-label="Chuyển trang"><button type="button" data-bi="prev" aria-label="Trang trước" aria-keyshortcuts="ArrowLeft PageUp" title="Trang trước (← hoặc Page Up)"><span aria-hidden="true">←</span><span class="bilingual-label"> Trang trước</span></button><span class="bilingual-position" data-bi="position"></span><button type="button" data-bi="next" aria-label="Trang sau" aria-keyshortcuts="ArrowRight PageDown" title="Trang sau (→ hoặc Page Down)"><span class="bilingual-label">Trang sau </span><span aria-hidden="true">→</span></button></div>';
 // On a phone the two sides stack with the Vietnamese page on top (style.css); "announce" tells a screen reader the new page.
 const MARKUP=`<section class="bilingual" aria-label="Đọc song ngữ: trang gốc và bản dịch">
-<div class="bilingual-bar">${nav(false)}<div class="bilingual-zoom" role="group" aria-label="Thu phóng cả hai trang"><button type="button" data-bi="out" aria-label="Thu nhỏ">−</button><output data-bi="zoom" aria-live="polite"></output><button type="button" data-bi="in" aria-label="Phóng to">+</button><button type="button" data-bi="fit">Vừa khung</button></div></div>
-<p class="bilingual-hint">Phím ← → hoặc Page Up / Page Down để chuyển trang, phím + − để thu phóng.</p>
+<div class="bilingual-bar">${nav()}<div class="bilingual-zoom" role="group" aria-label="Thu phóng cả hai trang"><button type="button" data-bi="out" aria-label="Thu nhỏ" aria-keyshortcuts="-" title="Thu nhỏ (−)">−</button><output data-bi="zoom" aria-live="polite"></output><button type="button" data-bi="in" aria-label="Phóng to" aria-keyshortcuts="+" title="Phóng to (+)">+</button><button type="button" data-bi="fit" aria-keyshortcuts="0" title="Vừa khung (0)">Vừa khung</button></div></div>
 <div class="bilingual-grid"><figure class="bilingual-side bilingual-side-original"><figcaption>Nguyên tác</figcaption><div class="bilingual-scroll" data-bi="original-scroll" tabindex="0" role="group" aria-label="Trang gốc"><div class="bilingual-sheet" data-bi="original"></div></div></figure><figure class="bilingual-side bilingual-side-translated"><figcaption>Bản dịch tiếng Việt</figcaption><div class="bilingual-scroll" data-bi="translated-scroll" tabindex="0" role="group" aria-label="Trang bản dịch"><div class="bilingual-sheet" data-bi="translated"></div></div></figure></div>
-<p class="bilingual-status" data-bi="status" role="status" aria-live="polite"></p><p class="visually-hidden" data-bi="announce" aria-live="polite"></p>${nav(true)}</section>`;
+<p class="bilingual-status" data-bi="status" role="status" aria-live="polite"></p><p class="visually-hidden" data-bi="announce" aria-live="polite"></p></section>`;
 const loadFailure=(error,what)=>error?.name==='PasswordException'?`${what[0].toUpperCase()}${what.slice(1)} có mật khẩu nên không hiển thị được.`:`Không mở được ${what}. Hãy kiểm tra mạng rồi bấm Thử lại.`;
 // One page as a .bilingual-page frame cssWidth wide: a canvas for the picture and an empty text layer above it.
 function pageFrame(page,cssWidth){
@@ -94,10 +94,13 @@ export function mountBilingual(root,{originalUrl,translatedUrl,pages,labels=null
   count=docs.translated?.numPages||count;current=Math.min(current,Math.max(0,count-1));
   pick('position').textContent=place();
   const active=document.activeElement;
-  for(const button of all('prev'))button.disabled=current<=0;for(const button of all('next'))button.disabled=current>=count-1;
-  // A button that just became disabled would drop the keyboard focus to the page body.
-  if(active?.disabled&&root.contains(active))active.closest('.bilingual-nav')?.querySelector(`[data-bi="${active.dataset.bi==='prev'?'next':'prev'}"]`)?.focus();
-  pick('zoom').textContent=`${Math.round(scale*100)}%`;pick('out').disabled=scale<=ZOOMS[0];pick('in').disabled=scale>=ZOOMS.at(-1);pick('fit').disabled=scale===1;
+  // A step that cannot be taken is hidden (style.css keeps its room, so nothing moves): no page before the first or
+  // after the last, no "Vừa khung" at 100 %.
+  for(const button of all('prev'))button.disabled=button.hidden=current<=0;for(const button of all('next'))button.disabled=button.hidden=current>=count-1;
+  // A button that was just hidden would drop the keyboard focus to the page body: the other page button takes it.
+  if(active?.disabled&&root.contains(active)&&['prev','next'].includes(active.dataset.bi))active.closest('.bilingual-nav')?.querySelector(`[data-bi="${active.dataset.bi==='prev'?'next':'prev'}"]`)?.focus();
+  pick('zoom').textContent=`${Math.round(scale*100)}%`;pick('out').disabled=scale<=ZOOMS[0];pick('in').disabled=scale>=ZOOMS.at(-1);pick('fit').disabled=pick('fit').hidden=scale===1;
+  if(active===pick('fit')&&active.hidden)pick(scale>1?'out':'in')?.focus();
  }
  const note=text=>{const p=document.createElement('p');p.className='bilingual-empty';p.textContent=text;return p;};
  async function paint(side,doc,number,cssWidth,token){
@@ -214,7 +217,7 @@ export function mountPdfPages(root,{url,label='Bản dịch tiếng Việt',onLa
   if(!alive)return;
   slots.length=0;list.replaceChildren();
   for(let number=1;number<=doc.numPages;number++){const slot=document.createElement('div');slot.className='bilingual-page pdf-pages-page';slot.dataset.page=String(number);slot.setAttribute('role','group');slot.setAttribute('aria-label',`Trang ${number} / ${doc.numPages}`);slots.push(slot);}
-  list.append(...slots);status(doc.numPages>1?`${doc.numPages} trang · kéo xuống để đọc tiếp.`:'');layout();if(width>=40)onLayout();
+  list.append(...slots);status(doc.numPages>1?`${doc.numPages} trang`:'');layout();if(width>=40)onLayout();
  }
  const resize=typeof ResizeObserver==='function'?new ResizeObserver(()=>{clearTimeout(resizeTimer);resizeTimer=setTimeout(()=>{if(alive&&slots.length&&Math.abs(columnWidth()-width)>2)layout();},150);}):null;
  resize?.observe(list);load();

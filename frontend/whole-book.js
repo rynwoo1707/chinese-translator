@@ -139,7 +139,7 @@ const HEAVY_PDF=new Set(['pdf_timeout','pdf_memory','pdf_too_large']);
 export function classifyError(error,step=''){
  const status=error?.status,data=error?.data||{},code=String(data.code||error?.code||''),message=String(error?.message||''),after=Number(data.retryAfter??error?.retryAfter);
  const retryAfter=Number.isFinite(after)&&after>0?after:null;
- if(code==='quota_day'||/hết hạn mức (?:yêu cầu )?trong ngày/u.test(message))return {reason:'quota_day'};
+ if(code==='quota_day'||/hết hạn mức (?:yêu cầu )?trong ngày|hết lượt hôm nay/u.test(message))return {reason:'quota_day'};
  if(code==='quota_minute'||code==='quota'&&retryAfter!==null&&retryAfter<=300||!code&&/Gemini trả lỗi 429/u.test(message))return {reason:'quota_minute',wait:Math.min(300,Math.max(5,retryAfter??60)),retries:20};
  if(code==='quota')return {reason:'quota'};
  if(keyRefused(error))return {reason:'gemini_key'};
@@ -205,34 +205,37 @@ export function quotaResetLabel(now=Date.now()){
 }
 // The time a lease that ends in `seconds` runs out, on the device's own clock.
 const clockIn=(seconds,now)=>new Intl.DateTimeFormat('vi-VN',{hour:'2-digit',minute:'2-digit',hourCycle:'h23'}).format(new Date(now+seconds*1000));
+// Each pause says what happened and the button that goes on, as it reads then (study.js: Dịch tiếp, or Chờ rồi dịch tiếp
+// while another device runs the book).
 export function pauseMessage(reason,error,now=Date.now()){
  const detail=String(error?.message||'').trim(),lease=Number(error?.data?.retryAfter);
  // A save that failed after Gemini had translated part of the chunk (study.js saveBeforeSpending, keptInTab): that part
  // is only in this tab, which saves it first when the run goes on there. The pause says so, after the server's own
  // words for a refusal, instead of "Tiến độ đã lưu". A copy saved elsewhere since (conflict) is reopened instead.
  if(error?.keptInTab&&reason!=='conflict'){
-  const next=reason==='history_full'?'dọn bớt xong, bấm Tiếp tục dịch cả quyển ở tab này':reason==='network'?'khi mạng ổn định, bấm Tiếp tục dịch cả quyển ở tab này':'bấm Tiếp tục dịch cả quyển ở tab này để lưu và dịch tiếp';
+  const next=reason==='history_full'?'dọn bớt xong, bấm Dịch tiếp ở tab này':reason==='network'?'khi mạng ổn định, bấm Dịch tiếp ở tab này':'bấm Dịch tiếp ở tab này để lưu và dịch tiếp';
   return `${reason==='network'?'Mất kết nối tới máy chủ.':detail||'Chưa lưu được phần vừa dịch vào tài khoản.'} Phần đã dịch vẫn hiện trong tab này: đừng đóng tab. Các trang đã xong trước đó đã lưu; ${next}.`;
  }
  switch(reason){
-  case 'stopped':return 'Đã dừng theo yêu cầu. Tiến độ đã lưu; bấm Tiếp tục dịch cả quyển khi muốn dịch tiếp.';
-  case 'busy':return `Quyển này đang được dịch ở một thiết bị khác (hoặc một trình duyệt khác). Để không trả token hai lần cho cùng trang, Hoa Trí không dịch song song ở thiết bị này; tiến độ đã lưu. Bấm Chờ rồi dịch tiếp: Hoa Trí theo dõi tiến độ và tự dịch tiếp ở đây khi thiết bị kia dừng${lease>0?`, hoặc muộn nhất khoảng ${clockIn(lease,now)} nếu thiết bị kia không còn báo tiến độ`:''}.`;
-  case 'gemini_unavailable':return 'Gemini đang quá tải hoặc tạm thời không phản hồi sau nhiều lần thử. Tiến độ đã lưu; bấm Tiếp tục dịch cả quyển sau ít phút.';
-  case 'quota_day':return `Khóa Gemini này đã dùng hết hạn mức trong ngày. Tiến độ đã lưu. Dán khóa khác rồi bấm Tiếp tục dịch cả quyển, hoặc đợi hạn mức đặt lại lúc khoảng ${quotaResetLabel(now)} (giờ Việt Nam).`;
-  case 'quota':return 'Gemini báo khóa này đã hết hạn mức. Tiến độ đã lưu; hãy thử lại sau hoặc dán khóa khác.';
-  case 'quota_minute':return 'Gemini vẫn giới hạn số yêu cầu mỗi phút sau nhiều lần chờ. Tiến độ đã lưu; bấm Tiếp tục dịch cả quyển sau ít phút.';
-  case 'gemini_key':return 'Gemini không chấp nhận khóa này. Hãy dán một khóa Gemini hợp lệ rồi bấm Tiếp tục dịch cả quyển.';
-  case 'rate_limited':return 'Hoa Trí đang giới hạn tốc độ. Tiến độ đã lưu; bấm Tiếp tục dịch cả quyển sau ít phút.';
-  case 'pdf_busy':return 'Dịch vụ PDF vẫn bận vì nhiều người dùng cùng lúc sau nhiều lần chờ. Tiến độ đã lưu; bấm Tiếp tục dịch cả quyển sau ít phút.';
-  case 'pdf_account':return 'Tài khoản của bạn vẫn đang có một lượt xử lý PDF khác (ở tab hoặc thiết bị khác) sau nhiều lần chờ. Tiến độ đã lưu; bấm Tiếp tục dịch cả quyển khi lượt đó xong.';
-  case 'pdf_local':return `${detail||'Dịch vụ PDF trên máy này chưa chạy.'} Tiến độ đã lưu; bấm Tiếp tục dịch cả quyển khi dịch vụ PDF đã chạy.`;
-  case 'schema':return `${detail||'Cơ sở dữ liệu chưa được cập nhật lên phiên bản mới.'} Các trang đã xong trước đó vẫn được giữ; bấm Tiếp tục dịch cả quyển sau khi cơ sở dữ liệu được cập nhật.`;
-  case 'gemini_location':return 'Gemini vẫn chưa phục vụ khu vực của máy chủ Hoa Trí sau nhiều lần thử. Khóa của bạn vẫn dùng được và các lần thử này không tốn token. Tiến độ đã lưu; bấm Tiếp tục dịch cả quyển sau ít phút. Nếu lỗi lặp lại, hãy báo quản trị viên.';
-  case 'history_full':return `${detail||'Lịch sử dịch của tài khoản đã đầy.'} Tiến độ của quyển đã lưu; dọn bớt xong, bấm Tiếp tục dịch cả quyển.`;
-  case 'conflict':return 'Phần đang dịch vừa được lưu từ một tab hoặc thiết bị khác, nên tab này dừng để không ghi đè phần đó. Tiến độ của quyển đã lưu; bấm Tiếp tục dịch cả quyển để mở bản mới nhất và dịch tiếp.';
-  case 'network':return 'Mất kết nối tới máy chủ. Tiến độ đã lưu; khi mạng ổn định, bấm Tiếp tục dịch cả quyển.';
+  case 'stopped':return 'Đã dừng theo yêu cầu; tiến độ đã lưu.';
+  case 'busy':return `Quyển này đang được dịch ở một thiết bị khác; để không trả token hai lần, tab này không dịch song song. Bấm Chờ rồi dịch tiếp để dịch tiếp ở đây khi thiết bị kia dừng${lease>0?` (muộn nhất khoảng ${clockIn(lease,now)})`:''}.`;
+  case 'gemini_unavailable':return 'Gemini đang quá tải hoặc tạm thời không phản hồi. Tiến độ đã lưu; bấm Dịch tiếp sau ít phút.';
+  // The reset time is Gemini's (midnight Pacific); another key goes on at once.
+  case 'quota_day':return `Khóa đã hết lượt hôm nay (đặt lại lúc ${quotaResetLabel(now)}). Phần đã dịch đã lưu; dán khóa khác để dịch tiếp.`;
+  case 'quota':return 'Khóa này đã hết hạn mức. Tiến độ đã lưu; thử lại sau hoặc dán khóa khác.';
+  case 'quota_minute':return 'Gemini vẫn giới hạn số yêu cầu mỗi phút. Tiến độ đã lưu; bấm Dịch tiếp sau ít phút.';
+  case 'gemini_key':return 'Gemini không nhận khóa này. Dán khóa khác rồi bấm Dịch tiếp.';
+  case 'rate_limited':return 'Hoa Trí đang giới hạn tốc độ. Tiến độ đã lưu; bấm Dịch tiếp sau ít phút.';
+  case 'pdf_busy':return 'Dịch vụ PDF vẫn bận vì nhiều người dùng cùng lúc. Tiến độ đã lưu; bấm Dịch tiếp sau ít phút.';
+  case 'pdf_account':return 'Tài khoản của bạn vẫn đang có một lượt xử lý PDF khác (ở tab hoặc thiết bị khác). Tiến độ đã lưu; bấm Dịch tiếp khi lượt đó xong.';
+  case 'pdf_local':return `${detail||'Dịch vụ PDF trên máy này chưa chạy.'} Tiến độ đã lưu; bấm Dịch tiếp khi dịch vụ PDF đã chạy.`;
+  case 'schema':return `${detail||'Cơ sở dữ liệu chưa được cập nhật lên phiên bản mới.'} Các trang đã xong trước đó vẫn được giữ; bấm Dịch tiếp sau khi cơ sở dữ liệu được cập nhật.`;
+  case 'gemini_location':return 'Gemini vẫn chưa phục vụ khu vực của máy chủ Hoa Trí. Khóa của bạn vẫn dùng được và các lần thử này không tốn token. Tiến độ đã lưu; bấm Dịch tiếp sau ít phút.';
+  case 'history_full':return `${detail||'Lịch sử dịch của tài khoản đã đầy.'} Tiến độ của quyển đã lưu; dọn bớt xong, bấm Dịch tiếp.`;
+  case 'conflict':return 'Phần đang dịch vừa được lưu từ một tab hoặc thiết bị khác, nên tab này dừng để không ghi đè. Tiến độ của quyển đã lưu; bấm Dịch tiếp để mở bản mới nhất.';
+  case 'network':return 'Mất kết nối tới máy chủ. Tiến độ đã lưu; khi mạng ổn định, bấm Dịch tiếp.';
   case 'limit':return `${detail||'Đã hết lượt dùng trong ngày.'} Tiến độ đã lưu.`;
-  default:return `${detail||'Có lỗi khi dịch.'} Tiến độ đã lưu; bấm Tiếp tục dịch cả quyển để thử lại.`;
+  default:return `${detail||'Có lỗi khi dịch.'} Tiến độ đã lưu; bấm Dịch tiếp để thử lại.`;
  }
 }
 export function waitMessage(reason,seconds){

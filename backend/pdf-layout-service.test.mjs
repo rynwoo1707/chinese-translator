@@ -90,8 +90,8 @@ test('A translation longer than its box: the answer names each block “Trang N 
  const viewer=read('frontend/pdf-dual-viewer.js'),study=read('frontend/study.html');
  for(const control of ['Chỉnh bản dịch từng đoạn','Lưu đoạn đã sửa'])assert.ok(viewer.includes(control),control);
  assert.match(viewer,/textContent=`Đoạn \$\{i\+1\} · /u,'the editor lists a page\'s blocks as Đoạn 1, Đoạn 2, …');
- // In a sentence the viewer names a block "Trang N · đoạn k" (its notice on the same screen), as the message does.
- assert.match(viewer,/Trang \$\{entry\.number\} · đoạn \$\{i\+1\}/u);
+ // In a sentence the page names a block "Trang N · đoạn k" (its Cần xem lại rows, beside the viewer), as the message does.
+ assert.match(read('frontend/study.js'),/`Trang \$\{page\.number\} · đoạn \$\{page\.blocks\.indexOf\(block\)\+1\}`/u);
  for(const control of ['Đối chiếu kết quả','>Xuất PDF tiếng Việt<'])assert.ok(study.includes(control),control);
  // The label is the block's place on its page, whatever its id says.
  const entry={number:24,blocks:['p24-b0','p24-b1','p24-b5','p24-b6'].map(id=>({id}))};

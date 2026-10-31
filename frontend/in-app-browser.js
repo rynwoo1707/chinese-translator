@@ -13,8 +13,10 @@ export function inAppBrowser(agent=globalThis.navigator?.userAgent||'',{home=sta
  if(ios&&/AppleWebKit/u.test(ua)&&!/\bSafari\//u.test(ua)&&!home)return {name:'',ios,android};
  return null;
 }
-// What to tell the student: where they are, the browser to open, and how (the menu every such app has).
+// What to tell the student: where they are, the browser to open, and how (the menu every such app has). name and menu
+// make the one sentence both dialogs say ("Zalo không cho đăng nhập Google. Bấm ⋮ → “Mở bằng trình duyệt”…": app.js;
+// "Zalo thường không lưu được tệp tải về. …": study.js).
 export function openInBrowserHelp(app){
  const browser=app?.ios?'Safari':'Chrome';
- return {browser,where:app?.name?`trình duyệt riêng của ${app.name}`:'trình duyệt riêng của ứng dụng đang dùng',steps:app?.ios?'bấm nút ⋯ (hoặc biểu tượng chia sẻ) rồi chọn “Mở trong Safari” hay “Mở bằng trình duyệt”':'bấm nút ⋮ hoặc ⋯ ở góc màn hình rồi chọn “Mở bằng trình duyệt” hay “Mở trong Chrome”'};
+ return {browser,name:app?.name||'Ứng dụng này',menu:app?.ios?'Bấm ⋯ → “Mở trong Safari”':'Bấm ⋮ → “Mở bằng trình duyệt”'};
 }

@@ -107,14 +107,14 @@ test('First run at 1440 px: the setup form takes ADMIN_TOKEN once, errors stay i
  // The right token: the account is made and this browser is signed in as it.
  await page.fill('[name=token]',TOKEN);await page.click('#admin-setup-form [type=submit]');
  await page.waitForSelector('.sidebar');
- assert.equal(await page.textContent('.profile-name'),'Cô Trần Ngọc Lan');assert.match(await page.textContent('.profile small'),/^co\.lan · Quản trị viên$/u);
- assert.equal(await page.textContent('#toast'),'Đã tạo tài khoản quản trị đầu tiên và đăng nhập.');
+ assert.equal(await page.textContent('.profile-name'),'Cô Trần Ngọc Lan');assert.equal(await page.textContent('.profile small'),'co.lan');
+ assert.doesNotMatch(await page.textContent('#toast'),/Chưa tải được/u,'no toast but a failure: the console is the answer');
  assert.deepEqual(JSON.parse(server.requests.findLast(item=>item.path==='/api/admin/setup').body),{token:TOKEN,username:'co.lan',name:'Cô Trần Ngọc Lan',password:PASSWORD,first:true});
  // A session cookie (expires -1): the browser drops it when it closes; a reload keeps it (below).
  const cookie=(await context.cookies()).find(item=>item.name==='cat_hien_admin');
  assert.deepEqual([cookie.httpOnly,cookie.sameSite,cookie.path,cookie.expires],[true,'Strict','/api/',-1]);
  // The default "Cách dịch" of the school's jobs is preselected in the upload form.
- assert.equal(await page.$eval('#job-mode',select=>select.selectedOptions[0].textContent),'Kỹ nhất (tốn nhiều token nhất)');
+ assert.equal(await page.$eval('#job-mode',select=>select.selectedOptions[0].textContent),'Kỹ nhất');
  // A reload keeps the session: the console comes back without any form in between.
  await page.reload();await page.waitForSelector('.sidebar');
  assert.equal(await page.$('#admin-login-form'),null);
@@ -147,16 +147,16 @@ test('Sign-in on a phone (390 px): the error inside the form, one request for a 
  assert.equal(await sideways(),0);
  await page.fill('[name=password]',PASSWORD);await page.click('#admin-login-form [type=submit]');
  // Back where the address pointed: Cài đặt, with who is signed in, the password form and the admins.
- await page.waitForSelector('#admin-password-form');await page.waitForSelector('.admin-accounts');
- assert.equal(await page.textContent('#admin-account-title'),'Cô Lan');
+ await page.waitForSelector('#admin-password-toggle');await page.waitForSelector('.admin-accounts');
+ assert.equal(await page.textContent('#admin-account-title'),'Cô Lan');assert.equal(await page.locator('#admin-add-form').isHidden(),true);
  assert.deepEqual(await page.$$eval('.admin-accounts li',rows=>rows.map(row=>[row.querySelector('strong').textContent,Boolean(row.querySelector('[data-admin-delete]'))])),[['Cô Lan',false],['Thầy Minh',true]],'"Xóa" beside the others only');
  assert.equal(await sideways(),0,'the settings fit a phone');
  // Another admin is added, confirmed with her own password; the list shows the new one at once and the focus is on the
  // form's note.
- await page.fill('#admin-add-form [name=username]','co.hoa');await page.fill('#admin-add-form [name=name]','Cô Hoa');await page.fill('#admin-add-form [name=password]','hoa-sen-trong-dam-lay-3');await page.fill('#admin-add-form [name=confirm]','hoa-sen-trong-dam-lay-3');await page.fill('#admin-add-form [name=currentPassword]',PASSWORD);
+ await page.click('#admin-add-toggle');await page.fill('#admin-add-form [name=username]','co.hoa');await page.fill('#admin-add-form [name=name]','Cô Hoa');await page.fill('#admin-add-form [name=password]','hoa-sen-trong-dam-lay-3');await page.fill('#admin-add-form [name=confirm]','hoa-sen-trong-dam-lay-3');await page.fill('#admin-add-form [name=currentPassword]',PASSWORD);
  await page.click('#admin-add-form [type=submit]');await page.waitForFunction(()=>document.querySelectorAll('.admin-accounts li').length===3);
  assert.equal(await page.inputValue('#admin-add-form [name=username]'),'','the form is emptied');
- await page.waitForFunction(()=>document.activeElement.id==='admin-add-done');assert.equal(await page.textContent('#admin-add-done'),'Đã thêm quản trị viên co.hoa. Hãy gửi riêng tên đăng nhập và mật khẩu cho người đó.');
+ await page.waitForFunction(()=>document.activeElement.id==='admin-add-done');assert.equal(await page.textContent('#admin-add-done'),'Đã thêm co.hoa. Gửi riêng tên đăng nhập và mật khẩu cho người đó; họ nên đổi mật khẩu khi đăng nhập lần đầu.');
  // The session ends on the server (2 hours idle, a password changed elsewhere) while a dialog is open: its request brings
  // the sign-in form back, the dialog closed, the reason read first; signing in again returns to the same page.
  server.sessions.clear();
@@ -192,19 +192,25 @@ test('"Quên mật khẩu?": ADMIN_TOKEN and the username set a new password and
  assert.equal(await page.evaluate(()=>document.activeElement.tagName+' '+document.activeElement.textContent),'H1 Đặt lại mật khẩu quản trị');
  await page.fill('[name=token]',TOKEN);await page.fill('[name=username]','co.lan');await page.fill('[name=password]',PASSWORD);await page.fill('[name=confirm]',PASSWORD);
  await page.click('#admin-recover-form [type=submit]');await page.waitForSelector('.sidebar');
- assert.equal(server.admins.get('co.lan').password,PASSWORD);assert.equal(await page.textContent('#toast'),'Đã đặt mật khẩu mới và đăng nhập.');
+ assert.equal(server.admins.get('co.lan').password,PASSWORD);assert.doesNotMatch(await page.textContent('#toast'),/Chưa tải được/u);
  assert.equal(JSON.parse(server.requests.findLast(item=>item.path==='/api/admin/setup').body).first,undefined,'the recovery form is a reset, not a first-run form');
  // A new job carries the mode picked in the form; starting it names none (the job has it). Its page shows that mode, from
  // the job's own detail (its list row does not carry it), and a mode picked there goes with "Dịch lại".
  await page.click('[data-tab="text"]');await page.fill('#source-input','子曰：學而時習之');await page.selectOption('#story-select','s1');await page.selectOption('#job-mode','quality');
- assert.match(await page.textContent('#job-mode-hint'),/Ước tính tốn khoảng gấp/u);
+ assert.match(await page.textContent('#job-mode-hint'),/token/u,'what it costs');
  await page.click('#start-translate');await page.waitForFunction(()=>location.hash==='#review');
  await page.waitForFunction(()=>document.querySelector('#toast').textContent.includes('đã dịch xong'));
  assert.match(server.jobs[0],/name="mode"\r\n\r\nquality\r\n/u);
  const runs=()=>server.requests.filter(item=>item.path==='/api/jobs/j1/run').map(item=>item.body&&JSON.parse(item.body));
  assert.deepEqual(runs(),[null]);
- await page.waitForFunction(()=>document.querySelector('#run-mode')?.value==='quality');
- await page.selectOption('#run-mode','economy');await page.click('#rerun');await page.waitForSelector('#rerun:not([disabled])');
+ await page.waitForSelector('#publish-job');await page.click('.job-more > summary');await page.click('#rerun-dialog');
+ await page.waitForFunction(()=>document.querySelector('#modal[open] #rerun-mode')?.value==='quality');
+ // A1: the page drawn again while the dialog is open (an address change here; a running job's poll does it every 4 s)
+ // binds nothing to the dialog, whose controls have ids of their own: one press sends one run, in the mode picked.
+ await page.evaluate(()=>dispatchEvent(new HashChangeEvent('hashchange')));
+ assert.equal(await page.evaluate(()=>document.querySelectorAll('#rerun,#run-mode').length),0,'no control shares an id with the page\'s run controls');
+ await page.selectOption('#rerun-mode','economy');await page.click('#rerun-confirm');await until(()=>runs().length===2&&server.job.status==='review');await page.waitForSelector('#publish-job');
+ await page.evaluate(()=>new Promise(resolve=>setTimeout(resolve,500)));
  assert.deepEqual(runs(),[null,{mode:'economy'}]);assert.equal(server.job.mode,'economy');
  // The library page in the same browser: no admin header on any request, no admin form.
  await page.goto(`${ORIGIN}/`);await page.waitForSelector('#home-title');
@@ -241,7 +247,7 @@ test('After the session ended, late answers leave the sign-in form alone: the no
  assert.deepEqual(await page.evaluate(()=>[document.querySelector('[name=username]').value,document.querySelector('[name=password]').value,document.activeElement.name]),['co.lan','mai-hoa','password']);
  assert.deepEqual(server.requests.filter(item=>item.path==='/api/jobs/j1/run').map(item=>item.body),[null],'"Tiếp tục xử lý" left as it was names no mode');assert.equal(server.job.mode,'economy');
  // Signing in brings her back to Cài đặt.
- await page.fill('[name=password]',PASSWORD);await page.click('#admin-login-form [type=submit]');await page.waitForSelector('#admin-password-form');
+ await page.fill('[name=password]',PASSWORD);await page.click('#admin-login-form [type=submit]');await page.waitForSelector('#admin-password-toggle');
  assert.deepEqual(server.requests.filter(item=>item.page==='/admin'&&(item.header!=='1'||item.authorization)),[]);
  assert.deepEqual(await csp(),[]);assert.deepEqual(errors,[]);
  await context.close();
@@ -260,6 +266,7 @@ test('Cài đặt: a run that ends leaves what is typed; removing an admin asks 
   server.runDelay=2500;await page.click('#rerun');await until(()=>server.requests.some(item=>item.path==='/api/jobs/j1/run'));
   await page.click('.sidebar [data-route="settings"]');await page.waitForSelector('.admin-accounts');
   const asked=()=>server.requests.filter(item=>item.path==='/api/status').length,before=asked();
+  await page.click('#admin-password-toggle');await page.click('#admin-add-toggle');
   await page.fill('#admin-password-form [name=currentPassword]','mai-hoa');await page.fill('#admin-add-form [name=username]','co.hoa');await page.fill('#admin-add-form [name=password]','hoa-sen-trong-dam-lay-3');
   await page.focus('#admin-add-form [name=confirm]');await page.keyboard.type('hoa-sen');
   await until(()=>server.job.status==='review'&&asked()>before);await page.evaluate(()=>new Promise(resolve=>setTimeout(resolve,300)));
@@ -287,7 +294,7 @@ test('Cài đặt: a run that ends leaves what is typed; removing an admin asks 
   // "Đổi mật khẩu" with Enter on its button: the focus goes to the form's note.
   await page.fill('#admin-password-form [name=currentPassword]',PASSWORD);await page.fill('#admin-password-form [name=newPassword]','mot-mat-khau-moi-rat-dai-9');await page.fill('#admin-password-form [name=confirm]','mot-mat-khau-moi-rat-dai-9');
   await page.focus('#admin-password-form [type=submit]');await page.keyboard.press('Enter');await page.waitForFunction(()=>document.activeElement.id==='admin-password-done');
-  assert.equal(await page.textContent('#admin-password-done'),'Đã đổi mật khẩu. Lần sau hãy đăng nhập bằng mật khẩu mới.');assert.equal(server.admins.get('co.lan').password,'mot-mat-khau-moi-rat-dai-9');
+  assert.equal(await page.textContent('#admin-password-done'),'Đã đổi mật khẩu.');assert.equal(server.admins.get('co.lan').password,'mot-mat-khau-moi-rat-dai-9');
   assert.deepEqual(await csp(),[]);assert.deepEqual(errors,[]);
  }finally{await context.close();}
 });
@@ -309,7 +316,7 @@ test('Thuật ngữ: a run that ends leaves the terms typed in a student\'s book
   assert.deepEqual(await page.evaluate(()=>{const field=document.querySelector('#glossary-text');return {value:field.value,readOnly:field.readOnly,focus:document.activeElement.id};}),{value:'秦 = Tần\n漢 = Hán',readOnly:false,focus:'glossary-text'});
   await page.click('#save-glossary');await until(()=>server.requests.some(item=>item.method==='PATCH'));
   assert.deepEqual(JSON.parse(server.requests.find(item=>item.method==='PATCH').body),{glossary:{'秦':'Tần','漢':'Hán'}});
-  await page.waitForFunction(()=>/^Đã lưu bảng thuật ngữ\./u.test(document.querySelector('#toast').textContent));
+  await page.waitForFunction(()=>/^Đã lưu thuật ngữ/u.test(document.querySelector('#toast').textContent));
   assert.deepEqual(await csp(),[]);assert.deepEqual(errors,[]);
  }finally{await context.close();}
 });

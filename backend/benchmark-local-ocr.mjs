@@ -61,7 +61,7 @@ try{
  await writeFile(new URL('results.json',output),JSON.stringify(report,null,2)+'\n');
  // Exercise real upload -> OCR -> UI with a mocked translation, never a real key.
  await page.locator('#source-file').setInputFiles(file);
- await page.waitForFunction(()=>document.querySelector('#file-status').textContent.includes('Đang chọn'),{},{timeout:180_000});
+ await page.waitForFunction(()=>/trang scan|có lớp chữ/u.test(document.querySelector('#file-status').textContent),{},{timeout:180_000});
  await page.locator('#page-range').fill(String(pages[0]));
  await page.locator('#translate').click();assert.equal(translationCalls,0,'Missing key must prevent translation');
  await page.locator('#api-key').fill('local-ui-test-key-no-external-api');

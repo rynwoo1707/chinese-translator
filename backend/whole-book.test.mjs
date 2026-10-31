@@ -87,7 +87,11 @@ test('the daily quota resets at midnight Pacific time: 15:00 or 14:00 in Vietnam
  assert.equal(reset('2026-03-08T07:30:00Z'),'2026-03-08T08:00:00.000Z');assert.equal(reset('2026-03-08T09:00:00Z'),'2026-03-09T07:00:00.000Z');
  assert.equal(reset('2026-11-01T06:30:00Z'),'2026-11-01T07:00:00.000Z');assert.equal(reset('2026-11-01T08:30:00Z'),'2026-11-02T08:00:00.000Z');
  assert.equal(book.quotaResetLabel(Date.parse('2026-12-01T03:00:00Z')),'15:00 hôm nay');assert.equal(book.quotaResetLabel(Date.parse('2026-10-19T09:00:00Z')),'14:00 ngày mai');
- assert.match(book.pauseMessage('quota_day',null,Date.parse('2026-12-01T03:00:00Z')),/dán khóa khác.*15:00 hôm nay \(giờ Việt Nam\)/isu);
+ assert.equal(book.pauseMessage('quota_day',null,Date.parse('2026-12-01T03:00:00Z')),'Khóa đã hết lượt hôm nay (đặt lại lúc 15:00 hôm nay). Phần đã dịch đã lưu; dán khóa khác để dịch tiếp.');
+ // The pause of a book says what happened and the button that goes on, short enough for the phone's two-line bar.
+ for(const reason of ['stopped','quota_day','quota','quota_minute','gemini_key','rate_limited','pdf_busy','network'])assert.ok(book.pauseMessage(reason,null,Date.parse('2026-12-01T03:00:00Z')).length<=110,reason);
+ // The day's quota is recognised by its code, and by the words of older and newer servers that sent none.
+ assert.equal(book.classifyError(Object.assign(new Error('Khóa Gemini đã hết lượt hôm nay (đặt lại lúc 14:00). Phần đã dịch đã được lưu.'),{status:429})).reason,'quota_day');
  assert.match(book.pauseMessage('limit',new Error('Bạn đã dùng hết 100 lượt tách PDF hôm nay.')),/^Bạn đã dùng hết 100 lượt tách PDF hôm nay\. Tiến độ đã lưu\.$/u);
  assert.match(book.waitMessage('quota_minute',37),/37 giây/u);
 });
@@ -274,10 +278,11 @@ test('quota per minute waits and continues by itself; a day quota, a refused key
  const waited=await minute.create().run(minute.state.job);assert.equal(waited.status,'done');assert.deepEqual(minute.sleeps,[42]);
  const day=fakeAccount({total:45,cover:0,translateErrors:[undefined,Object.assign(new Error('Hết hạn mức ngày.'),{status:429,data:{code:'quota_day',retryAfter:null}})]});
  const paused=await day.create().run(day.state.job);
- assert.equal(paused.status,'paused');assert.equal(paused.reason,'quota_day');assert.match(paused.message,/giờ Việt Nam/u);
+ assert.equal(paused.status,'paused');assert.equal(paused.reason,'quota_day');assert.match(paused.message,/đặt lại lúc \d\d:\d\d (?:hôm nay|ngày mai)\)/u);
  assert.equal(day.state.job.status,'paused');assert.equal(day.state.job.pauseReason,'quota_day');assert.equal(day.state.job.pageStates,'d'.repeat(20)+'.'.repeat(25));
  const key=fakeAccount({total:5,cover:0,translateErrors:[Object.assign(new Error('Khóa bị từ chối.'),{status:403,data:{code:'gemini_key'}})]}),refused=await key.create().run(key.state.job);
- assert.equal(refused.reason,'gemini_key');assert.match(refused.message,/khóa Gemini hợp lệ/u);
+ // The refused key is named, with the way on: another key, then the button that goes on (S74).
+ assert.equal(refused.reason,'gemini_key');assert.equal(refused.message,'Gemini không nhận khóa này. Dán khóa khác rồi bấm Dịch tiếp.');
  const lost=Array.from({length:7},()=>Object.assign(new Error('Không kết nối được máy chủ.'),{status:0})),network=fakeAccount({total:5,cover:0,translateErrors:lost}),gone=await network.create().run(network.state.job);
  assert.equal(gone.reason,'network');assert.deepEqual(network.sleeps,book.BACKOFF_SECONDS);
  const back=fakeAccount({total:5,cover:0,translateErrors:[Object.assign(new Error('503'),{status:503,data:{}})]});assert.equal((await back.create().run(back.state.job)).status,'done');
@@ -445,7 +450,7 @@ test('PDF service answers map to waiting, halving or a pause: busy is waited out
  // run pauses at once, in the server's words, instead of drawing the chunk again as after a lost connection.
  const outdated=pdfError(503,'pdf_service_outdated','Dịch vụ PDF chưa được cập nhật cùng phiên bản với trang web, nên PDF vừa dựng chưa được lưu và lượt xuất này không bị tính. Hãy thử xuất lại sau ít phút.');
  assert.deepEqual(book.classifyError(outdated,'export'),{reason:'error'});
- assert.equal(book.pauseMessage('error',outdated),'Dịch vụ PDF chưa được cập nhật cùng phiên bản với trang web, nên PDF vừa dựng chưa được lưu và lượt xuất này không bị tính. Hãy thử xuất lại sau ít phút. Tiến độ đã lưu; bấm Tiếp tục dịch cả quyển để thử lại.');
+ assert.equal(book.pauseMessage('error',outdated),'Dịch vụ PDF chưa được cập nhật cùng phiên bản với trang web, nên PDF vừa dựng chưa được lưu và lượt xuất này không bị tính. Hãy thử xuất lại sau ít phút. Tiến độ đã lưu; bấm Dịch tiếp để thử lại.');
  // This account's own other PDF call (another tab) is the short wait of a limit, said in its own words.
  assert.deepEqual(book.classifyError(pdfError(429,'pdf_busy','Tài khoản của bạn đang có một lượt xử lý PDF khác…',30),'extract'),{reason:'pdf_account',wait:30,retries:20,capacity:true});
  assert.match(book.waitMessage('pdf_busy',20),/Dịch vụ PDF đang bận vì nhiều người dùng cùng lúc\. Tự thử lại sau 20 giây/u);
@@ -479,14 +484,14 @@ test('a PDF service of this machine that does not answer is waited for three tim
  // Never started (npm run dev): three short waits, then the server's words, never a lost connection.
  const never=fakeAccount({total:5,cover:0,refuse:()=>off()}),paused=await never.create().run(never.state.job);
  assert.deepEqual([paused.status,paused.reason],['paused','pdf_local']);assert.deepEqual(never.sleeps,[10,10,10]);
- assert.equal(paused.message,`${LOCAL} Tiến độ đã lưu; bấm Tiếp tục dịch cả quyển khi dịch vụ PDF đã chạy.`);assert.doesNotMatch(paused.message,/Mất kết nối|mạng/u);
+ assert.equal(paused.message,`${LOCAL} Tiến độ đã lưu; bấm Dịch tiếp khi dịch vụ PDF đã chạy.`);assert.doesNotMatch(paused.message,/Mất kết nối|mạng/u);
  // A save refused by a database without the newest migration (backend/http.js; study.js passes its words on): no wait mends it.
  const SCHEMA='Cơ sở dữ liệu cục bộ chưa cập nhật: hãy tắt Hoa Trí rồi chạy start.cmd (hoặc npm run db:local rồi khởi động lại). Mã 1a2b3c4d.';
  const outdated=()=>Object.assign(new Error(SCHEMA),{code:'save_failed',status:500,data:{error:SCHEMA,code:'schema_outdated',ray:'1a2b3c4d'}});
  assert.deepEqual(book.classifyError(outdated(),'save'),{reason:'schema'});
  const behind=fakeAccount({total:5,cover:0,translateErrors:[outdated()]}),stopped=await behind.create().run(behind.state.job);
  assert.deepEqual([stopped.status,stopped.reason],['paused','schema']);assert.deepEqual(behind.sleeps,[]);
- assert.equal(stopped.message,`${SCHEMA} Các trang đã xong trước đó vẫn được giữ; bấm Tiếp tục dịch cả quyển sau khi cơ sở dữ liệu được cập nhật.`);
+ assert.equal(stopped.message,`${SCHEMA} Các trang đã xong trước đó vẫn được giữ; bấm Dịch tiếp sau khi cơ sở dữ liệu được cập nhật.`);
  assert.match(book.pauseMessage('schema',Object.assign(outdated(),{keptInTab:true})),/^Cơ sở dữ liệu cục bộ chưa cập nhật: .* Phần đã dịch vẫn hiện trong tab này: đừng đóng tab\./u);
 });
 

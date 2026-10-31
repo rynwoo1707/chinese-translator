@@ -49,7 +49,7 @@ test('The share image is 1200 x 630 and its own work',()=>{
 test('404 page: the shared header and footer, a heading, ways back, no inline script',()=>{
  const html=read('frontend/404.html');
  assert.match(html,/^<!doctype html>\s*<html lang="vi">/u);assert.match(html,/<h1>Không tìm thấy trang này<\/h1>/u);
- assert.match(html,/<a class="primary-link" href="\/">Về Học liệu<\/a>/u);assert.match(html,/<a href="\/study">Mở Xưởng dịch<\/a>/u);
+ assert.match(html,/<p>Đường dẫn sai hoặc trang đã chuyển\.<\/p>/u);assert.doesNotMatch(html,/LỖI 404|class="eyebrow"/u);assert.match(html,/<a class="primary-link" href="\/">Về Thư viện<\/a>/u);assert.match(html,/<a href="\/study">Mở Xưởng dịch<\/a>/u);
  assert.match(html,/<a class="header-request" href="\/#yeu-cau">/u);assert.match(html,/<a class="header-login" href="\/#account">Đăng nhập<\/a>/u);
  assert.match(html,/<footer class="site-footer" data-site-footer>[\s\S]*?<\/footer>/u);
  assert.doesNotMatch(html,/<script(?![^>]*\bsrc=)[^>]*>/u);assert.doesNotMatch(html,/\son[a-z]+=/u);

@@ -38,8 +38,8 @@ test('The console loads one page of each list (no text, no student shelves), mor
  await settle();
  assert.deepEqual(page.urls().sort(),['/api/jobs?limit=100','/api/requests','/api/status','/api/stories?limit=100','/api/users'],'no /api/user-library and no job text in the first load');
  const stories=page.run(`state.route='stories';storiesView()`);
- assert.match(stories,/100\+ hồ sơ tài liệu/u);assert.match(stories,/<div class="load-more"><button type="button" data-load-more="stories">Tải thêm tài liệu<\/button><\/div>/u);
- assert.match(page.run(`translateView()`),/Tài liệu đã tải[\s\S]*?<strong>2\+<\/strong>/u,'a count of the rows loaded says there are more');
+ assert.match(stories,/<p class="page-meta">100\+ tài liệu · 100 phần đã công bố<\/p>/u);assert.match(stories,/<div class="load-more"><button type="button" data-load-more="stories">Tải thêm tài liệu<\/button><\/div>/u);
+ assert.match(page.run(`translateView()`),/data-route="review">1\+ chờ duyệt<\/button>/u,'a count of the rows loaded says there are more');
  await page.run(`loadMore('stories')`);
  assert.ok(page.urls().includes('/api/stories?offset=100&limit=100'));assert.equal(page.run('state.stories.length'),130);
  assert.doesNotMatch(page.run('storiesView()'),/data-load-more/u,'no more pages');
@@ -52,23 +52,24 @@ test('The job editor fetches the job\'s text when it is opened; saving and publi
  const page=console_((url,init)=>url==='/api/jobs?limit=100'?[200,[job('j1',{warning_count:1})]]:url==='/api/jobs/j1'&&(init.method||'GET')==='GET'?detail:url==='/api/jobs/j1'&&init.method==='PATCH'?[200,{ok:true,long:true}]:null,{'#save-job':save,'#edit-source':{value:'子曰：學而時習之'},'#edit-translation':{value:'Khổng Tử nói: Học rồi đem ra luyện tập.'}});
  await settle();
  const waiting=page.run(`state.route='review';state.selected='j1';reviewView()`);
- assert.match(waiting,/Đang tải nguyên tác và bản dịch…/u);assert.match(waiting,/<button id="save-job" disabled>/u);assert.match(waiting,/<button class="primary" id="publish-job" disabled>/u);
+ assert.match(waiting,/<p class="status" role="status">Đang tải…<\/p>/u);assert.match(waiting,/<button type="button" id="save-job" disabled>Lưu<\/button>/u);assert.match(waiting,/<button type="button" class="primary" id="publish-job" disabled>/u);
  assert.match(waiting,/<textarea id="edit-source" readonly><\/textarea>/u);
  page.run('render()');await settle();
  assert.deepEqual(page.calls.filter(call=>call.url==='/api/jobs/j1').map(call=>call.method),['GET'],'asked once');
  // A failed load says so, with "Thử lại"; it is not retried in a loop.
  page.run('render()');await settle();assert.equal(page.calls.filter(call=>call.url==='/api/jobs/j1').length,1);
  assert.match(page.root.innerHTML,/Chưa tải được nội dung bản dịch: Máy chủ đang bận\. <button type="button" id="job-detail-retry">Thử lại<\/button>/u);
+ assert.doesNotMatch(page.root.innerHTML,/id="publish-job"|id="save-job"/u,'a text that did not load: no publish or save that cannot be used, only Thử lại');
  await save.handlers.click({});assert.equal(page.toast.textContent,'Nội dung bản dịch chưa tải xong. Hãy đợi một chút.');
  assert.ok(!page.calls.some(call=>call.method==='PATCH'),'nothing is saved over a text the editor has not shown');
  detail=[200,{...job('j1'),source:'子曰：學而時習之',translation:'Khổng Tử nói: Học rồi đem ra luyện tập.',warnings:'["Chữ 說 có thể đọc là duyệt."]'}];
  page.run(`loadJobDetail('j1',{again:true})`);await settle();
  const ready=page.root.innerHTML;
  assert.match(ready,/<textarea id="edit-source" >子曰：學而時習之<\/textarea>/u);assert.match(ready,/>Khổng Tử nói: Học rồi đem ra luyện tập\.<\/textarea>/u);
- assert.match(ready,/<div class="warning">Chữ 說 có thể đọc là duyệt\.<\/div>/u);assert.match(ready,/<button id="save-job" >Lưu biên tập<\/button><button class="primary" id="publish-job" >/u);
+ assert.match(ready,/<div class="note" data-tone="warn"><ul class="job-warnings"><li>Chữ 說 có thể đọc là duyệt\.<\/li><\/ul><\/div>/u);assert.match(ready,/<button type="button" class="primary" id="publish-job" >Duyệt & công bố<\/button><button type="button" id="save-job" >Lưu<\/button>/u);
  await save.handlers.click({});await settle();
  assert.deepEqual(JSON.parse(page.calls.find(call=>call.method==='PATCH').body),{source:'子曰：學而時習之',translation:'Khổng Tử nói: Học rồi đem ra luyện tập.'});
- assert.equal(page.toast.textContent,'Đã lưu bản biên tập. Văn bản dài được lưu riêng, đầy đủ; ô biên tập chỉ hiện 20.000 ký tự đầu.');
+ assert.equal(page.toast.textContent,'Đã lưu. Văn bản dài được lưu đầy đủ; ô sửa chỉ hiện 20.000 ký tự đầu.');
  // The list row of an older server that still carries the text is used as is.
  assert.match(page.run(`state.jobs=[{...state.jobs[0],source:'舊',translation:'Cũ',warnings:'[]'}];state.jobDetails={};reviewView()`),/<textarea id="edit-source" >舊<\/textarea>/u);
 });
@@ -89,12 +90,17 @@ test('While a job runs, only that job is polled (GET /api/jobs?ids=), and its te
 test('A student\'s book glossary is fetched before it can be edited, so saving never replaces its terms with an empty list',async()=>{
  const page=console_(url=>url==='/api/stories?limit=100'?[200,[story('lib',{glossary:'{"清朝":"triều Thanh"}'}),story('stu',{owner_user_id:'u1',glossary:null})]]:url==='/api/stories/stu'?[200,{...story('stu',{owner_user_id:'u1'}),glossary:'{"秦":"Tần"}',context:'Sử Tần'}]:null);
  await settle();
- assert.match(page.run(`state.route='glossary';state.glossaryId='lib';glossaryView()`),/>清朝 = triều Thanh<\/textarea><\/label><button id="save-glossary" class="primary" style="margin-top:18px" >/u,'a library book carries its glossary');
+ assert.match(page.run(`state.route='glossary';state.glossaryId='lib';glossaryView()`),/>清朝 = triều Thanh<\/textarea><small class="field-hint" id="glossary-hint">Mỗi dòng: 中文 = tiếng Việt<\/small><\/label><button type="button" id="save-glossary" class="primary" >Lưu<\/button>/u,'a library book carries its glossary');
  const waiting=page.run(`state.glossaryId='stu';glossaryView()`);
- assert.match(waiting,/<textarea id="glossary-text" rows="12" readonly/u);assert.match(waiting,/Đang tải bảng thuật ngữ của tài liệu này…/u);assert.match(waiting,/<button id="save-glossary" class="primary" style="margin-top:18px" disabled>/u);
+ assert.match(waiting,/<textarea id="glossary-text" rows="12" readonly/u);assert.match(waiting,/<p class="status" role="status">Đang tải…<\/p>/u);assert.match(waiting,/<button type="button" id="save-glossary" class="primary" disabled>Lưu<\/button>/u);assert.doesNotMatch(waiting,/placeholder=/u,'no example over a glossary still loading');
  page.run('render()');await settle();
  assert.ok(page.urls().includes('/api/stories/stu'));assert.ok(!page.urls().includes('/api/stories/lib'));
- assert.match(page.root.innerHTML,/>秦 = Tần<\/textarea><\/label><button id="save-glossary" class="primary" style="margin-top:18px" >/u);
+ assert.match(page.root.innerHTML,/>秦 = Tần<\/textarea><small class="field-hint" id="glossary-hint">[^<]*<\/small><\/label><button type="button" id="save-glossary" class="primary" >Lưu<\/button>/u);
+ // A glossary that did not load: the alert with "Thử lại" alone, no empty editor and no "Lưu" that cannot be used.
+ const failed=console_(url=>url==='/api/stories?limit=100'?[200,[story('stu',{owner_user_id:'u1',glossary:null})]]:url==='/api/stories/stu'?[500,{error:'Máy chủ đang bận.'}]:null);
+ await settle();failed.run(`state.route='glossary';state.glossaryId='stu';render()`);await settle();failed.run('render()');
+ assert.match(failed.root.innerHTML,/Chưa tải được thuật ngữ của tài liệu này: Máy chủ đang bận\. <button type="button" id="story-detail-retry">Thử lại<\/button>/u);
+ assert.doesNotMatch(failed.root.innerHTML,/id="glossary-text"|id="save-glossary"/u);
 });
 
 test('Students: the book counts come with the accounts; each one\'s books load when opened, a page at a time',async()=>{
@@ -103,11 +109,13 @@ test('Students: the book counts come with the accounts; each one\'s books load w
  const page=console_(url=>url==='/api/users'?[200,users]:url==='/api/user-library?user=u1&offset=0&limit=100'?[200,shelf,{'X-Next-Offset':'2'}]:url==='/api/user-library?user=u1&offset=2&limit=100'?[200,[story('b3',{owner_user_id:'u1'})]]:null);
  await settle();
  const closed=page.run(`state.route='users';usersView()`);
- assert.match(closed,/<strong>3<\/strong><span>Tài liệu cá nhân<\/span>/u);assert.match(closed,/<span>3 tài liệu<\/span>/u);
- assert.match(closed,/<button type="button" class="user-books-open" data-user-books="u1">Xem 3 tài liệu<\/button>/u);assert.match(closed,/Người học này chưa có tài liệu\./u);
- page.run(`loadUserBooks('u1')`);assert.match(page.run('usersView()'),/Đang tải tài liệu…/u);await settle();
+ assert.match(closed,/<p class="page-meta">2 tài khoản · 3 tài liệu riêng<\/p>/u);
+ assert.match(closed,/<button type="button" class="quiet" data-user-books="u1" aria-expanded="false">3 tài liệu ▾<\/button>/u);assert.doesNotMatch(closed,/data-user-books="u2"|0 tài liệu|0 yêu cầu/u,'no zero counts');
+ page.run(`loadUserBooks('u1')`);assert.match(page.run('usersView()'),/<p class="status" role="status">Đang tải…<\/p>/u);await settle();
  const open=page.run('usersView()');
- assert.match(open,/<h2>Sách b1<\/h2>/u);assert.match(open,/<button type="button" data-user-books-more="u1" >Tải thêm tài liệu<\/button><button type="button" data-user-books-hide="u1">Thu gọn<\/button>/u);
+ assert.match(open,/data-user-books="u1" aria-expanded="true">3 tài liệu ▾<\/button>/u);
+ assert.match(open,/<span class="row-title" title="Sách b1">Sách b1<\/span><span class="row-meta">Thư viện riêng · 1 phần<\/span><\/div><details class="menu story-actions">/u);assert.match(open,/<span class="row-meta">Thư viện chung · 1 phần<\/span>/u);
+ assert.match(open,/<button type="button" data-user-books-more="u1" >Tải thêm<\/button><button type="button" class="quiet" data-user-books-hide="u1">Thu gọn<\/button>/u);
  assert.equal(page.run(`adminStory('b2').visibility`),'public','actions on a shelf book find it');
  page.run(`loadUserBooks('u1',{more:true})`);await settle();
  assert.equal(page.run(`state.userBooks.u1.rows.length`),3);assert.doesNotMatch(page.run('usersView()'),/data-user-books-more/u);
@@ -117,8 +125,7 @@ test('Students: the book counts come with the accounts; each one\'s books load w
 // the covers of private books (a student's, an unpublished draft) are fetched with the header into object URLs, revoked
 // when the admin opens another view.
 test('Covers of private books load with the admin header as object URLs, are reused while the view stays, and are revoked when it changes',async()=>{
- const users=[{id:'u1',email:'lan@example.test',name:'Lan',provider:'local',books:3,requests:0}];
- const shelf=[story('b1',{owner_user_id:'u1',visibility:'private',cover_key:'covers/b1-1.jpg'}),story('b2',{owner_user_id:'u1',visibility:'public',cover_key:'covers/b2-1.jpg'}),story('b3',{owner_user_id:'u1',visibility:'private',cover_key:'covers/b3-1.jpg'})];
+ const shelf=[story('b1',{visibility:'private',cover_key:'covers/b1-1.jpg'}),story('b2',{visibility:'public',cover_key:'covers/b2-1.jpg'}),story('b3',{visibility:'private',cover_key:'covers/b3-1.jpg'})];
  // The <img> elements a render makes, as the page would hold them (an attribute removed, an element replaced).
  let drawn=null,images=[];
  const all=(selector,root)=>{
@@ -127,20 +134,20 @@ test('Covers of private books load with the admin header as object URLs, are reu
   return images.filter(image=>image.dataset.adminCover&&!image.replaced);
  };
  const made=[],revoked=[],URL={createObjectURL:blob=>{made.push(blob);return `blob:cover-${made.length}`;},revokeObjectURL:url=>{revoked.push(url);}};
- const page=console_((url,init)=>url==='/api/users'?[200,users]:url==='/api/user-library?user=u1&offset=0&limit=100'?[200,shelf]:url==='/api/covers/b1?v=covers%2Fb1-1.jpg'?(init.headers?.['X-Hoa-Tri-Admin']==='1'?[200,new Uint8Array([255,216,255,224]),{'Content-Type':'image/jpeg'}]:[404,{error:'Không tìm thấy ảnh bìa hoặc bạn không có quyền xem.'}]):url.startsWith('/api/covers/')?[404,{error:'Chưa có ảnh bìa.'}]:null,{},{all,globals:{URL}});
+ const page=console_((url,init)=>url==='/api/stories?limit=100'?[200,shelf]:url==='/api/covers/b1?v=covers%2Fb1-1.jpg'?(init.headers?.['X-Hoa-Tri-Admin']==='1'?[200,new Uint8Array([255,216,255,224]),{'Content-Type':'image/jpeg'}]:[404,{error:'Không tìm thấy ảnh bìa hoặc bạn không có quyền xem.'}]):url.startsWith('/api/covers/')?[404,{error:'Chưa có ảnh bìa.'}]:null,{},{all,globals:{URL}});
  await settle();
- page.run(`state.route='users';loadUserBooks('u1')`);await settle();await settle();
+ page.run(`state.route='stories';render()`);await settle();await settle();
  const html=page.root.innerHTML,first=images;
  assert.match(html,/<img class="book-cover" src="\/api\/covers\/b2\?v=covers%2Fb2-1\.jpg" alt="Bìa Sách b2" loading="lazy">/u,'a public cover needs no header');
  const coverCalls=page.calls.filter(call=>call.url.startsWith('/api/covers/'));
  assert.deepEqual(coverCalls.map(call=>[call.url,call.headers['X-Hoa-Tri-Admin'],call.headers.Authorization]),[['/api/covers/b1?v=covers%2Fb1-1.jpg','1',undefined],['/api/covers/b3?v=covers%2Fb3-1.jpg','1',undefined]],'the header, never a token');
- assert.equal(first[0].src,'blob:cover-1');assert.equal(made.length,1);assert.match(first[1].replaced,/cover-placeholder[\s\S]*Chưa có ảnh bìa/u,'a cover that cannot be loaded shows the placeholder');
+ assert.equal(first[0].src,'blob:cover-1');assert.equal(made.length,1);assert.match(first[1].replaced,/cover-placeholder/u,'a cover that cannot be loaded shows the placeholder');assert.doesNotMatch(first[1].replaced,/Chưa có ảnh bìa/u);
  // Drawn again in the same view: the object URL is reused, nothing is fetched again.
  page.run('render()');
  assert.match(page.root.innerHTML,/<img class="book-cover" src="blob:cover-1" alt="Bìa Sách b1">/u);assert.equal(page.calls.filter(call=>call.url.startsWith('/api/covers/')).length,2);assert.deepEqual(revoked,[]);
  // Another view: the URL is revoked; signing out leaves none behind either.
- page.run(`go('stories')`);assert.deepEqual(revoked,['blob:cover-1']);
- page.run(`go('users')`);await settle();assert.equal(made.length,2,'back in the view, the cover is fetched again');
+ page.run(`go('users')`);assert.deepEqual(revoked,['blob:cover-1']);
+ page.run(`go('stories')`);await settle();assert.equal(made.length,2,'back in the view, the cover is fetched again');
  await page.run('logout()');assert.deepEqual(revoked,['blob:cover-1','blob:cover-2']);
 });
 
@@ -154,7 +161,7 @@ test('Pending requests: a count on "Yêu cầu dịch" and in the title, kept up
  await settle();
  const badge=count=>`Yêu cầu dịch<span class="count" aria-hidden="true">${count}</span><span class="visually-hidden"> (${count} yêu cầu mới)</span>`;
  assert.ok(page.root.innerHTML.includes(`${badge(2)}</button>`),'the count, and its words for a screen reader');assert.equal(page.document.title,'(2) Hoa Trí — Quản trị');
- assert.match(page.run('translateView()'),/Yêu cầu mới[\s\S]*?<strong>02<\/strong>/u);
+ assert.match(page.run('translateView()'),/data-route="requests">2 yêu cầu mới<\/button>/u);
  // Another student sends a request meanwhile.
  requests=[request('r4','pending'),...requests];const drawn=page.root.innerHTML,asked=()=>page.urls().filter(url=>url==='/api/requests').length;
  assert.equal(asked(),1);
@@ -200,7 +207,7 @@ test('Against the real Worker: light pages, more on demand, a job\'s text, a stu
  await page.run(`loadMore('jobs')`);assert.deepEqual([page.run('state.jobs.length'),page.run('state.more.jobs')],[130,null]);
  // The job editor.
  page.run(`state.route='review';state.selected='job-5';render()`);await settle();
- assert.equal(page.run(`state.jobDetails['job-5'].data.source.length`),10000);assert.ok(page.root.innerHTML.includes('<textarea id="edit-source" >原文原文'),'the editor shows the text');assert.ok(page.root.innerHTML.includes('<div class="warning">Cảnh báo</div>'),'and its warnings');
+ assert.equal(page.run(`state.jobDetails['job-5'].data.source.length`),10000);assert.ok(page.root.innerHTML.includes('<textarea id="edit-source" >原文原文'),'the editor shows the text');assert.ok(page.root.innerHTML.includes('<div class="note" data-tone="warn"><ul class="job-warnings"><li>Cảnh báo</li></ul></div>'),'and its warnings');
  // The glossary of a student's book.
  page.run(`state.route='glossary';state.glossaryId='u1-b7';render()`);await settle();
  assert.ok(page.root.innerHTML.includes('术语999 = thuật ngữ 999</textarea>'),'the 1,000 terms are in the editor');
@@ -249,13 +256,13 @@ test('Every call of the console carries the admin header; a session that ended b
  },{'#save-job':save,'#edit-source':field('#edit-source'),'#edit-translation':field('#edit-translation'),'#admin-login-form':login},{globals:{FormData:FakeFormData}});
  await settle();
  page.run(`state.route='review';state.selected='j1';render()`);await settle();
- assert.match(page.root.innerHTML,/<textarea id="edit-translation"  placeholder="[^"]*">Khổng Tử nói\.<\/textarea>/u);
+ assert.match(page.root.innerHTML,/<textarea id="edit-translation" >Khổng Tử nói\.<\/textarea>/u);
  assert.ok(page.calls.length>=5&&page.calls.every(call=>call.headers['X-Hoa-Tri-Admin']==='1'&&!call.headers.Authorization),'the header on every call, never a token');
  // She edits; the session ends meanwhile; she saves.
  text['#edit-translation']='Khổng Tử nói: học rồi đem ra luyện tập.';signedIn=false;
  await save.handlers.click({});
  assert.equal(page.toast.textContent,'Phiên quản trị đã hết hạn. Hãy đăng nhập lại.');
- assert.match(page.root.innerHTML,/<h1 id="admin-auth-title">Đăng nhập quản trị<\/h1>[\s\S]*data-focus-first>Phiên quản trị đã kết thúc\. Hãy đăng nhập lại; nội dung đang soạn dở vẫn được giữ trên trang này\.<\/p><form id="admin-login-form"/u);
+ assert.match(page.root.innerHTML,/<h1 id="admin-auth-title">Đăng nhập quản trị<\/h1>[\s\S]*data-focus-first>Phiên đã hết hạn\. Đăng nhập lại để tiếp tục; phần đang soạn vẫn được giữ\.<\/p><form id="admin-login-form"/u);
  assert.doesNotMatch(page.root.innerHTML,/class="sidebar"/u);
  assert.deepEqual([page.run('state.route'),page.run('state.selected')],['review','j1'],'where she was is kept');
  // Late answers to what was asked while signed in (the job's text, a translation step, the address) redraw nothing while
@@ -267,8 +274,8 @@ test('Every call of the console carries the admin header; a session that ended b
  text['#edit-translation']='';page.calls.length=0;
  await login.fire('submit');await settle();await settle();
  assert.deepEqual(JSON.parse(page.calls.find(call=>call.url==='/api/admin/login').body),{username:'lan.nguyen',password:'mai-hoa-no-som-tren-doi-7'});
- assert.match(page.root.innerHTML,/class="sidebar"/u);assert.equal(page.toast.textContent,'Đã đăng nhập khu quản trị.');
- assert.match(page.root.innerHTML,/<textarea id="edit-translation"  placeholder="[^"]*">Khổng Tử nói\.<\/textarea>/u,'the server\'s text is drawn');
+ assert.match(page.root.innerHTML,/class="sidebar"/u);assert.doesNotMatch(page.root.innerHTML,/admin-login-form/u);assert.notEqual(page.toast.textContent,'Đã đăng nhập khu quản trị.','the console itself says it: no toast');
+ assert.match(page.root.innerHTML,/<textarea id="edit-translation" >Khổng Tử nói\.<\/textarea>/u,'the server\'s text is drawn');
  assert.equal(text['#edit-translation'],'Khổng Tử nói: học rồi đem ra luyện tập.','then what she had typed is put back');assert.equal(page.run('state.adminDrafts'),null,'once');
  assert.ok(!page.calls.some(call=>call.method==='PATCH'),'nothing is saved by itself');
  // A wrong password is said in the form: its error box, focused, both fields marked, the button usable again.
@@ -295,7 +302,7 @@ test('What one admin left unsaved when the session ended is never put back for a
  assert.equal(page.run('state.adminDrafts.fields["edit-translation"]'),'Bản dịch đang sửa dở.');assert.equal(page.run('state.draftText'),'原文 đang nhập');
  text['#edit-translation']='';
  await page.run(`api('/admin/login',{method:'POST',body:{username:'thay.minh',password:'mot-mat-khau-khac-de-doan-9'}}).then(()=>enterAdmin('Đã đăng nhập khu quản trị.'))`);await settle();await settle();
- assert.match(page.root.innerHTML,/<textarea id="edit-translation"  placeholder="[^"]*">Bản dịch\.<\/textarea>/u);
+ assert.match(page.root.innerHTML,/<textarea id="edit-translation" >Bản dịch\.<\/textarea>/u);
  assert.equal(text['#edit-translation'],'','nothing of hers is put into his editor');
  assert.deepEqual([page.run('state.adminDrafts'),page.run('state.draftText')],[null,'']);
 });
@@ -308,7 +315,7 @@ test('Signing out asks the server first: a refusal keeps the console and says wh
  assert.match(page.root.innerHTML,/class="sidebar"/u);assert.equal(page.run('state.status.authenticated'),true);
  const sent=page.calls.find(call=>call.url==='/api/admin/logout');assert.equal(sent.method,'POST');assert.equal(sent.headers['X-Hoa-Tri-Admin'],'1');
  answer=[200,{ok:true}];await page.run('signOutAdmin()');
- assert.equal(page.toast.textContent,'Đã đăng xuất khỏi khu quản trị.');
+ assert.equal(page.toast.textContent,'Đã đăng xuất.');
  assert.match(page.root.innerHTML,/<form id="admin-login-form"/u);assert.doesNotMatch(page.root.innerHTML,/class="sidebar"|admin-auth-notice/u);
  assert.deepEqual([page.run('state.jobs.length'),page.run('state.status.authenticated'),page.run('state.route')],[0,false,'translate']);
  // The server could not delete its session but cleared the cookie: signed out here, in its words.
@@ -389,7 +396,7 @@ test('What the console asks by itself carries X-Hoa-Tri-Background: 1; a check t
  release();await running;
  // The session ends on the server (2 hours unused, signed out elsewhere): the next check brings back the sign-in form.
  signedIn=false;page.run('requestsCheckedAt=0');for(const fn of page.listeners.focus||[])await fn();await settle();
- assert.equal(page.run('state.status.authenticated'),false);assert.match(page.root.innerHTML,/data-focus-first>Phiên quản trị đã kết thúc\.[^<]*<\/p><form id="admin-login-form"/u);
+ assert.equal(page.run('state.status.authenticated'),false);assert.match(page.root.innerHTML,/data-focus-first>Phiên đã hết hạn\.[^<]*<\/p><form id="admin-login-form"/u);
 });
 
 // A run (or a split) that ends while the admin is in another view draws again only what shows jobs: a form typed in
@@ -405,7 +412,7 @@ test('A run or a split that ends redraws only what shows jobs: other views keep 
  // Cài đặt (its forms) and Thuật ngữ (its glossary) are not drawn again; the count of new requests is.
  for(const route of ['settings','glossary']){button.innerHTML='';assert.equal(await run(route),0,route);assert.equal(page.document.title,'(1) Hoa Trí — Quản trị');assert.match(button.innerHTML,/<span class="count" aria-hidden="true">1<\/span>/u,route);}
  // Xưởng dịch: only its counts and recent jobs.
- assert.equal(await run('translate'),0);assert.match(stats.outerHTML,/^<div class="stats">/u);assert.match(recent.outerHTML,/^<section class="recent">[\s\S]*Tài liệu gần đây/u);
+ assert.equal(await run('translate'),0);assert.match(stats.outerHTML,/^<div class="stats" role="group" aria-label="Việc đang chờ">/u);assert.match(recent.outerHTML,/^<section class="recent" aria-labelledby="recent-title">[\s\S]*Tài liệu gần đây/u);
  // The review view shows the jobs: drawn again.
  assert.ok(await run('review')>0);
  // "Chia PDF trước": each splitting step and the end leave Cài đặt alone too.
@@ -433,7 +440,7 @@ test('A run that ends while a student\'s book glossary is open: typed terms stay
  await end();
  assert.equal(typed.gets(),before+1,'the glossary the refresh dropped is asked for again');assert.equal(writes,0,'nothing is drawn over the typed terms');
  await typed.save.handlers.click({});await settle();
- assert.deepEqual(typed.patched(),[{glossary:{'秦':'Tần','漢':'Hán'}}]);assert.match(typed.page.toast.textContent,/^Đã lưu bảng thuật ngữ\./u);
+ assert.deepEqual(typed.patched(),[{glossary:{'秦':'Tần','漢':'Hán'}}]);assert.match(typed.page.toast.textContent,/^Đã lưu thuật ngữ; dùng từ lần dịch sau\./u);
  // That answer fails: "Lưu bảng thuật ngữ" asks again and says to wait, then saves.
  end=await typed.run();typed.text.value='秦 = Tần\n楚 = Sở';answer=()=>[500,{error:'Máy chủ đang bận.'}];await end();answer=terms;
  await typed.save.handlers.click({});await settle();
@@ -489,9 +496,9 @@ test('"Thêm quản trị viên" sends "Mật khẩu của bạn"; it and "Đổ
  }
  answer=[201,{admin:{id:'a9',username:'co.hoa',name:'Cô Hoa',createdAt:'2026-10-27T08:00:00.000Z',lastLoginAt:null,self:false}}];await add.fire('submit');
  assert.deepEqual(JSON.parse(page.calls.findLast(call=>call.url==='/api/admin/admins'&&call.method==='POST').body),{username:'co.hoa',name:'Cô Hoa',password:'hoa-sen-trong-dam-lay-3',currentPassword:'mai-hoa-no-som-tren-doi-7'});
- assert.deepEqual([add.done.hidden,add.done.focused,add.box.hidden,invalid(add)],[false,true,true,[]]);assert.match(add.done.innerHTML,/<span>Đã thêm quản trị viên co\.hoa\. Hãy gửi riêng tên đăng nhập và mật khẩu cho người đó\.<\/span>$/u);
+ assert.deepEqual([add.done.hidden,add.done.focused,add.box.hidden,invalid(add)],[false,true,true,[]]);assert.match(add.done.innerHTML,/<span>Đã thêm co\.hoa\. Gửi riêng tên đăng nhập và mật khẩu cho người đó; họ nên đổi mật khẩu khi đăng nhập lần đầu\.<\/span>$/u);
  await change.fire('submit');
- assert.deepEqual([change.done.hidden,change.done.focused],[false,true]);assert.match(change.done.innerHTML,/<span>Đã đổi mật khẩu\. 2 nơi khác đang đăng nhập tài khoản này đã bị đăng xuất\. Lần sau hãy đăng nhập bằng mật khẩu mới\.<\/span>$/u);
+ assert.deepEqual([change.done.hidden,change.done.focused],[false,true]);assert.match(change.done.innerHTML,/<span>Đã đổi mật khẩu\. Các nơi khác đã bị đăng xuất\.<\/span>$/u);
  // The next attempt starts without the last note.
  answer=[409,{error:'Tên đăng nhập này đã có tài khoản quản trị.',code:'username_taken'}];await add.fire('submit');assert.deepEqual([add.done.hidden,add.box.textContent],[true,'Tên đăng nhập này đã có tài khoản quản trị.']);
 });

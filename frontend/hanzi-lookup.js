@@ -25,15 +25,17 @@ const BLOCKS='p,li,h1,h2,h3,h4,h5,h6,td,th,figcaption,blockquote,dd,dt,pre,[data
 // Inside a context, block-level children end a line, so the last word of one paragraph never joins the next.
 const BREAKS=`${BLOCKS},address,article,aside,div,dl,figure,footer,header,hr,ol,section,table,tr,ul`;
 const MESSAGES={
- hint:'Chạm vào một chữ để xem pinyin, âm Hán Việt và nghĩa.',
+ hint:'Chạm vào một chữ để tra.',
  loading:'Đang tải dữ liệu từ điển…',
  network:'Không tải được dữ liệu từ điển. Kiểm tra kết nối rồi bấm Thử lại.',
  missing:'Máy chủ này chưa có dữ liệu từ điển. Quản trị viên chạy “npm run prepare:dict” (hoặc “npm run setup”) rồi tải lại trang.',
  noHan:'Không có chữ Hán quanh vị trí này.'
 };
 const MACHINE='Nghĩa tiếng Việt từ CVDICT: phần lớn được dịch tự động từ CC-CEDICT, mới rà soát một phần, có thể còn sai. Đối chiếu nghĩa tiếng Anh khi cần.';
-// CC BY-SA 4.0 attribution: stays visible in the panel footer, with the deployed LICENSE.txt linked.
-const ATTRIBUTION='Dữ liệu: CC-CEDICT (MDBG) và CVDICT (Phong Phan) theo CC BY-SA 4.0 · Âm Hán Việt: hanviet-pinyin-wordlist (Phong Phan, MIT) · Unihan © Unicode, Inc. (Unicode License v3). Đã chuyển đổi và gộp nguồn.';
+// CC BY-SA 4.0, MIT and Unicode attribution, with the change notice: always visible in the panel footer. Its link opens the
+// LICENSE.txt deployed with the data (the notices, the changes and the licences in full: backend/dictionary-build.js),
+// once the manifest names it; until then, the terms page's licence section (§12).
+const ATTRIBUTION='Dữ liệu: CC-CEDICT (MDBG), CVDICT (Phong Phan) · CC BY-SA 4.0 · Âm Hán Việt: hanviet-pinyin-wordlist (Phong Phan, MIT) · Unihan © Unicode, Inc. (Unicode License v3) · đã chuyển đổi, gộp nguồn ·';
 
 // Every rule is scoped under .hanzi-panel and outweighs the pages' bare element rules (study.css lifts every button on
 // hover; style.css restyles h2, label and input), so the panel looks the same on every page.
@@ -50,8 +52,8 @@ export const hanziStyles=`.hanzi-panel{--hz-bg:#fffdf7;--hz-text:#283127;--hz-mu
 .hz-note{margin:0 0 10px;padding:8px 10px;border-radius:8px;background:var(--hz-soft);color:var(--hz-muted);font-size:12.5px}
 .hz-search{display:grid;gap:4px;margin-bottom:10px}.hz-search label{font-size:12px;color:var(--hz-muted)}
 .hz-search input{width:100%;min-height:40px;margin:0;padding:6px 10px;border:1px solid var(--hz-line);border-radius:9px;background:var(--hz-button);color:inherit;font:18px/1.4 var(--hz-zh)}
-@media(pointer:coarse){.hanzi-panel .hz-close{width:44px;min-height:44px}.hz-search input{min-height:44px}}
-.hz-strip-label{margin:0 0 4px;font-size:12px;color:var(--hz-muted)}
+@media(pointer:coarse){.hanzi-panel .hz-close{width:44px;min-height:44px}.hz-search input{min-height:44px}.hanzi-panel .hz-actions button,.hanzi-panel .hz-row button,.hanzi-panel .hz-retry,.hanzi-panel .hz-more{min-height:44px}.hanzi-panel .hz-toggle{min-height:44px}.hanzi-panel .hz-attribution a{display:inline-flex;align-items:center;min-height:44px}}
+.hanzi-panel .hz-strip-label{position:absolute;width:1px;height:1px;margin:0;overflow:hidden;clip-path:inset(50%);white-space:nowrap}
 .hz-strip{margin:0 0 10px;padding:2px 0 6px;max-height:8.4em;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere;border-bottom:1px solid var(--hz-line);font:21px/1.95 var(--hz-zh)}
 .hanzi-panel .hz-strip .hz-c{min-height:0;min-width:0;padding:0 2px;border:0;border-radius:5px;background:none;font:inherit;font-weight:400;line-height:inherit;vertical-align:baseline}
 .hanzi-panel .hz-strip .hz-c:hover{background:var(--hz-soft)}.hanzi-panel .hz-strip .hz-c.is-word{background:rgba(164,70,54,.16);color:var(--hz-accent)}.hanzi-panel .hz-strip .hz-c[aria-current=true]{box-shadow:inset 0 -2px var(--hz-accent)}
@@ -112,10 +114,10 @@ function ensurePanel(doc){
   h(doc,'div',{class:'hz-body'},[
    h(doc,'p',{class:'hz-note',hidden:true}),
    h(doc,'div',{class:'hz-search',hidden:true},[h(doc,'label',{for:'hz-search-input',text:'Nhập hoặc dán chữ Hán'}),search]),
-   h(doc,'div',{class:'hz-strip-wrap',hidden:true},[h(doc,'p',{id:'hz-strip-label',class:'hz-strip-label',text:'Các chữ trong đoạn — dùng phím mũi tên để chọn, Enter để tra'}),h(doc,'div',{class:'hz-strip',role:'group','aria-labelledby':'hz-strip-label',lang:'zh'}),h(doc,'p',{class:'hz-strip-note',hidden:true})]),
+   h(doc,'div',{class:'hz-strip-wrap',hidden:true},[h(doc,'p',{id:'hz-strip-label',class:'hz-strip-label',text:'Các chữ trong đoạn: phím mũi tên để chọn, Enter để tra'}),h(doc,'div',{class:'hz-strip',role:'group','aria-labelledby':'hz-strip-label',lang:'zh'}),h(doc,'p',{class:'hz-strip-note',hidden:true})]),
    h(doc,'div',{class:'hz-card','aria-live':'polite','aria-atomic':'true'})
   ]),
-  h(doc,'div',{class:'hz-foot'},[h(doc,'label',{class:'hz-toggle'},[toggle,'Tra khi chạm vào chữ']),h(doc,'p',{class:'hz-attribution'},[ATTRIBUTION,' ',h(doc,'a',{class:'hz-license',target:'_blank',rel:'noopener',hidden:true,text:'Giấy phép dữ liệu'})])])
+  h(doc,'div',{class:'hz-foot'},[h(doc,'label',{class:'hz-toggle'},[toggle,'Tra khi chạm vào chữ']),h(doc,'p',{class:'hz-attribution'},[ATTRIBUTION,' ',h(doc,'a',{class:'hz-license',href:'/dieu-khoan#giay-phep',target:'_blank',rel:'noopener',text:'Giấy phép dữ liệu'})])])
  ]);
  toggle.checked=hanziTapEnabled();
  toggle.addEventListener('change',()=>setHanziTapEnabled(toggle.checked));
@@ -173,7 +175,7 @@ async function show(index,range=null){
   if(token!==sequence||view!==current)return;
   Object.assign(current,{start:card.start,end:card.end,index:card.index,card});
   renderCard(card);mark();
-  dict().licenseUrl().then(url=>{const link=panel?.querySelector('.hz-license');if(link){link.href=url;link.hidden=false;}},()=>{});
+  dict().licenseUrl().then(url=>{const link=panel?.querySelector('.hz-license');if(link)link.href=url;},()=>{});
  }catch(error){
   if(token!==sequence||view!==current)return;
   current.card=null;message(error instanceof DictionaryError&&error.code==='missing'?'missing':'network',{retry:()=>show(index,range)});
@@ -225,8 +227,8 @@ function renderCard(card){
  if(chips.length)nodes.push(h(doc,'section',{class:'hz-section'},[h(doc,'h3',{text:'Từ khác có chữ này'}),h(doc,'div',{class:'hz-row'},chips.map(chip=>h(doc,'button',{type:'button',class:'hz-zh','data-action':'alt','data-start':chip.start,'data-end':chip.end,lang:card.lang,text:chip.text})))]));
  const stale=view?.stale,edge=dir=>!view||stale||!neighborWindow(view.chars,card.start,card.end,dir);
  nodes.push(h(doc,'div',{class:'hz-actions'},[
-  h(doc,'button',{type:'button','data-action':'prev',disabled:edge(-1),text:'‹ Từ trước'}),
-  h(doc,'button',{type:'button','data-action':'next',disabled:edge(1),text:'Từ sau ›'}),
+  !edge(-1)&&h(doc,'button',{type:'button','data-action':'prev',text:'‹ Từ trước'}),
+  !edge(1)&&h(doc,'button',{type:'button','data-action':'next',text:'Từ sau ›'}),
   chineseVoice(card.lang)&&h(doc,'button',{type:'button','data-action':'speak',text:'Nghe'}),
   globalThis.navigator?.clipboard?.writeText&&globalThis.isSecureContext!==false&&h(doc,'button',{type:'button','data-action':'copy',text:'Sao chép'})
  ]));
@@ -234,7 +236,7 @@ function renderCard(card){
  const active=doc.activeElement,used=box.contains(active)?view?.refocus||active.dataset?.action||'':'';
  if(view)view.refocus='';
  box.replaceChildren(...nodes);
- if(used){const again=box.querySelector(`[data-action="${used}"]:not(:disabled)`);if(again)again.focus({preventScroll:true});else{box.tabIndex=-1;box.focus({preventScroll:true});}}
+ if(used){const other={prev:'next',next:'prev'}[used],again=box.querySelector(`[data-action="${used}"]:not(:disabled)`)||(other&&box.querySelector(`[data-action="${other}"]:not(:disabled)`));if(again)again.focus({preventScroll:true});else{box.tabIndex=-1;box.focus({preventScroll:true});}}
  // A new word starts at the top of its card (the strip, when shown, stays above it).
  const body=panel.querySelector('.hz-body');body.scrollTop=view?.mode==='strip'?Math.min(body.scrollTop,box.offsetTop-body.offsetTop):0;
 }
@@ -369,7 +371,7 @@ export function openHanziPanel({text='',index=-1,title='Tra chữ Hán',note='',
  const doc=globalThis.document;if(!doc?.body)return;
  if(requested)setHanziTheme(requested);
  sequence++;globalThis.CSS?.highlights?.delete('hanzi-lookup');
- view={mode:'strip',doc,chars:[],start:-1,end:-1,index:-1,returnFocus:returnFocus||null,returnId:returnFocus?.id||'',card:null};
+ view={mode:'strip',doc,search:Boolean(search),chars:[],start:-1,end:-1,index:-1,returnFocus:returnFocus||null,returnId:returnFocus?.id||'',card:null};
  const element=present(doc,{title,note,search,strip:true}),input=element.querySelector('#hz-search-input');
  const clean=String(text||'').replace(/@@PDF_INLINE_\d+@@/gu,'…');
  input.value=search?clean:'';
@@ -392,7 +394,9 @@ function setStrip(text,index){
  if(run)nodes.push(run);
  strip.replaceChildren(...nodes);
  const buttons=[...strip.querySelectorAll('.hz-c')];if(buttons.length)rove(buttons,buttons.find(button=>Number(button.dataset.i)===at)||buttons[0]);
- if(!buttons.length){message(text.trim()?'noHan':'hint');return;}
+ panel.querySelector('.hz-strip-wrap').hidden=!buttons.length;
+ // Search mode with nothing typed yet shows only its field; a strip with no Han says so.
+ if(!buttons.length){if(text.trim())message('noHan');else if(view.search)panel.querySelector('.hz-card').replaceChildren();else message('hint');return;}
  if(at>=0)show(at);else message('hint');
 }
 

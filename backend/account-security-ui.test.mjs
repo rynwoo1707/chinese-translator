@@ -50,7 +50,7 @@ test('A Google sign-in that could not finish (#account?loi=<code>) is explained 
  const page=app({hash:'#account?loi=google_cancelled&sau=xuong-dich'});
  assert.equal(page.location.hash,'#account','the code leaves the address');assert.equal(page.run('state.afterSignIn'),'/study','where the student was going is kept');
  await settle();
- assert.match(page.root.innerHTML,/<p class="form-error auth-failure" role="alert" tabindex="-1" data-focus-first>Bạn đã hủy đăng nhập bằng Google\.<\/p>/u);
+ assert.match(page.root.innerHTML,/<p class="form-error auth-failure" role="alert" tabindex="-1" data-focus-first>Bạn đã hủy đăng nhập bằng Google\. Bấm “Tiếp tục bằng Google” để thử lại\.<\/p>/u);
  assert.match(page.root.innerHTML,/bạn sẽ quay lại Xưởng dịch\./u);
  // Every code the server sends has its own sentence, never the raw code; the domain refusals name the school's domains.
  for(const code of GOOGLE_FAILURE_CODES){
@@ -64,7 +64,7 @@ test('A Google sign-in that could not finish (#account?loi=<code>) is explained 
  assert.equal(page.run(`googleFailureText('khong-co-ma-nay')`),'Chưa đăng nhập được bằng Google. Hãy thử lại.');
  // A first Google sign-in with the e-mail of an account that has a password makes no second account (reader-auth.js):
  // sign in with that password, or follow "Quên mật khẩu?" to the administrator's address.
- assert.equal(page.run(`googleFailureText('google_email_has_password')`),'Email của tài khoản Google này đã có một tài khoản Hoa Trí đăng nhập bằng mật khẩu, nên Hoa Trí không tạo thêm tài khoản thứ hai. Hãy đăng nhập bằng email và mật khẩu đó. Nếu quên mật khẩu, hoặc bạn không tạo tài khoản đó, hãy xem mục “Quên mật khẩu?” bên dưới để liên hệ quản trị viên.');
+ assert.equal(page.run(`googleFailureText('google_email_has_password')`),'Email này đã có tài khoản Hoa Trí dùng mật khẩu. Hãy đăng nhập bằng mật khẩu đó; nếu quên, mở “Quên mật khẩu?” bên dưới.');
  // Leaving the page (or signing in) drops it.
  page.run(`go('library')`);assert.equal(page.run('state.googleFailure'),null);
  // A hostile value never reaches the page: only the known shape is read, and the text is escaped.
@@ -88,8 +88,8 @@ test('Signing out is said only when the server ended the session; otherwise the 
  for(const [answer,signedOut,message] of [
   [[503,{error:'Máy chủ đang bận.'}],false,'Chưa đăng xuất được (mã 503). Bạn vẫn đang đăng nhập; hãy thử lại sau vài giây.'],
   [new TypeError('Failed to fetch'),false,'Không kết nối được máy chủ nên chưa đăng xuất được. Hãy kiểm tra mạng rồi thử lại.'],
-  [[401,{error:'Phiên đăng nhập đã hết.'}],true,'Đã đăng xuất tài khoản người học.'],
-  [[204,null],true,'Đã đăng xuất tài khoản người học.']
+  [[401,{error:'Phiên đăng nhập đã hết.'}],true,'Đã đăng xuất.'],
+  [[204,null],true,'Đã đăng xuất.']
  ]){
   let ended=false;const logout=new Element();
   const page=app({hash:'#account',elements:{'#reader-logout':logout},answers:url=>url==='/api/auth/logout'?(ended=Array.isArray(answer)&&answer[0]<300||answer?.[0]===401,answer):url==='/api/me'?[200,ended?ME_OUT:ME_IN]:null});
@@ -106,9 +106,9 @@ test('Changing the password: the current one confirms it, mistakes stay in the f
  const page=app({hash:'#account',elements:{'#password-change-form':change},answers:url=>url==='/api/auth/password'?answer:url==='/api/me'?[200,ME_IN]:null});
  await settle();
  const html=page.root.innerHTML;
- assert.match(html,/<section class="personal-section account-security" aria-labelledby="account-security-title"><h2 id="account-security-title">Bảo mật tài khoản<\/h2><form id="password-change-form" class="auth-form account-password" aria-labelledby="password-change-title">/u);
+ assert.match(html,/<section class="personal-section account-security" aria-labelledby="account-security-title"><div class="section-head"><h2 id="account-security-title">Bảo mật tài khoản<\/h2><\/div><form id="password-change-form" class="auth-form account-password" aria-labelledby="password-change-title">/u);
  assert.match(html,/<input name="currentPassword" type="password" autocomplete="current-password" required maxlength="128">/u);
- assert.match(html,/<input name="newPassword" type="password" autocomplete="new-password" required minlength="8" maxlength="128" aria-describedby="password-change-rule"><small id="password-change-rule">Từ 8 đến 128 ký tự; tránh mật khẩu phổ biến như 12345678 hay matkhau123, ngày sinh, hàng phím, tên hay email của bạn\.<\/small>/u);
+ assert.match(html,/<input name="newPassword" type="password" autocomplete="new-password" required minlength="8" maxlength="128" aria-describedby="password-change-rule"><small class="field-hint" id="password-change-rule">8–128 ký tự; tránh mật khẩu dễ đoán \(12345678, ngày sinh, email\)\.<\/small>/u);
  assert.match(html,/<button type="button" id="logout-all">Đăng xuất khỏi mọi thiết bị…<\/button>/u);
  // Two different new passwords: said on the second field, nothing sent.
  await change.fire('submit');
@@ -124,7 +124,7 @@ test('Changing the password: the current one confirms it, mistakes stay in the f
  answer=[200,{ok:true,ended:2}];await change.fire('submit');
  const sent=page.calls.filter(call=>call.url==='/api/auth/password').at(-1);
  assert.equal(sent.method,'POST');assert.deepEqual(JSON.parse(sent.body),{currentPassword:'mat-khau-cu-dai',newPassword:'Ba-con-meo-tren-mai'});
- assert.match(page.root.innerHTML,/<p class="account-notice" role="status" tabindex="-1" data-focus-first>[\s\S]*Đã đổi mật khẩu\. 2 nơi khác đang đăng nhập tài khoản này đã bị đăng xuất\. Lần sau hãy đăng nhập bằng mật khẩu mới\.<\/span><\/p>/u);
+ assert.match(page.root.innerHTML,/<p class="account-notice status" data-tone="ok" role="status" tabindex="-1" data-focus-first>Đã đổi mật khẩu và đăng xuất 2 nơi khác\.<\/p>/u);
  assert.equal(page.run('state.reader.authenticated'),true,'this browser stays signed in (its session was renewed)');
  // A Google-only account has no password form, but can still sign out everywhere.
  const google=page.run(`state.reader=${JSON.stringify({...ME_IN,user:{...ME_IN.user,provider:'google'}})};accountView()`);
@@ -150,10 +150,10 @@ test('A password the server flags at sign-in (weakPassword) is pointed out on th
  let signedIn=false;
  const page=app({hash:'#account',elements:{'#reader-login-form':login},answers:url=>url==='/api/auth/login'?(signedIn=true,[200,{ok:true,weakPassword:'password_pattern'}]):url==='/api/me'?[200,signedIn?ME_IN:ME_OUT]:url==='/api/auth/password'?[200,{ok:true,ended:0}]:null});
  await settle();await login.fire('submit');await settle();
- assert.match(page.root.innerHTML,/<p class="account-warning" role="note"><span>Mật khẩu bạn vừa dùng theo một quy luật dễ đoán \(dãy số, hàng phím hay ngày tháng\), nên người khác có thể đoán ra\. Hãy đổi sang mật khẩu mới ở mục “Bảo mật tài khoản” bên dưới\.<\/span><button type="button" id="weak-password-change">Đổi mật khẩu ngay<\/button><\/p>/u);
+ assert.match(page.root.innerHTML,/<p class="note account-warning" data-tone="warn" role="note">Mật khẩu này theo quy luật dễ đoán\. <button type="button" id="weak-password-change">Đổi mật khẩu<\/button><\/p>/u);
  const change=form('password-change-form',['currentPassword','newPassword','confirm'],{currentPassword:'12345678',newPassword:'Ba-con-meo-tren-mai',confirm:'Ba-con-meo-tren-mai'});
  await page.run('changePassword')({preventDefault(){},currentTarget:change});await settle();
- assert.doesNotMatch(page.root.innerHTML,/account-warning/u,'gone once changed');assert.match(page.root.innerHTML,/Đã đổi mật khẩu\. Lần sau hãy đăng nhập bằng mật khẩu mới\./u);
+ assert.doesNotMatch(page.root.innerHTML,/account-warning/u,'gone once changed');assert.match(page.root.innerHTML,/data-focus-first>Đã đổi mật khẩu\.<\/p>/u);assert.equal(page.toast.textContent,'','no toast: the page says it');
  // An answer without the flag shows nothing.
  const plain=app({hash:'#account',elements:{'#reader-login-form':form('reader-login-form',['email','password'],{email:'a@b.vn',password:'x'})},answers:url=>url==='/api/auth/login'?[200,{ok:true}]:url==='/api/me'?[200,ME_IN]:null});
  await settle();assert.doesNotMatch(plain.root.innerHTML,/account-warning/u);
@@ -166,7 +166,7 @@ test('Google sign-in inside Zalo, Facebook…: the page first offers Chrome or S
  const click={preventDefault(){this.prevented=true;},currentTarget:google,target:google};
  google.handlers.click(click);
  assert.equal(click.prevented,true,'Google would refuse this browser (disallowed_useragent)');assert.equal(page.modal.open,true);
- assert.match(page.modal.innerHTML,/<h2>Mở bằng Chrome để đăng nhập bằng Google<\/h2><p class="subtitle">Bạn đang mở Hoa Trí trong trình duyệt riêng của Zalo\. Google không cho đăng nhập trong trình duyệt của ứng dụng khác\. Hãy bấm nút ⋮ hoặc ⋯ ở góc màn hình rồi chọn “Mở bằng trình duyệt” hay “Mở trong Chrome”, hoặc sao chép địa chỉ dưới đây rồi dán vào Chrome\.<\/p>/u);
+ assert.match(page.modal.innerHTML,/<h2>Mở bằng Chrome để đăng nhập<\/h2><p class="subtitle">Zalo không cho đăng nhập Google\. Bấm ⋮ → “Mở bằng trình duyệt”, hoặc sao chép địa chỉ rồi dán vào Chrome\.<\/p>/u);
  assert.match(page.modal.innerHTML,/<input id="in-app-link" readonly value="https:\/\/hoatri\.test\/#account" spellcheck="false">/u);
  assert.match(page.modal.innerHTML,/<button class="primary">Vẫn thử đăng nhập<\/button>/u);
  await page.modalForm.onsubmit({preventDefault(){},submitter:new Element(),target:{values:{}}});await settle();
@@ -181,10 +181,10 @@ test('"Tải cả quyển" inside an app\'s browser (which often drops downloads
  const download=new Element();
  const iphone='Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148 [FBAN/MessengerForiOS;FBAV/438.0.0.41.106]';
  const page=app({hash:'#account',agent:iphone,elements:{'#download-whole-book':download}});await settle();
- page.run(`state.readerStory={id:'s1',title:'Sử ký'};state.chapters=[{id:'p1',mime:'application/pdf'},{id:'p2',mime:'application/pdf'}];bindBookDownload()`);
+ page.run(`state.readerStory={id:'s1',title:'Sử ký'};state.chapters=[{id:'p1',mime:'application/pdf'},{id:'p2',mime:'application/pdf'}];bindPdfTools()`);
  await download.handlers.click({preventDefault(){},currentTarget:download,target:download});
  assert.equal(page.modal.open,true);
- assert.match(page.modal.innerHTML,/<h2>Mở bằng Safari để tải tệp về máy<\/h2><p class="subtitle">Bạn đang mở Hoa Trí trong trình duyệt riêng của Messenger\. Trình duyệt này thường không lưu được tệp tải về\. Hãy bấm nút ⋯ \(hoặc biểu tượng chia sẻ\) rồi chọn “Mở trong Safari” hay “Mở bằng trình duyệt”/u);
+ assert.match(page.modal.innerHTML,/<h2>Mở bằng Safari để tải tệp<\/h2><p class="subtitle">Messenger thường không lưu được tệp tải về\. Bấm ⋯ → “Mở trong Safari”, hoặc sao chép địa chỉ rồi dán vào Safari\.<\/p>/u);
  assert.match(page.modal.innerHTML,/<button class="primary">Vẫn tải ở đây<\/button>/u);
  assert.ok(!page.run('state.bookDownload'),'nothing is built before the student chooses');
 });

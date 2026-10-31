@@ -7,6 +7,8 @@ import {fileURLToPath} from 'node:url';
 import {extname,join,normalize} from 'node:path';
 // A manifest the extractor of this code made carries its stamp (an older one is offered "Cập nhật bố cục").
 import {LAYOUT_VERSION} from '../frontend/translation-modes.js';
+// The words of the download dialog inside an app come from in-app-browser.js (the app's name, the browser, its menu).
+import {openInBrowserHelp} from '../frontend/in-app-browser.js';
 
 // Xưởng dịch in Microsoft Edge, for what reaches the student's device and browser: the notice an old browser gets, the
 // downloads (inside Zalo, Messenger… first the way to Chrome or Safari; an address that outlives a slow download), the
@@ -41,6 +43,7 @@ async function openStudy({api=()=>undefined,viewport={width:1280,height:900},ini
    let json=null;try{json=JSON.parse(request.postData()||'null');}catch{}
    let body=await api(path,method,json,url);if(body===undefined)body=defaults(path,method);
    if(body===undefined)return route.fulfill({status:404,json:{error:`fake: ${method} ${path}`}});
+   if(body?.fakeBody)return route.fulfill({status:200,headers:{'Content-Type':body.contentType},body:body.fakeBody});
    if(body?.fakeStatus)return route.fulfill({status:body.fakeStatus,json:body.json,headers:body.headers||{}});
    return route.fulfill({json:body});
   }
@@ -83,8 +86,11 @@ test('Inside Zalo a download first says how to open the page in Safari, with the
   await page.click('#download');await page.waitForSelector('#book-dialog[open]');
   const dialog=await page.evaluate(()=>({title:document.querySelector('#book-dialog-title').textContent,body:document.querySelector('#book-dialog-body p').textContent,address:document.querySelector('#in-app-address').value,submit:document.querySelector('#book-dialog-submit').textContent,focused:document.activeElement.id}));
   assert.equal(dialog.title,'Mở bằng Safari để tải tệp về máy');assert.equal(dialog.address,`${ORIGIN}/study`);assert.equal(dialog.submit,'Vẫn tải ở đây');assert.equal(dialog.focused,'book-dialog-title');
-  assert.match(dialog.body,/^Bạn đang mở Hoa Trí trong trình duyệt riêng của Zalo\. Trình duyệt này thường không lưu được tệp tải về\. Hãy bấm nút ⋯ \(hoặc biểu tượng chia sẻ\) rồi chọn “Mở trong Safari”/u);
-  assert.match(dialog.body,/Bản dịch đã lưu trong tài khoản: ở Safari, đăng nhập rồi mở bản dịch này trong Lịch sử dịch để tải\.$/u);
+  // One sentence of what happens there and the way out (the app's menu, as on the sign-in dialog), then that the
+  // translation is saved.
+  const {menu}=openInBrowserHelp({name:'Zalo',ios:true,android:false});
+  assert.equal(menu,'Bấm ⋯ → “Mở trong Safari”');
+  assert.equal(dialog.body,`Zalo thường không lưu được tệp tải về. ${menu}, hoặc sao chép địa chỉ rồi dán vào Safari; bản dịch đã lưu, có thể tải lại từ Lịch sử dịch.`);
   await page.click('#book-dialog-body .in-app-copy button');await page.waitForFunction(()=>document.querySelector('#book-dialog-body .in-app-copy [role="status"]').textContent);
   assert.match(await page.textContent('#book-dialog-body .in-app-copy [role="status"]'),/^(?:Đã sao chép\. Mở Safari rồi dán vào thanh địa chỉ\.|Không sao chép tự động được\. Địa chỉ đã được chọn)/u);
   assert.equal(downloads,0,'nothing is downloaded before the student chooses');
@@ -112,7 +118,7 @@ test('A download outside such apps starts at once, and its address stays valid u
  }finally{await context.close();}
 });
 
-test('Once every block of a PDF is translated, the PDF view says so instead of "untranslated blocks still show the original"',{skip,timeout:60000},async()=>{
+test('The PDF view counts the blocks translated beside "Tiếng Việt" and keeps its notice for problems; the original\'s header says how to look a character up',{skip,timeout:60000},async()=>{
  const {context,page,errors}=await openStudy({api:(path,method)=>{
   if(path==='/api/my/study/history'&&method==='GET')return [LAYOUT_ITEM];
   if(path===`/api/my/study/history/${LAYOUT_ITEM.id}`)return {...LAYOUT_ITEM,state:{source:'第一段的内容。',parts:['第一段的内容。'],translationParts:['Nội dung đoạn một.'],done:1,context:'',glossary:{},manualGlossary:{},pdfLayout:{assetId:ASSET}}};
@@ -120,9 +126,86 @@ test('Once every block of a PDF is translated, the PDF view says so instead of "
  }});
  try{
   await historyLoaded(page);await openHistoryItem(page,LAYOUT_ITEM.id);
-  await page.waitForFunction(()=>document.querySelector('#pdf-dual-viewer [data-pdf-render-state]')?.textContent==='Bản xem trước');
-  await page.waitForFunction(()=>!/Đang/u.test(document.querySelector('#pdf-dual-viewer [data-pdf-notice]').textContent));
-  assert.equal(await page.textContent('#pdf-dual-viewer [data-pdf-notice]'),'Đã dịch đủ 1 đoạn.');assert.deepEqual(errors,[]);
+  await page.waitForFunction(()=>document.querySelector('#pdf-dual-viewer [data-pdf-render-state]')?.textContent==='1/1 đoạn');
+  assert.equal(await page.textContent('#pdf-dual-viewer [data-pdf-notice]'),'','nothing is wrong, so nothing is said');assert.equal(await page.isHidden('#pdf-dual-viewer [data-pdf-notice]'),true);
+  // A tooltip never shows on a touch screen: the way into Tra chữ Hán is written in the original's header (S57).
+  assert.equal(await page.textContent('#pdf-dual-viewer [data-pdf-side="original"] h3 small'),'Chạm đoạn chữ để tra chữ Hán');
+  assert.equal(await page.$('#pdf-dual-viewer .pdf-viewer-toolbar strong'),null,'no title above the pages');assert.deepEqual(errors,[]);
  }finally{await context.close();}
 });
+// S55 (components D and E): the three export buttons are one group: the format this session makes best is the main button
+// (the view's one primary once nothing is left to run), the others are in its ▾ menu, and a format the session can never
+// make is not shown. The menu is plain buttons in tab order: Escape closes it and gives the focus back, a tap outside
+// closes it, and an item closes it.
+const pdfFile=async()=>{const {PDFDocument}=require('@cantoo/pdf-lib'),pdf=await PDFDocument.create();pdf.addPage([400,560]);return Buffer.from(await pdf.save());};
+test('The export group shows only what the session can make: Tải .txt alone for text, Tải PDF or Xuất PDF tiếng Việt with Văn bản (.txt) in ▾ for a kept layout; the menu works with the keyboard',{skip,timeout:90000},async()=>{
+ const BOOK={library_story_id:'book-1',library_chapter_id:'chapter-1'},EXPORTED='6e7f8a9b-1111-4c2b-9d1e-2a2f0c9b7a11',layoutState=pdfLayout=>({source:'第一段的内容。',parts:['第一段的内容。'],translationParts:['Nội dung đoạn một.'],done:1,context:'',glossary:{},manualGlossary:{},pdfLayout});
+ const bytes=await pdfFile();
+ const {context,page,errors}=await openStudy({init:DOWNLOAD_LOG,api:(path,method)=>{
+  if(path==='/api/my/study/history'&&method==='GET')return [textItem(),{...LAYOUT_ITEM,...BOOK},{...LAYOUT_ITEM,...BOOK,id:EXPORTED,title:'Bài đã xuất'}];
+  if(path===`/api/my/study/history/${TEXT_ID}`)return {...textItem(),state:textState};
+  if(path===`/api/my/study/history/${LAYOUT_ITEM.id}`)return {...LAYOUT_ITEM,...BOOK,state:layoutState({assetId:ASSET})};
+  if(path===`/api/my/study/history/${EXPORTED}`)return {...LAYOUT_ITEM,...BOOK,id:EXPORTED,title:'Bài đã xuất',state:layoutState({assetId:ASSET,exported:true,renderVersion:3})};
+  if(path===`/api/my/study/pdf-layout/assets/${ASSET}/manifest`)return MANIFEST;
+  if(path===`/api/my/study/pdf-layout/assets/${ASSET}/translated`)return {fakeBody:bytes,contentType:'application/pdf'};
+ }});
+ const group=()=>page.evaluate(()=>{const root=document.querySelector('.result-actions'),visible=node=>Boolean(node&&!node.hidden&&node.getClientRects().length);return {shown:visible(root),main:[...root.querySelectorAll('.export-main>button')].map(button=>[button.id,button.textContent,button.className]),menu:visible(root.querySelector('.export-more')),items:[...root.querySelectorAll('.menu-list>button')].filter(button=>!button.hidden).map(button=>[button.id,button.textContent])};});
+ try{
+  await historyLoaded(page);
+  // Nothing to download yet: no group, and the result section is not drawn at all.
+  assert.deepEqual(await group(),{shown:false,main:[],menu:false,items:[]});assert.equal(await page.evaluate(()=>getComputedStyle(document.querySelector('.result')).display),'none');
+  // Text without pictures: the text is the main download and there is no menu; nothing is left to run, so it is primary.
+  await openHistoryItem(page,TEXT_ID);await waitProgress(page,/Bản dịch đã hoàn tất/u);
+  assert.deepEqual(await group(),{shown:true,main:[['download','Tải .txt','primary']],menu:false,items:[]});assert.equal(await page.isHidden('#translate'),true);
+  // A kept layout not exported yet: Xuất PDF tiếng Việt, the text in the menu; the page with pictures is never offered.
+  await openHistoryItem(page,LAYOUT_ITEM.id);await page.waitForFunction(()=>/Xuất PDF tiếng Việt/u.test(document.querySelector('#progress').textContent),null,{timeout:30000});
+  assert.deepEqual(await group(),{shown:true,main:[['download-pdf','Xuất PDF tiếng Việt','primary']],menu:true,items:[['download','Văn bản (.txt)']]});
+  assert.equal(await page.isHidden('#download-rich'),true,'a kept layout never makes the page with pictures');
+  assert.equal(await page.getAttribute('.export-more > summary','aria-label'),'Tải định dạng khác');
+  // Keyboard: Enter opens, Tab reaches the item, Escape closes and gives the focus back to ▾.
+  await page.focus('.export-more > summary');await page.keyboard.press('Enter');assert.equal(await page.$eval('.export-more',menu=>menu.open),true);
+  await page.keyboard.press('Tab');assert.equal(await page.evaluate(()=>document.activeElement.id),'download');
+  await page.keyboard.press('Escape');assert.deepEqual(await page.evaluate(()=>[document.querySelector('.export-more').open,document.activeElement===document.querySelector('.export-more > summary')]),[false,true]);
+  // Tab past its last item closes it too: the open list never covers what the focus moved on to.
+  await page.keyboard.press('Enter');await page.keyboard.press('Tab');await page.keyboard.press('Tab');
+  assert.deepEqual(await page.evaluate(()=>[document.querySelector('.export-more').open,Boolean(document.activeElement?.closest('.export-more')),document.activeElement!==document.body]),[false,false,true]);
+  // A tap outside closes it.
+  await page.click('.export-more > summary');assert.equal(await page.$eval('.export-more',menu=>menu.open),true);
+  await page.mouse.click(5,300);assert.equal(await page.$eval('.export-more',menu=>menu.open),false);
+  // An item closes the menu, leaves the focus on ▾ and downloads.
+  await page.click('.export-more > summary');const download=page.waitForEvent('download');await page.click('#download');const file=await download;assert.equal(file.suggestedFilename(),'Bài thử giữ bố cục.vi.txt');assert.ok(await file.path());
+  assert.deepEqual(await page.evaluate(()=>[document.querySelector('.export-more').open,document.activeElement===document.querySelector('.export-more > summary')]),[false,true]);
+  // Exported already: the main button downloads the saved PDF (Tải PDF).
+  await openHistoryItem(page,EXPORTED);await page.waitForFunction(()=>document.querySelector('#pdf-dual-viewer [data-pdf-render-state]')?.textContent==='PDF đã xuất',null,{timeout:30000});
+  assert.deepEqual((await group()).main,[['download-pdf','Tải PDF','primary']]);
+  assert.deepEqual(errors,[]);
+ }finally{await context.close();}
+});
+
+// Component J (critic): a row's open ⋯ menu stays above the rows after it, so its last item takes the tap; one menu is
+// open at a time; its button is named after the row.
+test('A row\'s ⋯ menu opens above the rows after it: the last item of a row that is not the last takes the click; one menu is open at a time',{skip,timeout:60000},async()=>{
+ const ids=['7d8e9f0a-1b2c-4d3e-8f4a-5b6c7d8e9f01','7d8e9f0a-1b2c-4d3e-8f4a-5b6c7d8e9f02','7d8e9f0a-1b2c-4d3e-8f4a-5b6c7d8e9f03'];
+ const rows=ids.map((id,i)=>textItem({id,title:`Bài ${i+1}`,library_story_id:`book-${i+1}`,library_chapter_id:`chapter-${i+1}`}));
+ const books=rows.map((row,i)=>({id:`book-${i+1}`,title:row.title,cover:{image:false,page:null,sha256:null},parts:[{id:`chapter-${i+1}`,title:row.title,position:1,mime:'text/plain',sessionId:row.id,filename:'',pageStart:null,pageEnd:null,totalPages:null,sha256:null,pages:null}]}));
+ const {context,page,errors}=await openStudy({api:(path,method)=>path==='/api/my/study/history'&&method==='GET'?rows:path==='/api/my/study/books'?books:undefined});
+ const open=()=>page.$$eval('#study-history-list details.menu',menus=>menus.map(menu=>menu.open));
+ try{
+  await historyLoaded(page);await page.click('#study-history > summary');
+  assert.equal(await page.getAttribute(`#study-history-list .row:first-child details.menu > summary`,'aria-label'),'Thao tác cho “Bài 1”');
+  await page.click('#study-history-list .row:nth-child(2) details.menu > summary');await page.click('#study-history-list .row:first-child details.menu > summary');
+  assert.deepEqual(await open(),[true,false,false],'opening a menu closes the other');
+  // Its items: the private library, the merge into another book, and Xóa… last, after a line.
+  assert.deepEqual(await page.$$eval('#study-history-list .row:first-child .menu-list>:is(a,button)',items=>items.map(item=>[item.textContent,item.getAttribute('href')])),[['Đọc trong Thư viện riêng','/?read=book-1'],['Gộp vào sách…',null],['Xóa…',null]]);
+  // The last item lies over the second row's ⋯ button: the click reaches the item (Playwright checks what is hit).
+  await page.click(`#study-history-list [data-history-delete="${ids[0]}"]`);await page.waitForSelector('#book-dialog[open]');
+  assert.equal(await page.textContent('#book-dialog-title'),'Xóa bản dịch?');assert.match(await page.textContent('#book-dialog-body'),/^“Bài 1” sẽ bị xóa vĩnh viễn khỏi lịch sử và Thư viện riêng/u);
+  assert.deepEqual(await page.$eval('#book-dialog-submit',button=>[button.textContent,button.className]),['Xóa vĩnh viễn','primary danger']);
+  await page.click('#book-dialog-cancel');assert.deepEqual(await open(),[false,false,false]);
+  // The focus came back to the menu's button when the dialog closed.
+  assert.equal(await page.evaluate(()=>document.activeElement===document.querySelector('#study-history-list .row:first-child details.menu > summary')),true);
+  assert.deepEqual(errors,[]);
+ }finally{await context.close();}
+});
+
 });

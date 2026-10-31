@@ -60,6 +60,10 @@ const RESTORED=/Đã khôi phục 2\/3 (?:phần|đoạn)/u;
 const progress=page=>page.textContent('#progress');
 const waitProgress=(page,pattern,timeout=30000)=>page.waitForFunction(source=>new RegExp(source,'u').test(document.querySelector('#progress').textContent),pattern.source,{timeout});
 async function openHistoryItem(page,id){if(!await page.evaluate(()=>document.querySelector('#study-history').open))await page.click('#study-history > summary');await page.click(`[data-history-open="${id}"]`);}
+// A control in a row's ⋯ menu: the menu's button is pressed first, as a student does.
+async function inMenu(page,selector){if(!await page.$eval(selector,node=>node.closest('details.menu').open))await page.$eval(selector,node=>node.closest('details.menu').querySelector(':scope>summary').click());await page.click(selector);}
+// Bắt đầu dịch is hidden once nothing is left to run; the run behind it is still pressed here, to show it sends nothing.
+async function pressRun(page){assert.equal(await page.isHidden('#translate'),true,'nothing is left to run, so the button is hidden');await page.$eval('#translate',button=>button.click());}
 // The server's history of one text session: saves are checked against its revision as backend/study-history.js does.
 function textServer({item=textItem(),state=textState()}={}){
  const server={item:{...item},state:structuredClone(state),translateCalls:[],saves:[]};
@@ -83,7 +87,7 @@ test('Changing Cách dịch or Lĩnh vực on an opened session translates only 
   await page.selectOption('#mode','quality');const said=await progress(page);
   // Looking through the subjects writes nothing into the session's own terms.
   await page.selectOption('#domain','math');const terms=await page.inputValue('#glossary');await page.selectOption('#domain','chemistry');await page.fill('#glossary','');
-  await page.fill('#api-key',KEY);await page.click('#translate');await waitProgress(page,/^Hoàn tất \d+ phần/u);
+  await page.fill('#api-key',KEY);await page.click('#translate');await waitProgress(page,/^Xong · \d+ phần/u);
   assert.deepEqual(server.translateCalls.map(call=>[call.source,call.mode,call.domain]),[[PARTS[2],'quality','chemistry']],'only the part left, with the new settings');
   const puts=bodies.filter(entry=>entry.method==='PUT');assert.ok(puts.length>=2,String(puts.length));
   for(const put of puts){assert.deepEqual(put.json.state.translationParts.slice(0,2),DONE);assert.ok(put.json.state.done>=2,'a save never resets the session');}
@@ -105,7 +109,7 @@ test('A finished session stays as it is when Cách dịch changes: Bắt đầu 
  try{
   await historyLoaded(page);await openHistoryItem(page,TEXT_ID);await waitProgress(page,/Bản dịch đã hoàn tất/u);
   await page.selectOption('#mode','quality');const said=await progress(page);
-  await page.fill('#api-key',KEY);await page.click('#translate');await waitProgress(page,/Tài liệu này đã dịch xong trong phiên|^Hoàn tất|Đang dịch/u);await page.waitForFunction(()=>!document.querySelector('#translate').disabled);
+  await page.fill('#api-key',KEY);await pressRun(page);await waitProgress(page,/Tài liệu này đã dịch xong trong phiên|^Xong|Đang dịch/u);await page.waitForFunction(()=>!document.querySelector('#translate').disabled);
   assert.equal(server.translateCalls.length,0);assert.deepEqual(bodies.filter(entry=>['PUT','POST'].includes(entry.method)&&entry.path.startsWith('/api/my/study/history')),[]);
   assert.equal(server.state.done,3);assert.match(await progress(page),/^Tài liệu này đã dịch xong trong phiên\. Không gọi Gemini lại\.$/u);
   assert.match(said,/^Bản dịch này đã hoàn tất nên được giữ nguyên\. Cách dịch mới áp dụng cho tài liệu bạn dịch tiếp theo/u);assert.deepEqual(errors,[]);
@@ -126,7 +130,7 @@ test('Another source on a session with translated parts (a new range of a PDF re
   await historyLoaded(page);await openHistoryItem(page,TEXT_ID);await waitProgress(page,RESTORED);
   // What reading another range in the browser does: the source box is filled by the page, not typed.
   await page.evaluate(()=>{document.querySelector('#source').value='第四页：温故而知新，可以为师矣。';});
-  await page.fill('#api-key',KEY);await page.click('#translate');await waitProgress(page,/^Hoàn tất 1 phần/u);
+  await page.fill('#api-key',KEY);await page.click('#translate');await waitProgress(page,/^Xong · 1 phần/u);
   assert.equal(posts,1,'a new session');assert.deepEqual(bodies.filter(entry=>entry.method==='PUT'&&entry.path.endsWith(TEXT_ID)),[],'the saved session is not saved over');
   assert.deepEqual(server.state.translationParts,[...DONE,'']);assert.deepEqual(server.translateCalls.map(call=>call.source),['第四页：温故而知新，可以为师矣。']);
   assert.deepEqual(errors,[]);
@@ -161,13 +165,72 @@ test('Only a refused key is forgotten: a refused text and Gemini\'s location kee
  try{
   await historyLoaded(page);await page.fill('#content-title','Thử khóa');await page.fill('#api-key',KEY);await page.fill('#source','子曰：学而时习之，不亦说乎？');
   await page.click('#translate');await waitProgress(page,/trùng khớp nguyên văn/u);
-  assert.deepEqual(await keyState(),{status:'Đã nạp khóa Gemini cho phiên này.',invalid:null},'a refused text keeps the key');
+  assert.deepEqual(await keyState(),{status:'Đã nạp khóa · chỉ dùng trong tab này, không lưu.',invalid:null},'a refused text keeps the key');
   // The field is empty now (the key lives in the tab's memory): Bắt đầu dịch goes on without asking for it.
   await page.click('#translate');await waitProgress(page,/Khóa của bạn vẫn dùng được/u);
-  assert.equal(calls,2);assert.deepEqual(await keyState(),{status:'Đã nạp khóa Gemini cho phiên này.',invalid:null},'Gemini\'s location keeps the key');
-  await page.click('#translate');await waitProgress(page,/khóa Gemini API không hợp lệ/u);
-  assert.deepEqual(await keyState(),{status:'Khóa vừa nhập chưa được Gemini chấp nhận.',invalid:'true'},'a refused key is forgotten');
-  await page.click('#translate');await waitProgress(page,/^Chưa có khóa Gemini/u);assert.equal(calls,3);
+  assert.equal(calls,2);assert.deepEqual(await keyState(),{status:'Đã nạp khóa · chỉ dùng trong tab này, không lưu.',invalid:null},'Gemini\'s location keeps the key');
+  await page.click('#translate');await waitProgress(page,/^Chưa dịch: dán khóa khác rồi bấm Bắt đầu dịch\.$/u);
+  assert.deepEqual(await keyState(),{status:'Gemini không nhận khóa này · chỉ dùng trong tab này, không lưu.',invalid:'true'},'a refused key is forgotten');
+  await page.click('#translate');await waitProgress(page,/^Dán khóa Gemini rồi bấm /u);assert.equal(calls,3);
+  assert.deepEqual(errors,[]);
+ }finally{await context.close();}
+});
+
+// S4: a key refused after parts were translated says those parts stay, and names the button that goes on. S2: a lost
+// connection names the run button only when a run failed; a history row or an export that loses it says to try again there,
+// never a button that is hidden or does something else.
+test('A key refused mid-run keeps the parts translated and names Dịch tiếp; a history row or an export that loses the connection says to try again',{skip,timeout:90000},async()=>{
+ const server=textServer(),BROKEN='5a1c2b3d-4e5f-4a6b-8c7d-9e0f1a2b3c5e',BOOK={library_story_id:'book-1',library_chapter_id:'chapter-1'};let translates=0;
+ const layoutState={source:'第一段的内容。',parts:['第一段的内容。'],translationParts:['Nội dung đoạn một.'],done:1,context:'',glossary:{},manualGlossary:{},pdfLayout:{assetId:ASSET}};
+ const {context,page,errors}=await openStudy({api:(path,method,json)=>{
+  if(path==='/api/my/study/history'&&method==='GET')return [server.item,{...LAYOUT_ITEM,...BOOK},textItem({id:BROKEN,title:'Bài mở không được'})];
+  if(path===`/api/my/study/history/${TEXT_ID}`&&method==='GET')return {...server.item,state:server.state};
+  if(path===`/api/my/study/history/${TEXT_ID}`&&method==='PUT')return server.save(json);
+  if(path===`/api/my/study/history/${BROKEN}`)return {fakeAbort:true};
+  if(path===`/api/my/study/history/${LAYOUT_ITEM.id}`&&method==='GET')return {...LAYOUT_ITEM,...BOOK,state:layoutState};
+  if(path===`/api/my/study/pdf-layout/assets/${ASSET}/manifest`)return MANIFEST;
+  if(path==='/api/my/study/pdf-layout/render')return {fakeAbort:true};
+  if(path==='/api/my/study/translate'){translates++;return {fakeStatus:400,json:{error:'Gemini từ chối yêu cầu (400): khóa Gemini API không hợp lệ hoặc đã hết hạn. Hãy kiểm tra lại khóa trong Google AI Studio.',code:'gemini_key'}};}
+ }});
+ const view=()=>page.evaluate(()=>({progress:document.querySelector('#progress').textContent,run:document.querySelector('#translate').hidden?'':document.querySelector('#translate').textContent}));
+ try{
+  await historyLoaded(page);await openHistoryItem(page,TEXT_ID);await waitProgress(page,RESTORED);
+  await page.fill('#api-key',KEY);await page.click('#translate');await waitProgress(page,/^Dán khóa khác/u);
+  assert.deepEqual(await view(),{progress:'Dán khóa khác rồi bấm Dịch tiếp; phần đã dịch vẫn còn.',run:'Dịch tiếp'});
+  assert.equal(translates,1);assert.deepEqual(server.state.translationParts.slice(0,2),DONE,'the parts translated before are still saved');
+  // A history row that cannot be opened is tried again from the row.
+  await page.click(`[data-history-open="${BROKEN}"]`);await waitProgress(page,/^Mất kết nối/u);
+  assert.equal(await progress(page),'Mất kết nối. Kiểm tra mạng rồi thử lại; phần đã dịch vẫn còn.');
+  // A finished kept layout: nothing is left to run (no run button shows), so a lost export says to try again.
+  await openHistoryItem(page,LAYOUT_ITEM.id);await waitProgress(page,/^Chưa có PDF tiếng Việt\./u);
+  await page.click('#download-pdf');await waitProgress(page,/^Mất kết nối/u);
+  assert.deepEqual(await view(),{progress:'Mất kết nối. Kiểm tra mạng rồi thử lại; phần đã dịch vẫn còn.',run:''});
+  assert.deepEqual(errors,[]);
+ }finally{await context.close();}
+});
+
+// S5: a PDF refused only for its size as a kept layout is read in the browser once that box is unticked, as the refusal
+// says. S6: a pasted-text session opened from the history afterwards hides the box, which no longer does anything.
+test('A PDF too large for a kept layout is read in the browser once "Giữ bố cục PDF" is unticked; a text session opened afterwards hides the box',{skip,timeout:90000},async()=>{
+ const {PDFDocument}=require('@cantoo/pdf-lib'),made=await PDFDocument.create();made.addPage([400,560]);const bytes=Buffer.from(await made.save());
+ // The browser takes the picked file for 120 MB (Blob.size) without such a file being made: the bytes read are a small PDF's.
+ const init=()=>{const size=Object.getOwnPropertyDescriptor(Blob.prototype,'size');Object.defineProperty(Blob.prototype,'size',{configurable:true,get(){return this instanceof File&&this.name==='sach-lon.pdf'?120*1024*1024:size.get.call(this);}});};
+ const server=textServer();
+ const {context,page,errors}=await openStudy({init,api:(path,method)=>{
+  if(path==='/api/my/study/history'&&method==='GET')return [server.item];
+  if(path===`/api/my/study/history/${TEXT_ID}`&&method==='GET')return {...server.item,state:server.state};
+ }});
+ const option=()=>page.evaluate(()=>!document.querySelector('.pdf-layout-option').hidden);
+ try{
+  await historyLoaded(page);await page.waitForFunction(()=>document.querySelector('#pdf-layout-enabled').checked);
+  await page.setInputFiles('#source-file',{name:'sach-lon.pdf',mimeType:'application/pdf',buffer:bytes});
+  await waitProgress(page,/^PDF giữ bố cục tối đa 100 MB\. Bỏ chọn “Giữ bố cục PDF và xuất PDF tiếng Việt” để dịch thành văn bản\.$/u);
+  assert.equal(await option(),true,'the box the refusal names is in view');
+  await page.uncheck('#pdf-layout-enabled');
+  await page.waitForFunction(()=>!document.querySelector('#pdf-range-options').hidden,null,{timeout:30000});
+  assert.match(await page.textContent('#file-status'),/^1 trang/u);assert.equal(await progress(page),'','the refusal is gone');
+  await openHistoryItem(page,TEXT_ID);await waitProgress(page,RESTORED);
+  assert.equal(await option(),false,'no box for a pasted text');
   assert.deepEqual(errors,[]);
  }finally{await context.close();}
 });
@@ -182,8 +245,8 @@ test('A save the server refuses says why and stops before Gemini: a full history
  }});
  try{
   await historyLoaded(full.page);await full.page.fill('#content-title','Thử lưu');await full.page.fill('#api-key',KEY);await full.page.fill('#source','子曰：学而时习之。');await full.page.click('#translate');
-  await waitProgress(full.page,/không gửi thêm yêu cầu tới Gemini/u);
-  assert.equal(translations,0);assert.equal(posts,1);assert.match(await progress(full.page),/không gửi thêm yêu cầu tới Gemini: Lịch sử dịch của tài khoản đã có 300 bản dịch/u);
+  await waitProgress(full.page,/chưa gửi thêm gì cho Gemini/u);
+  assert.equal(translations,0);assert.equal(posts,1);assert.equal(await progress(full.page),'Đã dừng; chưa gửi thêm gì cho Gemini.');
   const warning=await full.page.textContent('#save-warning');assert.ok(warning.includes(FULL),warning);assert.doesNotMatch(warning,/kiểm tra mạng/u);
   assert.deepEqual(full.errors,[]);
  }finally{await full.context.close();}
@@ -197,10 +260,10 @@ test('A save the server refuses says why and stops before Gemini: a full history
  }});
  try{
   await historyLoaded(conflict.page);await openHistoryItem(conflict.page,TEXT_ID);await waitProgress(conflict.page,RESTORED);
-  await conflict.page.fill('#api-key',KEY);await conflict.page.click('#translate');await waitProgress(conflict.page,/không gửi thêm yêu cầu tới Gemini|^Hoàn tất/u);
-  assert.equal(elsewhere.translateCalls.length,0,'no Gemini call on a copy that is not the latest');assert.match(await progress(conflict.page),/vừa được lưu từ một tab hoặc thiết bị khác/u);assert.deepEqual(elsewhere.state.translationParts,[...DONE,'Bản của thẻ khác.'],'the other tab\'s save is kept');
+  await conflict.page.fill('#api-key',KEY);await conflict.page.click('#translate');await waitProgress(conflict.page,/chưa gửi thêm gì cho Gemini|^Xong/u);
+  assert.equal(elsewhere.translateCalls.length,0,'no Gemini call on a copy that is not the latest');assert.match(await conflict.page.textContent('#save-warning'),/vừa được lưu từ một tab hoặc thiết bị khác/u);assert.deepEqual(elsewhere.state.translationParts,[...DONE,'Bản của thẻ khác.'],'the other tab\'s save is kept');
   assert.equal(conflict.bodies.find(entry=>entry.method==='PUT').json.revision,7);
-  assert.match(await conflict.page.textContent('#save-warning'),/^Chưa lưu được tiến độ: Bản dịch này vừa được lưu từ một tab hoặc thiết bị khác\. Hãy tải lại bản dịch từ Lịch sử dịch/u);
+  assert.match(await conflict.page.textContent('#save-warning'),/^Chưa lưu được: Bản dịch này vừa được lưu từ một tab hoặc thiết bị khác\. Hãy tải lại bản dịch từ Lịch sử dịch/u);
   // One click opens the newest copy (after the usual question about this tab's unsaved part).
   let asked=0;conflict.page.on('dialog',dialog=>{asked++;dialog.accept().catch(()=>{});});
   await conflict.page.click('#save-warning .save-warning-action');await waitProgress(conflict.page,/^Bản dịch đã hoàn tất/u);
@@ -218,7 +281,7 @@ test('A save the server refuses says why and stops before Gemini: a full history
  }});
  try{
   await historyLoaded(retry.page);await openHistoryItem(retry.page,TEXT_ID);await waitProgress(retry.page,RESTORED);
-  await retry.page.fill('#api-key',KEY);await retry.page.click('#translate');await waitProgress(retry.page,/^Hoàn tất 3 phần/u);
+  await retry.page.fill('#api-key',KEY);await retry.page.click('#translate');await waitProgress(retry.page,/^Xong · 3 phần/u);
   assert.equal(lost.translateCalls.length,1);assert.equal(lost.state.done,3);assert.equal(await retry.page.evaluate(()=>document.querySelector('#save-warning').hidden),true);
   assert.equal(revisions[0],3);assert.equal(revisions.at(-1),lost.item.revision-1,'the last save names the revision the retried one made');
   assert.deepEqual(retry.errors,[]);
@@ -244,11 +307,11 @@ test('A database behind the code is named in the server\'s words, start.cmd on t
  }});
  try{
   await historyLoaded(save.page);await save.page.fill('#content-title','Thử lưu');await save.page.fill('#api-key',KEY);await save.page.fill('#source','子曰：学而时习之。');await save.page.click('#translate');
-  await waitProgress(save.page,/không gửi thêm yêu cầu tới Gemini/u);
+  await waitProgress(save.page,/chưa gửi thêm gì cho Gemini/u);
   assert.equal(posts,1);assert.equal(translations,0);
-  const said=await progress(save.page),refusal=said.replace(/^Đã dừng vì chưa lưu được tiến độ vào tài khoản, nên Hoa Trí không gửi thêm yêu cầu tới Gemini: /u,'');
-  assert.notEqual(refusal,said,said);assert.match(refusal,LOCAL);
-  const warning=await save.page.textContent('#save-warning');assert.match(warning,/^Chưa lưu được tiến độ vào tài khoản: Cơ sở dữ liệu cục bộ chưa cập nhật: hãy tắt Hoa Trí rồi chạy start\.cmd/u);
+  const said=await progress(save.page),warning=await save.page.textContent('#save-warning'),refusal=warning.replace(/^Chưa lưu được vào tài khoản: /u,'').replace(/ Đừng đóng tab\.$/u,'');
+  assert.equal(said,'Đã dừng; chưa gửi thêm gì cho Gemini.');assert.notEqual(refusal,warning,warning);assert.match(refusal,LOCAL);
+  assert.match(warning,/^Chưa lưu được vào tài khoản: Cơ sở dữ liệu cục bộ chưa cập nhật: hãy tắt Hoa Trí rồi chạy start\.cmd/u);
   for(const text of [said,warning])assert.doesNotMatch(text,/[Kk]iểm tra mạng/u);
   assert.deepEqual(save.errors,[]);
  }finally{await save.context.close();}
@@ -277,12 +340,12 @@ test('A PDF with a password, or a file that is not a PDF, is explained in Vietna
   await page.check('#pdf-layout-enabled');await pick('tot.pdf',good);await page.waitForFunction(()=>/^1 trang · /u.test(document.querySelector('#file-status').textContent),null,{timeout:30000});
   assert.equal(await page.evaluate(()=>document.querySelector('#pdf-range-options').hidden),false);
   const lines=()=>page.evaluate(()=>({progress:document.querySelector('#progress').textContent,type:document.querySelector('#progress').className,bar:document.querySelector('#run-bar-status').textContent,barError:document.querySelector('#run-bar-status').classList.contains('error')}));
-  assert.deepEqual(await lines(),{progress:'Chưa bắt đầu.',type:'',bar:'',barError:false});
+  assert.deepEqual(await lines(),{progress:'',type:'',bar:'',barError:false});
   // Photos that cannot be read, then a good PDF: the same.
   await page.setInputFiles('#source-file',[{name:'trang-1.jpg',mimeType:'image/jpeg',buffer:Buffer.from('không phải ảnh')},{name:'trang-2.jpg',mimeType:'image/jpeg',buffer:Buffer.from('cũng không phải ảnh')}]);
   await page.waitForSelector('#progress.error',{timeout:30000});assert.match(await page.textContent('#progress'),/^Không đọc được ảnh “trang-1\.jpg”/u);
   await pick('tot.pdf',good);await page.waitForFunction(()=>!document.querySelector('#progress').className,null,{timeout:30000});
-  assert.deepEqual(await lines(),{progress:'Chưa bắt đầu.',type:'',bar:'',barError:false});
+  assert.deepEqual(await lines(),{progress:'',type:'',bar:'',barError:false});
   assert.deepEqual(errors,[]);
  }finally{await context.close();}
 });
@@ -298,8 +361,10 @@ test('Phone: a book with several parts and its whole-book run stay inside 360 an
   try{
    await historyLoaded(page);if(!await page.evaluate(()=>document.querySelector('#study-history').open))await page.click('#study-history > summary');
    await page.waitForSelector('#study-books-list .book-job');await page.click('#study-books-list .book-job-parts summary');
-   const measure=await page.evaluate(()=>{const right=selector=>Math.max(...[...document.querySelectorAll(selector)].map(node=>node.getBoundingClientRect().right));return {scroll:document.documentElement.scrollWidth,inner:innerWidth,rows:right('#study-books-list .study-book'),read:right('#study-books-list .study-book-actions a'),buttons:right('#study-books-list button')};});
-   assert.ok(measure.scroll<=measure.inner&&measure.rows<=measure.inner&&measure.read<=measure.inner&&measure.buttons<=measure.inner,`${width}: ${JSON.stringify(measure)}`);
+   const measure=await page.evaluate(()=>{const right=selector=>Math.max(...[...document.querySelectorAll(selector)].map(node=>node.getBoundingClientRect().right));return {scroll:document.documentElement.scrollWidth,inner:innerWidth,rows:right('#study-books-list .study-book'),menus:right('#study-books-list details.menu > summary'),buttons:right('#study-books-list button')};});
+   assert.ok(measure.scroll<=measure.inner&&measure.rows<=measure.inner&&measure.menus<=measure.inner&&measure.buttons<=measure.inner,`${width}: ${JSON.stringify(measure)}`);
+   // The ⋯ menu opens inside the screen too.
+   await page.click('#study-books-list .book-job details.menu > summary');assert.ok(await page.$eval('#study-books-list .book-job .menu-list',list=>{const box=list.getBoundingClientRect();return box.left>=0&&box.right<=innerWidth;}));
    assert.match(await page.textContent('#study-books-list .book-job'),/Các phần đã lưu \(4\)/u);assert.deepEqual(errors,[]);
   }finally{await context.close();}
  }
@@ -328,12 +393,12 @@ test('A dialog closed while it works tells its late failure in the progress line
  try{
   await historyLoaded(page);await page.click('#study-history > summary');
   // Escape while "Đang xóa…": the dialog is gone, so a refusal arriving later is told in the progress line.
-  await page.click(`[data-history-delete="${ids[0]}"]`);await page.click('#book-dialog-submit');await page.waitForFunction(()=>document.querySelector('#book-dialog-status').textContent==='Đang xóa…');
+  await inMenu(page,`[data-history-delete="${ids[0]}"]`);await page.click('#book-dialog-submit');await page.waitForFunction(()=>document.querySelector('#book-dialog-status').textContent==='Đang xóa…');
   await page.keyboard.press('Escape');await page.waitForFunction(()=>!document.querySelector('#book-dialog').open);
   release({fakeStatus:500,json:{error:'Máy chủ đang bận, chưa xóa được.'}});await waitProgress(page,/^Máy chủ đang bận, chưa xóa được\.$/u);
   // A later dialog is not closed by an earlier one that ends after it was opened.
-  await page.click(`[data-history-delete="${ids[0]}"]`);await page.click('#book-dialog-submit');await page.waitForFunction(n=>document.querySelector('#book-dialog-status').textContent==='Đang xóa…',2);
-  await page.keyboard.press('Escape');await page.click(`[data-history-delete="${ids[1]}"]`);await page.waitForFunction(()=>document.querySelector('#book-dialog').open);
+  await inMenu(page,`[data-history-delete="${ids[0]}"]`);await page.click('#book-dialog-submit');await page.waitForFunction(n=>document.querySelector('#book-dialog-status').textContent==='Đang xóa…',2);
+  await page.keyboard.press('Escape');await inMenu(page,`[data-history-delete="${ids[1]}"]`);await page.waitForFunction(()=>document.querySelector('#book-dialog').open);
   release({ok:true,removedBookId:null});await waitProgress(page,/^Đã xóa bản dịch\.$/u);
   assert.equal(await page.evaluate(()=>document.querySelector('#book-dialog').open),true,'the dialog opened since stays open');assert.match(await page.textContent('#book-dialog-body'),/Bài 2/u);
   assert.equal(deletes,2);assert.deepEqual(errors,[]);
@@ -355,23 +420,23 @@ test('A history longer than a page lists the rest with "Xem thêm bản cũ hơn
  const listed=()=>page.$$eval('#study-history-list [data-history-open]',buttons=>buttons.length);
  try{
   await historyLoaded(page);
-  assert.equal(await page.textContent('#study-history-count'),'· 100 bản cập nhật gần nhất');assert.equal(await listed(),100);
-  assert.match(await page.textContent('#study-history-list .history-more'),/^Danh sách đang hiện các bản dịch cập nhật gần nhất; các bản cũ hơn vẫn được lưu trong tài khoản\.Xem thêm bản cũ hơn$/u);
+  assert.equal(await page.textContent('#study-history-count'),'· 100+');assert.equal(await listed(),100);
+  assert.equal(await page.textContent('#study-history-list .history-more'),'Xem bản cũ hơn');
   // The next page goes under the cards; keyboard users go on from its first session.
   await page.click('#study-history > summary');await page.click('#study-history-list [data-history-more]');
   await page.waitForSelector(`[data-history-open="${rows[100].id}"]`);
-  assert.equal(await page.textContent('#study-history-count'),'· 200 bản cập nhật gần nhất');assert.equal(await listed(),200);
+  assert.equal(await page.textContent('#study-history-count'),'· 200+');assert.equal(await listed(),200);
   assert.equal(await page.evaluate(()=>document.activeElement?.dataset?.historyOpen),rows[100].id);
   // A page that fails says why and offers Thử lại; the cards already listed stay.
   await page.click('#study-history-list [data-history-more]');await page.waitForSelector('#study-history-list .history-more-error');
   assert.equal(await page.textContent('#study-history-list .history-more-error'),'Chưa tải được các bản cũ hơn. Máy chủ đang bận. Hãy thử lại sau ít phút.');
   assert.equal(await page.evaluate(()=>document.activeElement?.textContent),'Thử lại');assert.equal(await listed(),200);
   await page.click('#study-history-list [data-history-more]');await page.waitForSelector(`[data-history-open="${rows[229].id}"]`);
-  assert.equal(await page.textContent('#study-history-count'),'· 230 bản đã lưu');assert.equal(await page.$('#study-history-list .history-more'),null);
+  assert.equal(await page.textContent('#study-history-count'),'· 230');assert.equal(await page.$('#study-history-list .history-more'),null);
   assert.deepEqual(asked,['','trang-2','trang-3','trang-3']);
   // Deleting one leaves the rest as listed, without loading the list again.
-  await page.click(`[data-history-delete="${rows[0].id}"]`);await page.click('#book-dialog-submit');await waitProgress(page,/^Đã xóa bản dịch\.$/u);
-  assert.equal(removed,1);assert.equal(await listed(),229);assert.equal(await page.textContent('#study-history-count'),'· 229 bản đã lưu');assert.equal(asked.length,4);
+  await inMenu(page,`[data-history-delete="${rows[0].id}"]`);await page.click('#book-dialog-submit');await waitProgress(page,/^Đã xóa bản dịch\.$/u);
+  assert.equal(removed,1);assert.equal(await listed(),229);assert.equal(await page.textContent('#study-history-count'),'· 229');assert.equal(asked.length,4);
   assert.deepEqual(errors,[]);
  }finally{await context.close();}
 });
@@ -384,11 +449,12 @@ test('Phone: a long book title and the line of its parts wrap inside the row, in
   await historyLoaded(page);if(!await page.evaluate(()=>document.querySelector('#study-history').open))await page.click('#study-history > summary');
   await page.waitForSelector('#study-books-list .study-book');
   const measure=await page.evaluate(()=>{
-   const row=document.querySelector('#study-books-list .study-book'),title=row.querySelector('strong'),line=[...row.querySelectorAll('small')].find(node=>node.textContent.startsWith('2 phần'));
+   const row=document.querySelector('#study-books-list .study-book'),title=row.querySelector('.row-title'),line=row.querySelector('.row-meta');
    return {scroll:document.documentElement.scrollWidth,inner:innerWidth,row:row.getBoundingClientRect().right,title:title.scrollWidth<=title.clientWidth,line:line.textContent,lineWhole:line.scrollWidth<=line.clientWidth&&line.scrollHeight<=line.clientHeight+1};
   });
   assert.ok(measure.scroll<=measure.inner&&measure.row<=measure.inner,JSON.stringify(measure));
-  assert.equal(measure.title,true,'the unbroken title wraps');assert.equal(measure.line,`2 phần · ${titles.join(' · ')}`);assert.equal(measure.lineWhole,true,'both parts can be read, not cut off after the first');
+  // One line under the title: how many parts (their names are in Sắp xếp phần).
+  assert.equal(measure.title,true,'the unbroken title wraps');assert.equal(measure.line,'2 phần');assert.equal(measure.lineWhole,true);
   assert.deepEqual(errors,[]);
  }finally{await context.close();}
 });
@@ -398,7 +464,8 @@ test('The library match says the library published the translation, not that a t
  try{
   await historyLoaded(page);await page.setInputFiles('#source-file',{name:'luan-ngu.txt',mimeType:'text/plain',buffer:Buffer.from('子曰：学而时习之。','utf8')});
   await page.waitForSelector('#library-match:not([hidden])');const banner=await page.textContent('#library-match');
-  assert.doesNotMatch(banner,/giáo viên|duyệt/u);assert.match(banner,/đã công bố bản dịch của đúng tệp này: Luận ngữ · 3 phần/u);assert.equal((await page.textContent('#library-match-open')).trim(),'Đọc bản đã công bố');
+  assert.doesNotMatch(banner,/giáo viên|duyệt/u);assert.match(banner,/^Thư viện chung đã có bản dịch của tệp này: “Luận ngữ”\./u);assert.equal((await page.textContent('#library-match-open')).trim(),'Đọc ngay (không tốn token)');assert.equal(await page.getAttribute('#library-match-open','href'),'/?read=story-1');
+  assert.equal((await page.textContent('#library-match-dismiss')).trim(),'Tự dịch');
   assert.deepEqual(errors,[]);
  }finally{await context.close();}
 });
@@ -431,7 +498,7 @@ test('"Cách dịch" is shown in every kind of run (text, a kept-layout session,
   await historyLoaded(page);assert.equal(await shown(),true,'text');
   assert.deepEqual(await page.$$eval('#mode option',options=>options.map(option=>[option.value,option.textContent])),MODES.map(id=>[id,modeLabel(id)]));
   await openHistoryItem(page,LAYOUT_ITEM.id);await page.waitForFunction(()=>!document.querySelector('#translate').disabled&&document.querySelector('#part-count').textContent==='1 đoạn');
-  assert.equal(await shown(),true,'a kept-layout session');assert.equal(await page.textContent('#mode-hint'),modeProfile('economy').hint);
+  assert.equal(await shown(),true,'a kept-layout session');assert.equal(await page.textContent('#mode-hint'),modeProfile('economy').brief);
   await openHistoryItem(page,TEXT_ID);await waitProgress(page,RESTORED);assert.equal(await shown(),true);
   await page.waitForFunction(()=>document.querySelector('#pdf-layout-enabled').checked);
   await page.setInputFiles('#source-file',{name:'sach.pdf',mimeType:'application/pdf',buffer:bytes});await page.waitForSelector('#book-mode:not([hidden])',{timeout:30000});

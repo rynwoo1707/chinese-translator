@@ -129,7 +129,7 @@ test('PDFs open with the vendored pdf.js (legacy build) where the newest built-i
  for(const [from] of PDFJS_FILES)assert.match(from,/^node_modules\/pdfjs-dist\/legacy\/build\//u);
  const vendor=read('backend/vendor.mjs');assert.match(vendor,/\.\.\.PDFJS_FILES\.map\(async\(\[from,to\]\)=>writeFile\(to,vendoredPdfjs\(await readFile\(from,'utf8'\)\)\)\)/u);assert.doesNotMatch(vendor,/pdfjs-dist\/build\/pdf/u);
  const legacy=await pdfPaths(VENDORED);
- assert.deepEqual(legacy.reader,{canvases:legacy.reader.canvases,status:'3 trang · kéo xuống để đọc tiếp.'});assert.ok(legacy.reader.canvases>=1,JSON.stringify(legacy));
+ assert.deepEqual(legacy.reader,{canvases:legacy.reader.canvases,status:'3 trang'});assert.ok(legacy.reader.canvases>=1,JSON.stringify(legacy));
  assert.equal(legacy.cover.error,undefined,JSON.stringify(legacy.cover));assert.deepEqual(legacy.workspace,{pages:3,analyzed:3});
  // The default build fails on the same browser: what the switch fixes.
  const modern=await pdfPaths(DEFAULT_BUILD);

@@ -9,7 +9,7 @@ import {studyRoute,studyModelConfig} from './study-translation.js';
 // "Cách dịch": the profiles shared by the browser, the Worker routes and the admin pipeline, the thinking levels they name
 // (backend/ai.js) and how the study routes apply them. No test here reaches Gemini: every call goes to a fake fetch.
 const LEVELS=['minimal','low','medium','high'];
-const KEYS=['id','label','hint','translateThinking','ocrThinking','retryThinking','allowRepair','strict','reread','layoutBatch','ocrBatch','sheets','textOcr','textChunk','estimate'];
+const KEYS=['id','label','brief','hint','translateThinking','ocrThinking','retryThinking','allowRepair','strict','reread','layoutBatch','ocrBatch','sheets','textOcr','textChunk','estimate'];
 const KEY='student-key-long-enough-0123';
 const levelsOf=profile=>[profile.translateThinking,profile.ocrThinking,profile.retryThinking,...(profile.reread?[profile.reread.thinking]:[])];
 const reply=value=>Response.json({usageMetadata:{promptTokenCount:10,candidatesTokenCount:5,totalTokenCount:15},candidates:[{finishReason:'STOP',content:{parts:[{text:JSON.stringify(value)}]}}]});
@@ -30,6 +30,10 @@ test('Every mode has the shared profile shape, within the limits the routes and 
   const profile=modeProfile(id);
   assert.ok(isMode(id));assert.deepEqual(Object.keys(profile).sort(),[...KEYS].sort(),id);assert.equal(profile.id,id);
   assert.ok(profile.label.trim()&&profile.hint.trim(),id);assert.equal(profile.label,profile.label.normalize('NFC'));assert.equal(profile.hint,profile.hint.normalize('NFC'));assert.equal(modeLabel(id),profile.label);
+  // The label is the mode's name only (no cost in brackets); the line under the field (brief) is short and names the
+  // same multiple of Tiết kiệm's tokens as the estimate, beside every mode but Tiết kiệm itself.
+  assert.doesNotMatch(profile.label,/[()]/u,id);assert.equal(profile.brief,profile.brief.normalize('NFC'));assert.ok(profile.brief.length<=110,`${id}: ${profile.brief.length}`);
+  assert.equal(profile.brief.match(/khoảng ([\d,]+)× token/u)?.[1]??null,id==='economy'?null:profile.estimate.toLocaleString('vi-VN'),id);
   for(const level of levelsOf(profile))assert.ok(LEVELS.includes(level),`${id}: ${level}`);
   assert.equal(typeof profile.allowRepair,'boolean');assert.equal(typeof profile.strict,'boolean');
   // Every mode reads again what it could not read (a code of OCR_KEPT_CODES, or all) and doubts it names (or all, or none).
@@ -52,7 +56,7 @@ test('Every mode has the shared profile shape, within the limits the routes and 
 
 test('Tiết kiệm is the engine every request used before modes, reading again only what it could not read or read short; Kỹ nhất reads and reasons the most',()=>{
  const economy=modeProfile('economy'),premium=modeProfile('premium'),rank=level=>LEVELS.indexOf(level);
- assert.deepEqual({...economy,label:undefined,hint:undefined},{id:'economy',label:undefined,hint:undefined,translateThinking:'minimal',ocrThinking:'minimal',retryThinking:'low',allowRepair:true,strict:false,reread:{kept:['empty','unread','refused','truncated','malformed'],doubt:['han'],thinking:'low',maxPerPage:2},layoutBatch:{chars:5000,blocks:48},ocrBatch:{images:OCR_LIMITS.images,blocks:OCR_LIMITS.sheetBlocks},sheets:'standard',textOcr:'hybrid',textChunk:10000,estimate:1});
+ assert.deepEqual({...economy,label:undefined,brief:undefined,hint:undefined},{id:'economy',label:undefined,brief:undefined,hint:undefined,translateThinking:'minimal',ocrThinking:'minimal',retryThinking:'low',allowRepair:true,strict:false,reread:{kept:['empty','unread','refused','truncated','malformed'],doubt:['han'],thinking:'low',maxPerPage:2},layoutBatch:{chars:5000,blocks:48},ocrBatch:{images:OCR_LIMITS.images,blocks:OCR_LIMITS.sheetBlocks},sheets:'standard',textOcr:'hybrid',textChunk:10000,estimate:1});
  // Tiết kiệm leaves a reading kept for its formula or mixed with another strip's text as it is; Kỹ nhất reads every kind again.
  assert.deepEqual(['empty','formula','mixed'].map(code=>rereads(economy.reread.kept,code)),[true,false,false]);assert.deepEqual(OCR_DOUBT_CODES.map(code=>rereads(economy.reread.doubt,code)),[false,false,false,true]);
  assert.ok(OCR_KEPT_CODES.every(code=>rereads(premium.reread.kept,code))&&OCR_DOUBT_CODES.every(code=>rereads(premium.reread.doubt,code)));assert.equal(rereads(premium.reread.kept,undefined),false,'nothing to read again');
@@ -63,7 +67,9 @@ test('Tiết kiệm is the engine every request used before modes, reading again
   assert.ok(premium.layoutBatch.chars<=profile.layoutBatch.chars&&premium.layoutBatch.blocks<=profile.layoutBatch.blocks&&premium.ocrBatch.images<=profile.ocrBatch.images&&premium.ocrBatch.blocks<=profile.ocrBatch.blocks,id);
  }
  // The labels the select and the history show.
- assert.match(modeLabel('premium'),/^Kỹ nhất/u);assert.match(modeLabel('economy'),/^Tiết kiệm/u);
+ assert.equal(modeLabel('premium'),'Kỹ nhất');assert.equal(modeLabel('economy'),'Tiết kiệm');assert.equal(modeLabel('balanced'),'Cân bằng');assert.equal(modeLabel('quality'),'Kỹ hơn');
+ // Kỹ nhất has Gemini read every scanned page (textOcr gemini): its line says so, as it costs tokens.
+ assert.equal(modeProfile('premium').textOcr,'gemini');assert.match(modeProfile('premium').brief,/Gemini đọc lại mọi trang scan/u);
 });
 
 test('An unknown or missing mode is economy, never a dearer one',()=>{

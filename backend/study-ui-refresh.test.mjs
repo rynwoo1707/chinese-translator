@@ -110,19 +110,19 @@ test('Opened from Thư viện riêng, the part is offered the refresh and nothin
  try{
   await page.waitForFunction(()=>!document.querySelector('#layout-refresh')?.hidden,null,{timeout:30000});
   const offered=await notice(page);
-  assert.equal(offered.button,'Cập nhật bố cục');assert.equal(offered.focused,true,'the link\'s refresh=1 points at the button');assert.match(offered.text,/^Phần này được tách trang bằng bộ tách cũ, nên tiêu đề/u,'no internal extractor number');assert.match(offered.text,/không tốn token/u);
-  assert.match(await page.textContent('#progress'),/^PDF đã xuất dùng bố cục cũ\. Bấm Cập nhật bố cục/u);
+  assert.equal(offered.button,'Cập nhật bố cục');assert.equal(offered.focused,true,'the link\'s refresh=1 points at the button');assert.equal(offered.text,'Phần này dùng bố cục cũ: tiêu đề hoặc chú thích ngoài các đoạn có thể còn chữ Trung. Cập nhật bố cục không tốn token; Hoa Trí báo số đoạn và token trước khi dịch.','no internal extractor number');
+  assert.equal(await page.textContent('#progress'),'','the note says it once');
   assert.equal(await page.evaluate(()=>location.search),'','the address drops its query, so a reload does not open it again');
   assert.deepEqual(account.calls,{refresh:0,ocr:0,translate:0,render:0},'nothing is extracted or paid before the button');assert.equal(await page.textContent('#usage-total'),'0');
   await page.click('#layout-refresh button');
   // Extracted again (no Gemini); the saved part is untouched until the new one is exported.
   const cost=blockTokens({sheets:1,characters:['（扫描）探究','（扫描）机器读的正文。','第一章 空间向量 5'].join('').length,requests:2},'economy'),shown=new Intl.NumberFormat('vi-VN').format(Math.round(cost/100)*100);
   // Of the 5 blocks translated, 4 are found again as they were; the one whose text region grew is read and translated again.
-  const summary=`Cập nhật bố cục: 3 đoạn cần đọc và dịch (1 trong số đó đã dịch trước đây nhưng vùng chữ hoặc công thức đổi khi tách lại), khoảng ${shown} token; giữ bản dịch của 4/5 đoạn.`;
-  await waitProgress(page,/^Cập nhật bố cục: 3 đoạn cần đọc và dịch/u);
-  assert.equal(await page.textContent('#progress'),`${summary} Bấm Bắt đầu dịch để đọc và dịch các đoạn này.`);
+  const summary=`Còn 3 đoạn cần đọc và dịch (1 đoạn đổi vùng chữ khi tách lại), khoảng ${shown} token; giữ bản dịch của 4/5 đoạn.`;
+  await waitProgress(page,/^Đã cập nhật bố cục\./u);
+  assert.equal(await page.textContent('#progress'),'Đã cập nhật bố cục. Bấm Dịch tiếp để đọc và dịch các đoạn mới.');assert.equal(await page.textContent('#translate'),'Dịch tiếp');
   assert.deepEqual(account.refreshBodies,[{assetId:OLD_ASSET,forceClone:true,mode:'economy'}]);assert.deepEqual({...account.calls,refresh:undefined},{refresh:undefined,ocr:0,translate:0,render:0});
-  assert.ok((await notice(page)).text.startsWith(summary),(await notice(page)).text);
+  assert.equal((await notice(page)).text,`${summary} Phần cũ vẫn ở Thư viện riêng tới khi PDF mới xuất xong.`);
   // The new session takes the old part over in its book; the translations go with the blocks found again, never by id:
   // the new p4-b3 is a heading the old layout did not have, the old p4-b3 is the new p4-b4 (grown, read again).
   const first=account.saves[0];assert.equal(first.bookId,'book-1');assert.equal(first.replaceChapterId,'chapter-1');assert.equal(first.state.pdfLayout.assetId,NEW_ASSET);
@@ -136,7 +136,7 @@ test('Opened from Thư viện riêng, the part is offered the refresh and nothin
   assert.equal(account.calls.refresh,1,'no second refresh');
   // Bắt đầu dịch: one sheet read (the new blocks only), the three new blocks translated, the part exported.
   await page.fill('#api-key',KEY);await page.click('#translate');
-  await waitProgress(page,/^PDF tiếng Việt đã được lưu vào Thư viện riêng/u);
+  await waitProgress(page,/^Xong · PDF đã lưu vào Thư viện riêng/u);
   assert.deepEqual(account.ocrBodies.map(body=>body.blockIds),[['p4-b3','p4-b4']]);
   assert.deepEqual(account.translateBodies.flatMap(body=>body.blocks.map(b=>b.id)),['p4-b3','p4-b4','p5-b3']);
   assert.deepEqual(account.renderBodies.map(body=>body.assetId),[NEW_ASSET]);
@@ -145,7 +145,7 @@ test('Opened from Thư viện riêng, the part is offered the refresh and nothin
  }finally{await context.close();}
 });
 
-test('Xuất PDF tiếng Việt on the old layout offers the refresh first; "Vẫn xuất theo bố cục cũ" draws the old layout again without extracting anything',{skip,timeout:120000},async()=>{
+test('Xuất PDF tiếng Việt on the old layout offers the refresh first; "Vẫn xuất bản cũ" draws the old layout again without extracting anything',{skip,timeout:120000},async()=>{
  const account=fakeAccount(),{context,page,errors}=await openStudy(account.api);
  try{
   await page.waitForFunction(()=>!/đang tải/u.test(document.querySelector('#study-history-count').textContent));
@@ -153,12 +153,14 @@ test('Xuất PDF tiếng Việt on the old layout offers the refresh first; "V�
   await page.click(`[data-history-open="${OLD}"]`);await page.waitForFunction(()=>!document.querySelector('#download-pdf').disabled);
   await page.click('#download-pdf');await page.waitForFunction(()=>document.querySelector('#book-dialog').open);
   assert.equal(await page.textContent('#book-dialog-title'),'Bố cục của phần này đã cũ');assert.equal(await page.textContent('#book-dialog-submit'),'Cập nhật bố cục');
+  assert.equal(await page.textContent('#book-dialog-body'),'Xuất lại sẽ giữ bố cục cũ (tiêu đề, chú thích ngoài các đoạn vẫn là chữ Trung). Cập nhật bố cục không tốn token và báo trước số token cho phần mới.');
+  assert.deepEqual(await page.$$eval('#book-dialog .book-dialog-actions button',buttons=>buttons.map(button=>[button.textContent,button.className])),[['Hủy','secondary'],['Vẫn xuất bản cũ','secondary'],['Cập nhật bố cục','primary']]);
   assert.equal(account.calls.render,0,'not exported before the student chooses');
   // The export is downloaded as before (and the download finished before the page closes, which the shared browser needs).
   const downloaded=page.waitForEvent('download');
-  await page.click('#book-dialog-body button');await page.waitForFunction(()=>!document.querySelector('#book-dialog').open);
+  await page.click('#book-dialog [data-dialog-extra]');await page.waitForFunction(()=>!document.querySelector('#book-dialog').open);
   const download=await downloaded;assert.equal(download.suggestedFilename(),'Vectơ trang 4–5.vi.pdf');await download.delete();
-  await waitProgress(page,/^PDF tiếng Việt đã được lưu vào Thư viện riêng/u);
+  await waitProgress(page,/^Xong · PDF đã lưu vào Thư viện riêng/u);
   assert.deepEqual(account.renderBodies,[{assetId:OLD_ASSET,historyId:OLD}]);assert.equal(account.calls.refresh,0);assert.deepEqual(errors,[]);
  }finally{await context.close();}
 });
@@ -169,7 +171,7 @@ test('A part this extractor read is offered nothing: no notice, and Xuất PDF t
  try{
   await page.waitForFunction(()=>!document.querySelector('#download-pdf').disabled);assert.equal(await notice(page),null);
   const downloaded=page.waitForEvent('download');await page.click('#download-pdf');const download=await downloaded;await download.delete();
-  await waitProgress(page,/^PDF tiếng Việt đã được lưu vào Thư viện riêng/u);
+  await waitProgress(page,/^Xong · PDF đã lưu vào Thư viện riêng/u);
   assert.deepEqual(account.renderBodies,[{assetId:OLD_ASSET,historyId:OLD}]);assert.equal(account.calls.refresh,0,'no refresh asked when the stamps match');
   assert.equal(await page.evaluate(()=>document.querySelector('#book-dialog').open),false);assert.deepEqual(errors,[]);
  }finally{await context.close();}

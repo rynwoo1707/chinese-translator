@@ -34,7 +34,8 @@ test('Home: says what Hoa Trí does, for whom, with the two actions and the trus
  assert.match(html,/<p class="eyebrow">DÀNH CHO HỌC SINH VÀ GIÁO VIÊN<\/p>/u);
  assert.match(html,/<h1 id="home-title">Dịch tài liệu tiếng Trung sang tiếng Việt, giữ nguyên bố cục trang<\/h1>/u);
  assert.doesNotMatch(html,/hero-lead|Đưa PDF, sách điện tử/u,'no lead paragraph under the title');
- assert.match(html,/<a class="hero-cta hero-cta-primary" href="\/study">Dịch tài liệu của tôi <span aria-hidden="true">→<\/span><\/a><a class="hero-cta" href="#thu-vien" id="show-library">Xem thư viện<\/a>/u);
+ assert.match(html,/<a class="hero-cta hero-cta-primary" href="\/study">Dịch tài liệu của tôi<\/a><a class="hero-cta" href="#thu-vien" id="show-library">Xem Thư viện<\/a>/u);
+ assert.doesNotMatch(html,/library-ornament|學而時習之|library-seal|library-heading"><h2[^>]*>Thư viện chung<\/h2><p/u,'no ornament, motto, seal or subtitle');
  assert.doesNotMatch(html,/hero-trust|Không quảng cáo, không theo dõi/u,'no small commitment lines under the buttons');
  assert.doesNotMatch(html,/sử liệu, cổ văn|đã được đối chiếu|giáo viên đã duyệt/u,'no claim that the library is reviewed');
  assert.doesNotMatch(html,/study\.html/u,'workspace links use /study');assert.match(html,/<a href="\/study">/u);
@@ -52,11 +53,11 @@ test('Home: says what Hoa Trí does, for whom, with the two actions and the trus
 
 test('Home: an empty library points to the workspace; a failed library is an error card with "Thử lại", never an empty shelf',async()=>{
  const empty=app({answers:url=>url==='/api/library'?[200,[]]:null});await settle();
- assert.match(empty.root.innerHTML,/Thư viện chung đang được bổ sung\. Trong lúc chờ, hãy tự dịch tài liệu của bạn ở Xưởng dịch\.<\/p><a class="hero-cta hero-cta-primary" href="\/study">/u);
+ assert.match(empty.root.innerHTML,/<p>Thư viện chung chưa có tài liệu\.<\/p><a class="hero-cta" href="\/study">Mở Xưởng dịch<\/a>/u);
  const failed=app({answers:url=>url==='/api/library'?[500,{error:'Máy chủ gặp lỗi ngoài dự kiến.'}]:null});await settle();
  const html=failed.root.innerHTML;
  assert.match(html,/<div class="panel load-error" role="alert"><h2>Chưa tải được thư viện<\/h2><p>Máy chủ gặp lỗi ngoài dự kiến\.<\/p>/u);
- assert.match(html,/<button type="button" class="primary" data-retry="library">Thử lại<\/button>/u);
+ assert.match(html,/<button type="button" class="secondary" data-retry="library">Thử lại<\/button>/u,'outlined: the page already leads with Dịch tài liệu của tôi');
  assert.doesNotMatch(html,/đang được bổ sung|cover-library/u);
  // Signed in, a personal list that failed is kept apart from the ones that loaded.
  const partly=app({answers:url=>url==='/api/me'?[200,{authenticated:true,user:{id:'u',name:'Lan'}}]:url==='/api/my/library'?[503,{error:'Bận.'}]:url==='/api/my/requests'?[200,[{id:'r'}]]:null});await settle();
@@ -87,10 +88,10 @@ test('Deep links: #reader/<id>/<part> and /?read=<id>&phan=<n> open that part, k
  // Its heading is the page's h1 and the title says so; signed out, it offers to sign in and come back to this part
  // (/api/read answers 404, not 401, for a private book).
  const missing=app({hash:'#reader/nope/1',answers:url=>url==='/api/read/nope'?[404,{error:'Không tìm thấy tài liệu.'}]:null});await settle();
- assert.match(missing.root.innerHTML,/<h1>Chưa mở được tài liệu này<\/h1><p>Không tìm thấy tài liệu\.<\/p><p>Nếu đây là tài liệu trong Thư viện riêng của bạn, hãy đăng nhập để mở\.<\/p><div class="button-row"><a class="load-error-link" href="\/#account\?sau=reader\/nope\/1">Đăng nhập<\/a><button type="button" class="primary" data-retry="reader">/u);
+ assert.match(missing.root.innerHTML,/<h1>Không mở được tài liệu này<\/h1><p>Không tìm thấy tài liệu\. Nếu là tài liệu riêng của bạn, hãy đăng nhập\.<\/p><div class="button-row"><a class="button primary load-error-link" href="\/#account\?sau=reader\/nope\/1">Đăng nhập<\/a><button type="button" class="secondary" data-retry="reader">Thử lại<\/button><button type="button" class="quiet" data-route="library">Về Thư viện<\/button>/u,'signed out: sign in first, then try again or go back to the library');
  assert.equal(missing.document.title,'Không mở được tài liệu — Hoa Trí');assert.equal(missing.run('state.focusAfterRender'),null,'the heading took the focus');
  const mine=app({hash:'#reader/nope/1',answers:url=>url==='/api/read/nope'?[404,{error:'Không tìm thấy tài liệu.'}]:url==='/api/me'?[200,{authenticated:true,user:{id:'u1',name:'Lan',email:'lan@example.test'}}]:null});await settle();
- assert.doesNotMatch(mine.root.innerHTML,/load-error-link|Thư viện riêng của bạn/u,'signed in, there is nothing to sign in to');
+ assert.doesNotMatch(mine.root.innerHTML,/load-error-link|tài liệu riêng của bạn/u,'signed in, there is nothing to sign in to');assert.match(mine.root.innerHTML,/<button type="button" class="primary" data-retry="reader">Thử lại<\/button>/u,'signed in, "Thử lại" is the action');
  assert.equal(app({}).run('pageTitle()'),'Hoa Trí — Dịch tiếng Trung sang tiếng Việt, giữ bố cục trang');
  assert.equal(app({hash:'#account'}).run('pageTitle()'),'Tài khoản — Hoa Trí');
 });
@@ -101,7 +102,7 @@ test('Reader: footnotes expose their note, a private book has no share button, p
  assert.match(text,/<button type="button" class="footnote-ref" data-note="Ghi chú một\." aria-label="Chú thích 1" aria-expanded="false" aria-describedby="note-1">\[1\]<\/button>/u);
  assert.match(text,/<li id="note-1">/u);assert.doesNotMatch(text,/reader-share/u,'only a public book has a link others can open');
  const pdf=run(`state.chapters=[{id:'p',title:'Trang 1–4',mime:'application/pdf'}];readerView()`);
- assert.match(pdf,/<div class="pdf-pages-root" id="pdf-pages-root"><\/div>/u);assert.doesNotMatch(pdf,/<iframe/u);assert.match(pdf,/Mở PDF trong tab mới ↗/u);
+ assert.match(pdf,/<div class="pdf-pages-root" id="pdf-pages-root"><\/div>/u);assert.doesNotMatch(pdf,/<iframe/u);assert.match(pdf,/<details class="menu reader-download"><summary>Tải về <span aria-hidden="true">▾<\/span><\/summary><div class="menu-list"><a id="download-part" href="\/api\/chapter-file\/p" download="Trang 1–4\.vi\.pdf">Phần này \(PDF\)<\/a><\/div><\/details>/u,'the part itself is in the "Tải về" menu');
 });
 
 test('#yeu-cau: the request dialog opens on load, after sign-in when the student is signed out',async()=>{

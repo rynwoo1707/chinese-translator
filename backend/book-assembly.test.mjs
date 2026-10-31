@@ -97,7 +97,7 @@ test('A part without a Vietnamese PDF is explained by its kind: a layout range i
  for(const part of [browser,docx])for(const inBook of [true,false])assert.doesNotMatch(missingPdfNote(part,{inBook}),/Xuất PDF/u);
  assert.equal(missingPdfNote(browser),'Phần “Mục lục (đọc tại trình duyệt)” là bản dịch dạng chữ, không có trang PDF, nên các trang của phần này giữ nguyên bản gốc. Muốn có các trang này bằng tiếng Việt trong bản ghép, hãy dịch lại chúng với tùy chọn “Giữ bố cục PDF và xuất PDF tiếng Việt”.');
  // The option is quoted as Xưởng dịch labels it ("xuất PDF": exporting a PDF, not "xuất bản", publishing).
- const label=/<input id="pdf-layout-enabled"[^>]*> <span>([^<]+)<small/u.exec(readFileSync(new URL('../frontend/study.html',import.meta.url),'utf8'))?.[1];
+ const label=/<input id="pdf-layout-enabled"[^>]*>\s*<span>([^<]+)</u.exec(readFileSync(new URL('../frontend/study.html',import.meta.url),'utf8'))?.[1];
  assert.equal(label,'Giữ bố cục PDF và xuất PDF tiếng Việt');assert.ok(missingPdfNote(browser).includes(`“${label}”`));
  assert.equal(missingPdfNote(docx,{inBook:false}),'Phần “Bài đọc thêm” là bản dịch dạng chữ, không có trang PDF, nên không có trong bản ghép; phần này vẫn đọc được trong Thư viện riêng.');
  const plan=planBook(bookSources([{id:'a',title:'Trang 4',mime:'application/pdf',file:'/f/a',sha256:SHA_A,filename:'toan.pdf',totalPages:10,pages:[4]},{id:'b',...browser,mime:'text/plain',file:null,sha256:SHA_A,totalPages:10,pages:null,pageStart:2,pageEnd:3}]).sources);

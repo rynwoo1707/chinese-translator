@@ -10,7 +10,7 @@ export const SOURCE_URL='https://github.com/rynwoo1707/chinese-translator/tree/h
 export const SERVICE_SOURCE_URL=`${SOURCE_URL}/services/pdf-layout`;
 
 export function footerHtml(){
- return `<div class="site-footer-inner"><p class="site-footer-brand"><strong>Hoa Trí</strong> © 2026 <span class="site-footer-dot">·</span> <span class="site-footer-tagline">Học liệu Trung – Việt có thể kiểm chứng.</span></p>`
+ return `<div class="site-footer-inner"><p class="site-footer-brand"><strong>Hoa Trí</strong> © 2026</p>`
   +`<nav class="site-footer-links" aria-label="Thông tin về Hoa Trí"><a href="/dieu-khoan">Điều khoản sử dụng</a><a href="/quyen-rieng-tu">Quyền riêng tư</a><a href="/quyen-rieng-tu#lien-he">Liên hệ</a><a href="${SOURCE_URL}" target="_blank" rel="noopener">Mã nguồn</a><a href="/dieu-khoan#giay-phep">Giấy phép</a></nav></div>`;
 }
 
