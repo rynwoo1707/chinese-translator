@@ -22,7 +22,21 @@ function devVar(key){let text='';try{text=readFileSync('.dev.vars','utf8');}catc
 function pdfPort(){try{return new URL(devVar('PDF_LAYOUT_SERVICE_URL')||'http://127.0.0.1:8091').port||'8091';}catch{return '8091';}}
 function webPort(){try{return /"dev"\s*:\s*\{[^{}]*?"port"\s*:\s*(\d+)/u.exec(readFileSync('wrangler.jsonc','utf8'))?.[1]||'8787';}catch{return '8787';}}
 
-let setupFailed=false;
+let setupFailed=false,stale=false;
+// Why git pull --ff-only kept the current version, so the window says what to do: a merge or git stash pop left unfinished,
+// files edited here that the update also changes (git names them above, in English), commits of this machine, else the
+// network. Read only.
+function pullRefused(){
+ // File names as UTF-8 (core.quotePath), at most five of them.
+ const git=args=>String(spawnSync('git',['-c','core.quotePath=false',...args],{encoding:'utf8',windowsHide:true}).stdout||'').split(/\r?\n/u).filter(Boolean),count=range=>Number(git(['rev-list','--count',range])[0])||0;
+ const names=files=>files.length>5?`${files.slice(0,5).join(', ')} và ${files.length-5} tệp khác`:files.join(', ');
+ const unmerged=git(['diff','--name-only','--diff-filter=U']);
+ if(unmerged.length)return `Không cập nhật được code mới vì ${names(unmerged)} còn dở một lần gộp (trong tệp có dòng <<<<<<<), nên vẫn chạy bản hiện có. Tắt cửa sổ này, sửa theo ONBOARDING mục 6.3 (dòng "CONFLICT") rồi chạy lại start.cmd.`;
+ const incoming=new Set(git(['diff','--name-only','HEAD','@{upstream}'])),edited=[...new Set([...git(['diff','--name-only']),...git(['diff','--name-only','--cached'])])].filter(name=>incoming.has(name));
+ if(edited.length)return `Không cập nhật được code mới vì ${names(edited)} đã bị sửa trên máy này mà bản mới cũng sửa (git không ghi đè), nên vẫn chạy bản hiện có. Tắt cửa sổ này rồi chọn một cách: bỏ phần sửa bằng git checkout -- <tệp> rồi chạy lại start.cmd; hoặc giữ phần sửa bằng git stash, chạy lại start.cmd, rồi git stash pop (ONBOARDING mục 6.3).`;
+ if(count('@{upstream}..HEAD')&&count('HEAD..@{upstream}'))return 'Không cập nhật được code mới vì nhánh trên máy này có commit riêng, nên vẫn chạy bản hiện có. Cập nhật bằng tay: tắt cửa sổ này, chạy git pull --no-rebase, rồi chạy lại start.cmd.';
+ return 'Không cập nhật được code mới nên vẫn chạy bản hiện có. Thường do máy chưa có Internet, hoặc tệp trong thư mục dự án đã bị sửa trên máy này (git không ghi đè những thay đổi đó).';
+}
 if(launcher){
  // A second window cannot work: npm ci cannot replace node_modules while the first one's workerd.exe runs (EPERM), and two
  // wrangler dev would share one local D1. Only Hoa Trí's own answer counts; an error or another program on a port does not.
@@ -38,7 +52,7 @@ if(launcher){
  if(existsSync('.git')){
   console.log('Đang lấy bản code mới nhất (git pull)…');
   const pull=run('git',['-c','http.lowSpeedLimit=1000','-c','http.lowSpeedTime=20','pull','--ff-only','--quiet'],{stdio:['ignore','inherit','inherit'],env:{...process.env,GIT_TERMINAL_PROMPT:'0',GCM_INTERACTIVE:'never'}});
-  if(pull.status!==0)console.log(pull.error?.code==='ENOENT'?'Máy chưa có lệnh git nên không tự cập nhật được code; vẫn chạy bản hiện có.':'Không cập nhật được code mới nên vẫn chạy bản hiện có. Thường do máy chưa có Internet, hoặc tệp trong thư mục dự án đã bị sửa trên máy này (git không ghi đè những thay đổi đó).');
+  if(pull.status!==0){stale=pull.error?.code!=='ENOENT';console.log(stale?pullRefused():'Máy chưa có lệnh git nên không tự cập nhật được code; vẫn chạy bản hiện có.');}
  }
  const installed='node_modules/.package-lock.json';
  if(!existsSync(installed)||!existsSync('node_modules/wrangler')||statSync(installed).mtimeMs<statSync('package-lock.json').mtimeMs){console.log('\nĐang cài thư viện (npm ci, lần đầu mất khoảng 1 phút)…');if(npm(['ci'])!==0)fail('Cài thư viện (npm ci) thất bại. Thường do: máy chưa có Internet, hoặc mạng cần proxy ("npm config set proxy …"); Hoa Trí còn mở ở một cửa sổ khác; phần mềm diệt virus hoặc OneDrive đang khóa thư mục node_modules (nên để dự án ngoài OneDrive, ví dụ C:\\src\\chinese-translator). Xử lý xong thì chạy lại.');}
@@ -76,8 +90,8 @@ function openBrowser(url){
 }
 function announce(){
  if(announced||!webUrl||pdfState==='starting')return;announced=true;const url=`${webUrl}/#account`;
- const note={stopped:'\n Chế độ "Giữ bố cục PDF" chưa dùng được: dịch vụ PDF đã dừng (xem CẢNH BÁO ở trên).',slow:'\n Dịch vụ PDF (chế độ "Giữ bố cục PDF") còn đang khởi động; các phần khác dùng được ngay.'}[pdfState]||'';
- console.log(`\n================================================================\n Hoa Trí đang chạy: ${url}\n Lần đầu: "Tạo tài khoản", rồi mở "Xưởng dịch học tập".${note}\n Giữ cửa sổ này mở trong lúc dùng; bấm Ctrl+C để tắt.\n================================================================\n`);
+ const note={stopped:'\n Chế độ "Giữ bố cục PDF" chưa dùng được: dịch vụ PDF đã dừng (xem CẢNH BÁO ở trên).',slow:'\n Dịch vụ PDF (chế độ "Giữ bố cục PDF") còn đang khởi động; các phần khác dùng được ngay.'}[pdfState]||'',old=stale?'\n Đây vẫn là bản cũ: chưa cập nhật được code mới (xem dòng "Không cập nhật được" ở trên).':'';
+ console.log(`\n================================================================\n Hoa Trí đang chạy: ${url}\n Lần đầu: "Tạo tài khoản", rồi mở "Xưởng dịch".${old}${note}\n Giữ cửa sổ này mở trong lúc dùng; bấm Ctrl+C để tắt.\n================================================================\n`);
  if(!process.env.HOATRI_NO_BROWSER)openBrowser(url);
 }
 process.on('SIGINT',()=>stop(0));process.on('SIGTERM',()=>stop(0));

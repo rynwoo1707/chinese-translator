@@ -1,6 +1,7 @@
 // start-local.mjs runs in a throw-away copy of the project: fake wrangler, PDF service and setup, a .dev.vars whose PDF port
-// nothing listens on, and HOATRI_NO_BROWSER. No git remote, npm, browser or app port (8787, 8091) is used: the launcher's
-// "already running" check talks to fake services on ports the system picks. No process a test starts outlives it.
+// nothing listens on, and HOATRI_NO_BROWSER. No network, npm, browser or app port (8787, 8091) is used: the launcher's
+// "already running" check talks to fake services on ports the system picks, and its git pull reaches a bare repository in
+// a local folder standing in for GitHub. No process a test starts outlives it.
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {spawn,spawnSync} from 'node:child_process';
@@ -19,7 +20,8 @@ const FAKE={
  pdf:`console.log('pid='+process.pid);console.log('PDF layout service ready (PyMuPDF + Puppeteer).');setInterval(()=>{},60000);`,
  pdfPortBusy:`console.log('pid='+process.pid);console.error('Error: listen EADDRINUSE: address already in use');process.exit(1);`,
  pdfCrash:`console.log('pid='+process.pid);console.error('Error: Đặt PDF_LAYOUT_SERVICE_TOKEN tối thiểu 24 ký tự.');process.exit(3);`,
- setup:`import {writeFileSync} from 'node:fs';writeFileSync('setup-ran','');console.log('[2/8] Thư viện giao diện (frontend/vendor)');console.error('\\nLỖI: giả lập lỗi của bước 2.');process.exitCode=1;`
+ setup:`import {writeFileSync} from 'node:fs';writeFileSync('setup-ran','');console.log('[2/8] Thư viện giao diện (frontend/vendor)');console.error('\\nLỖI: giả lập lỗi của bước 2.');process.exitCode=1;`,
+ setupOk:`console.log('\\nCài đặt xong.');`
 };
 const runs=[],folders=[];
 const pause=ms=>new Promise(done=>setTimeout(done,ms));
@@ -36,6 +38,26 @@ test.after(()=>{
 async function listen(handler){const server=createServer(handler);await new Promise(done=>server.listen(0,'127.0.0.1',done));return server;}
 async function freePort(){const server=await listen(()=>{});const {port}=server.address();await new Promise(done=>server.close(done));return port;}
 function write(file,text){mkdirSync(dirname(file),{recursive:true});writeFileSync(file,text);}
+// git as these tests run it, and as the launcher gets it: no system or user configuration (an empty file stands for
+// ~/.gitconfig, so a pull.rebase or init.defaultBranch of this machine changes nothing), a fixed author, never a prompt.
+const gitHome=mkdtempSync(join(tmpdir(),'hoa-tri-git-'));folders.push(gitHome);writeFileSync(join(gitHome,'gitconfig'),'');
+const GIT_ENV={GIT_CONFIG_NOSYSTEM:'1',GIT_CONFIG_GLOBAL:join(gitHome,'gitconfig'),GIT_TERMINAL_PROMPT:'0',GIT_AUTHOR_NAME:'Hoa Tri Test',GIT_AUTHOR_EMAIL:'test@example.invalid',GIT_COMMITTER_NAME:'Hoa Tri Test',GIT_COMMITTER_EMAIL:'test@example.invalid'};
+const gitRun=(cwd,args)=>spawnSync('git',args,{cwd,env:{...process.env,...GIT_ENV},encoding:'utf8',windowsHide:true});
+function gitIn(cwd,...args){const result=gitRun(cwd,args);assert.equal(result.status,0,`git ${args.join(' ')}\n${result.stdout}${result.stderr}`);return result.stdout.trim();}
+// A launcher project that is a clone of a bare repository in a local folder (GitHub's stand-in). git tracks two small
+// files only, so a pull never touches package-lock.json (npm ci) or the launcher; upstream() pushes a new version from
+// another clone, as a push to GitHub would.
+const TERMS='<p>Liên hệ: [[CHƯA ĐIỀN: email]]</p>\n<footer>Chân trang cũ</footer>\n';
+async function cloned(){
+ const root=project({pdfPort:await freePort(),webPort:await freePort(),setup:FAKE.setupOk}),remote=mkdtempSync(join(tmpdir(),'hoa-tri-remote-'));folders.push(remote);
+ write(join(root,'frontend/dieu-khoan.html'),TERMS);write(join(root,'docs/notes.txt'),'Ghi chú.\n');
+ gitIn(remote,'init','-q','--bare','-b','main');
+ gitIn(root,'init','-q','-b','main');gitIn(root,'add','frontend/dieu-khoan.html','docs/notes.txt');gitIn(root,'commit','-q','-m','Bản đầu');
+ gitIn(root,'remote','add','origin',remote);gitIn(root,'push','-q','-u','origin','main');
+ const upstream=(file,text)=>{const other=mkdtempSync(join(tmpdir(),'hoa-tri-other-'));folders.push(other);gitIn(other,'clone','-q',remote,'.');write(join(other,file),text);gitIn(other,'commit','-q','-am','Bản mới');gitIn(other,'push','-q');return gitIn(other,'rev-parse','HEAD');};
+ return {root,remote,upstream,head:()=>gitIn(root,'rev-parse','HEAD'),read:file=>readFileSync(join(root,file),'utf8')};
+}
+const BANNER=' Lần đầu: "Tạo tài khoản", rồi mở "Xưởng dịch".\n',OLD_VERSION=' Đây vẫn là bản cũ: chưa cập nhật được code mới (xem dòng "Không cập nhật được" ở trên).\n';
 
 // The project as start-local.mjs sees it. Launcher tests (setup given) also get an installed node_modules newer than
 // package-lock.json, so npm ci never runs, and a wrangler.jsonc dev port, so the running check never looks at 8787.
@@ -48,8 +70,11 @@ function project({pdfPort,webPort,web=FAKE.web,pdf=FAKE.pdf,setup=null,without=[
  if(repository)spawnSync('git',['init','-q'],{cwd:root,stdio:'ignore'});
  return root;
 }
+// The last argument may be {env}: variables added for that run (a name given in another case on Windows replaces it).
 function launch(root,...args){
- const env={...process.env,HOATRI_NO_BROWSER:'1'};delete env.NODE_TEST_CONTEXT;
+ const extra=typeof args.at(-1)==='object'?args.pop().env||{}:{},env={...process.env,HOATRI_NO_BROWSER:'1'};delete env.NODE_TEST_CONTEXT;
+ for(const name of Object.keys(extra))for(const key of Object.keys(env))if(key.toUpperCase()===name.toUpperCase())delete env[key];
+ Object.assign(env,extra);
  // Its own process group on Linux and macOS, so the whole tree can be killed at the end.
  const child=spawn(process.execPath,[join(root,'backend','start-local.mjs'),...args],{cwd:root,env,detached:!windows,windowsHide:true,stdio:['ignore','pipe','pipe']});
  const run={child,text:'',code:undefined};runs.push(run);
@@ -99,7 +124,7 @@ test('a PDF service that stops (its port is taken) leaves the web app running, w
  assert.equal(run.code,undefined,`start-local stopped:\n${run.text}`);
  const [web]=pids(run,'WEB');assert.ok(web&&alive(web),run.text);
  assert.ok(run.text.includes(`CẢNH BÁO: dịch vụ PDF đã dừng (mã 1) nên chế độ "Giữ bố cục PDF" không dùng được cho tới khi sửa lỗi rồi chạy lại; các phần khác của app vẫn chạy.\nCổng ${port} của dịch vụ PDF đang bận: có thể Hoa Trí đang chạy ở một cửa sổ khác (tắt cửa sổ đó rồi chạy lại), hoặc một chương trình khác đang dùng cổng này (sửa dòng PDF_LAYOUT_SERVICE_URL trong tệp .dev.vars sang cổng khác, ví dụ "PDF_LAYOUT_SERVICE_URL=http://127.0.0.1:${port+1}", rồi chạy lại).\n`),run.text);
- assert.ok(run.text.includes(' Hoa Trí đang chạy: http://127.0.0.1:48787/#account\n Lần đầu: "Tạo tài khoản", rồi mở "Xưởng dịch học tập".\n Chế độ "Giữ bố cục PDF" chưa dùng được: dịch vụ PDF đã dừng (xem CẢNH BÁO ở trên).\n'),run.text);
+ assert.ok(run.text.includes(' Hoa Trí đang chạy: http://127.0.0.1:48787/#account\n Lần đầu: "Tạo tài khoản", rồi mở "Xưởng dịch".\n Chế độ "Giữ bố cục PDF" chưa dùng được: dịch vụ PDF đã dừng (xem CẢNH BÁO ở trên).\n'),run.text);
  await stopTree(run);
 });
 
@@ -164,7 +189,60 @@ test('launcher: a setup LỖI that left every needed file in place still starts 
  const run=launch(project({pdfPort:await freePort(),webPort:await freePort(),setup:FAKE.setup}),'--launcher');
  assert.ok(await until(()=>run.text.includes('bấm Ctrl+C để tắt.')),run.text);
  assert.ok(run.text.includes('\nApp vẫn khởi động; phần liên quan đến các LỖI ở trên có thể chưa dùng được.\n'),run.text);
- assert.ok(run.text.includes(' Hoa Trí đang chạy: http://127.0.0.1:48787/#account\n Lần đầu: "Tạo tài khoản", rồi mở "Xưởng dịch học tập".\n Giữ cửa sổ này'),`no PDF note when the service is ready:\n${run.text}`);
+ assert.ok(run.text.includes(' Hoa Trí đang chạy: http://127.0.0.1:48787/#account\n Lần đầu: "Tạo tài khoản", rồi mở "Xưởng dịch".\n Giữ cửa sổ này'),`no PDF note when the service is ready:\n${run.text}`);
  assert.equal(pids(run).length,2,run.text);
  await stopTree(run);
+});
+
+test('launcher: a refused git pull names why (a file edited here that the update changes, an unfinished stash pop, commits of this machine, else the network) and the banner says the old version runs',{skip:!git&&'git is not installed'},async()=>{
+ // A placeholder filled in a page the update also changes (ONBOARDING 5.1): git keeps the edit and refuses the update.
+ const edited=await cloned(),filled=TERMS.replace('[[CHƯA ĐIỀN: email]]','lienhe@example.invalid');
+ edited.upstream('frontend/dieu-khoan.html',TERMS.replace('Chân trang cũ','Chân trang mới'));write(join(edited.root,'frontend/dieu-khoan.html'),filled);
+ // The same line changed here and in the update: git stash, a pull and git stash pop left the file unmerged.
+ const unmerged=await cloned();write(join(unmerged.root,'frontend/dieu-khoan.html'),TERMS.replace('Chân trang cũ','Chân trang của trường'));
+ unmerged.upstream('frontend/dieu-khoan.html',TERMS.replace('Chân trang cũ','Chân trang mới'));
+ gitIn(unmerged.root,'stash','-q');gitIn(unmerged.root,'pull','-q','--ff-only');
+ const pop=gitRun(unmerged.root,['stash','pop']);assert.notEqual(pop.status,0);assert.match(`${pop.stdout}${pop.stderr}`,/CONFLICT/u);
+ // A commit of this machine (a deploy machine that committed its filled pages) next to a new version upstream.
+ const diverged=await cloned();diverged.upstream('frontend/dieu-khoan.html',TERMS.replace('Chân trang cũ','Chân trang mới'));
+ write(join(diverged.root,'docs/notes.txt'),'Ghi chú của máy này.\n');gitIn(diverged.root,'commit','-q','-am','Sửa trên máy này');
+ // GitHub out of reach (a folder that does not exist): git fetched nothing, so a local edit is not named as the cause.
+ const offline=await cloned();gitIn(offline.root,'remote','set-url','origin',join(offline.remote,'khong-co.git'));write(join(offline.root,'frontend/dieu-khoan.html'),filled);
+ const cases=[
+  [edited,'Không cập nhật được code mới vì frontend/dieu-khoan.html đã bị sửa trên máy này mà bản mới cũng sửa (git không ghi đè), nên vẫn chạy bản hiện có. Tắt cửa sổ này rồi chọn một cách: bỏ phần sửa bằng git checkout -- <tệp> rồi chạy lại start.cmd; hoặc giữ phần sửa bằng git stash, chạy lại start.cmd, rồi git stash pop (ONBOARDING mục 6.3).\n'],
+  [unmerged,'Không cập nhật được code mới vì frontend/dieu-khoan.html còn dở một lần gộp (trong tệp có dòng <<<<<<<), nên vẫn chạy bản hiện có. Tắt cửa sổ này, sửa theo ONBOARDING mục 6.3 (dòng "CONFLICT") rồi chạy lại start.cmd.\n'],
+  [diverged,'Không cập nhật được code mới vì nhánh trên máy này có commit riêng, nên vẫn chạy bản hiện có. Cập nhật bằng tay: tắt cửa sổ này, chạy git pull --no-rebase, rồi chạy lại start.cmd.\n'],
+  [offline,'Không cập nhật được code mới nên vẫn chạy bản hiện có. Thường do máy chưa có Internet, hoặc tệp trong thư mục dự án đã bị sửa trên máy này (git không ghi đè những thay đổi đó).\n']
+ ];
+ for(const [repo,said] of cases){
+  const head=repo.head(),run=launch(repo.root,'--launcher',{env:GIT_ENV});
+  assert.ok(await until(()=>run.text.includes('bấm Ctrl+C để tắt.')),run.text);
+  assert.ok(run.text.includes(said),run.text);
+  assert.equal(run.text.split('Không cập nhật được code mới').length,2,`one reason only:\n${run.text}`);
+  assert.ok(run.text.includes(`${BANNER}${OLD_VERSION} Giữ cửa sổ này`),`the banner says the old version runs:\n${run.text}`);
+  assert.equal(repo.head(),head,'nothing was pulled');
+  await stopTree(run);
+ }
+ assert.equal(edited.read('frontend/dieu-khoan.html'),filled,'the edit is kept');
+});
+
+test('launcher: an update that goes through keeps an edit the update does not touch and the banner says nothing of an old version; without git it says so, without that line either',{skip:!git&&'git is not installed'},async()=>{
+ const updated=await cloned(),next=updated.upstream('frontend/dieu-khoan.html',TERMS.replace('Chân trang cũ','Chân trang mới'));
+ write(join(updated.root,'docs/notes.txt'),'Ghi chú riêng.\n');
+ const run=launch(updated.root,'--launcher',{env:GIT_ENV});
+ assert.ok(await until(()=>run.text.includes('bấm Ctrl+C để tắt.')),run.text);
+ assert.equal(updated.head(),next,'the update is in');
+ assert.ok(updated.read('frontend/dieu-khoan.html').includes('Chân trang mới'));
+ assert.equal(updated.read('docs/notes.txt'),'Ghi chú riêng.\n','the edit is kept');
+ assert.ok(run.text.includes(`${BANNER} Giữ cửa sổ này`),run.text);
+ assert.doesNotMatch(run.text,/Không cập nhật được|Đây vẫn là bản cũ/u);
+ await stopTree(run);
+ // No git on PATH: the launcher says it cannot update and runs the version it has, with no "old version" line.
+ const noGit=await cloned(),empty=mkdtempSync(join(tmpdir(),'hoa-tri-path-'));folders.push(empty);
+ const none=launch(noGit.root,'--launcher',{env:{...GIT_ENV,PATH:empty}});
+ assert.ok(await until(()=>none.text.includes('bấm Ctrl+C để tắt.')),none.text);
+ assert.ok(none.text.includes('Máy chưa có lệnh git nên không tự cập nhật được code; vẫn chạy bản hiện có.\n'),none.text);
+ assert.ok(none.text.includes(`${BANNER} Giữ cửa sổ này`),none.text);
+ assert.doesNotMatch(none.text,/Đây vẫn là bản cũ/u);
+ await stopTree(none);
 });

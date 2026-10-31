@@ -179,7 +179,7 @@ async function createFirst(request,env,url,username,body){
   db.prepare('INSERT INTO admin_sessions(token_hash,admin_id,created_at,last_seen_at,expires_at) SELECT ?1,id,?3,?3,?4 FROM admin_users WHERE id=?2').bind(session.hash,id,session.createdAt,session.expiresAt)
  ]);
  if(!results[0]?.meta?.changes)return json({error:'Tài khoản quản trị đầu tiên vừa được tạo ở nơi khác. Hãy tải lại trang rồi đăng nhập.',code:'admin_exists'},409);
- logEvent('admin_account',{action:'created_first'});
+ logEvent('admin_account',{action:'created_first'},'info');
  return signedIn(json({admin:{username:username.display,name},created:true},201),session.cookie,await deviceCookie(request,username.normalized,credential,url,null,ADMIN_DEVICE));
 }
 // A forgotten password: the named admin gets the new one, every session of hers ends, the wrong-password counts that could
@@ -198,7 +198,7 @@ async function recover(request,env,url,username,typed,ip){
  ]);
  if(!results[0]?.meta?.changes)return json({error:'Tài khoản quản trị này vừa bị xóa hoặc khóa. Hãy tải lại trang.',code:'admin_not_found'},404);
  await clearFailures(env,[`admin-login-user:${user}`,`admin-login:${user}|${ip}`,`admin-password:${record.id}`,...(device?[`admin-login-device:${user}|${device}`]:[])]);
- logEvent('admin_account',{action:'recovered'});
+ logEvent('admin_account',{action:'recovered'},'info');
  return signedIn(json({admin:publicAdmin(record),created:false}),session.cookie,await deviceCookie(request,user,credential,url,device,ADMIN_DEVICE));
 }
 // The signed-in admin's own password (body.currentPassword), asked again for what outlasts the session (her new
@@ -232,7 +232,7 @@ async function changePassword(request,env,url,admin){
   db.prepare(`INSERT INTO admin_sessions(token_hash,admin_id,created_at,last_seen_at,expires_at) SELECT ?3,?1,?4,?4,?5 WHERE ${changed}`).bind(record.id,credential.password_hash,session.hash,session.createdAt,session.expiresAt)
  ]);
  if(!results[0]?.meta?.changes)return json({error:'Mật khẩu vừa được đổi ở nơi khác. Hãy tải lại trang rồi đăng nhập lại.',code:'password_changed'},409);
- logEvent('admin_account',{action:'password_changed'});
+ logEvent('admin_account',{action:'password_changed'},'info');
  // ended: the other sessions; this browser's old one was replaced.
  return signedIn(json({ok:true,ended:Math.max(0,(results[1]?.meta?.changes||0)-1)}),session.cookie,await deviceCookie(request,user,credential,url,device,ADMIN_DEVICE));
 }
@@ -255,7 +255,7 @@ async function addAdmin(request,env,admin){
  // Two adds of one name sent at once: the unique index decides.
  catch(error){if(/UNIQUE/iu.test(String(error?.message||'')))return taken();throw error;}
  if(!added?.meta?.changes)return taken();
- logEvent('admin_account',{action:'added'});
+ logEvent('admin_account',{action:'added'},'info');
  return json({admin:listed(await env.DB.prepare('SELECT id,username,name,created_at,last_login_at FROM admin_users WHERE id=?').bind(id).first(),admin)},201);
 }
 async function removeAdmin(request,env,id,admin){
@@ -268,7 +268,7 @@ async function removeAdmin(request,env,id,admin){
   // Her sessions end with the account, also where foreign keys are off.
   db.prepare('DELETE FROM admin_sessions WHERE admin_id=?1 AND NOT EXISTS (SELECT 1 FROM admin_users WHERE id=?1)').bind(id)
  ]);
- if(results[0]?.meta?.changes){logEvent('admin_account',{action:'removed'});return json({ok:true});}
+ if(results[0]?.meta?.changes){logEvent('admin_account',{action:'removed'},'info');return json({ok:true});}
  return await db.prepare('SELECT 1 AS present FROM admin_users WHERE id=?').bind(id).first()?json({error:'Không thể xóa quản trị viên cuối cùng: Hoa Trí cần ít nhất một tài khoản quản trị.',code:'admin_last'},409):json({error:'Không tìm thấy tài khoản quản trị.',code:'admin_not_found'},404);
 }
 

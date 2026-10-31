@@ -22,7 +22,7 @@ Công cụ làm bản dịch mẫu giữ bố cục trang **mà không gọi Gem
   - Mã không bị in ra hay ghi vào tệp nào.
   - Từ bản 27/10/2026 người dùng trang `/admin` đăng nhập bằng tài khoản quản trị (tên đăng nhập và mật khẩu); công cụ này không dùng tài khoản đó mà vẫn dùng `ADMIN_TOKEN` như mọi công cụ dòng lệnh, nên vẫn đăng được khi máy chủ chưa có tài khoản quản trị nào. Trên máy chủ ngoài máy này, `ADMIN_TOKEN` phải dài ít nhất 32 ký tự, không thì máy chủ từ chối ("Mã quản trị không được … chấp nhận.").
 - Chỉ đăng khi `rights.confirmed` trong `sample.json` là `true`: chủ sách xác nhận được phép công bố các trang gốc và bản dịch.
-- Ví dụ mẫu không tạo bản dịch (job) nào, nên Xưởng dịch không bao giờ giới thiệu nó như bản dịch đã công bố của cùng tệp: dòng "Học liệu của Hoa Trí đã công bố bản dịch của đúng tệp này" chỉ hiện với bản dịch do xưởng dịch admin công bố.
+- Ví dụ mẫu không tạo bản dịch (job) nào, nên Xưởng dịch không bao giờ giới thiệu nó như bản dịch đã công bố của cùng tệp: dòng "Thư viện chung đã có bản dịch của tệp này: “…”" chỉ hiện với bản dịch do xưởng dịch admin công bố.
 
 ## Các bước
 

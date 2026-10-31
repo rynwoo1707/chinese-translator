@@ -137,6 +137,13 @@ if(current('PDF_LAYOUT_SERVICE_TOKEN').length<24){setVar('PDF_LAYOUT_SERVICE_TOK
 if(!current('PDF_LAYOUT_SERVICE_URL'))setVar('PDF_LAYOUT_SERVICE_URL','http://127.0.0.1:8091');
 for(const [key,value] of Object.entries(machine))if(current(key)!==value){setVar(key,value);console.log(`Đã ghi ${key} cho máy này.`);}
 if(vars!==saved)writeFileSync('.dev.vars',vars);
+// A .dev.vars line wins over "vars" of wrangler.jsonc on this machine: a GEMINI_MODEL kept from an older .dev.vars.example
+// (main's had gemini-2.5-flash) holds every "Cách dịch" without a model of its own on that model, also after an update
+// changes the default.
+try{
+ const {parseJsonc}=await import('./deploy.mjs'),shipped=parseJsonc(readFileSync('wrangler.jsonc','utf8')).vars?.GEMINI_MODEL,local=current('GEMINI_MODEL');
+ if(shipped&&local&&local!==shipped)warnings.push(`.dev.vars đặt GEMINI_MODEL=${local}, khác model mặc định ${shipped} trong wrangler.jsonc, nên trên máy này mọi "Cách dịch" chưa có model riêng đều dùng ${local}. Không cố ý thì sửa dòng đó thành GEMINI_MODEL=${shipped} rồi chạy lại.`);
+}catch{}
 
 step(7,'Cơ sở dữ liệu D1 cục bộ (.wrangler)');
 // stdin is not a terminal here, so wrangler applies the pending migrations without asking.

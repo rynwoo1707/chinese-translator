@@ -39,7 +39,9 @@ export const clientIp=request=>addressKey(request.headers.get('CF-Connecting-IP'
 // Ids and hashes are dropped from logged paths: a log line names the route, never a user's document.
 export const routeLabel=path=>String(path||'').split('/').map(part=>/^[a-f\d-]{16,}$/iu.test(part)||/^\d+$/u.test(part)||part.length>40?':id':part).join('/');
 // One JSON line per event, for Workers Logs. Callers pass names and short messages only: no headers, bodies or env.
-export function logEvent(event,fields={}){try{console.error(JSON.stringify({event,...fields}));}catch{}}
+// level 'info' is for a change that went as intended (an admin account created): console.log, so neither Workers Logs
+// nor the start.cmd window ("X [ERROR] …") shows it as an error. Every other event is a problem and goes to console.error.
+export function logEvent(event,fields={},level='error'){try{const line=JSON.stringify({event,...fields});if(level==='info')console.log(line);else console.error(line);}catch{}}
 
 const HEADERS={'X-Content-Type-Options':'nosniff','X-Frame-Options':'SAMEORIGIN','Cross-Origin-Resource-Policy':'same-origin','Referrer-Policy':'no-referrer'};
 // API responses are data, never pages. PDFs get no CSP: a restrictive policy breaks the browser's built-in PDF viewer,

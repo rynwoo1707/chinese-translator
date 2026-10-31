@@ -13,11 +13,13 @@ const MINUTE=60*1000,HOUR=60*MINUTE,WRONG={error:'Tên đăng nhập hoặc mậ
 // The session cookie as every sign-in sets it (setup, login, recovery, a password change): a session cookie, with neither
 // Max-Age nor Expires, so the browser drops it when it closes; the server ends the session after 12 hours all the same.
 const SESSION_COOKIE=/^cat_hien_admin=[A-Za-z0-9_-]{43}; Path=\/api\/; HttpOnly; SameSite=Strict; Secure$/u;
-// The log lines of a test (account changes are logged, admin-auth.js) are kept rather than printed; logs(t) reads them.
-const captured=new WeakMap();
-function logs(t){if(!captured.has(t)){const lines=[];t.mock.method(console,'error',line=>lines.push(String(line)));captured.set(t,lines);}return captured.get(t);}
-// The JSON events among them (the runtime may print a warning of its own).
+// The log lines of a test (account changes are logged, admin-auth.js) are kept rather than printed; logs(t) reads them,
+// from console.error (level 'error') and console.log (level 'info').
+const captured=new WeakMap(),levels=new WeakMap();
+function logs(t){if(!captured.has(t)){const lines=[],level=[];for(const [method,name] of [['error','error'],['log','info']])t.mock.method(console,method,line=>{lines.push(String(line));level.push(name);});captured.set(t,lines);levels.set(lines,level);}return captured.get(t);}
+// The JSON events among them (the runtime may print a warning of its own), and the level each event was logged at.
 const events=lines=>lines.flatMap(line=>{try{return [JSON.parse(line)];}catch{return [];}});
+const levelsOf=(lines,event)=>lines.flatMap((line,i)=>{try{return JSON.parse(line).event===event?[levels.get(lines)[i]]:[];}catch{return [];}});
 const environment=(t,vars={})=>{logs(t);return sqliteEnvironment(t,{vars:{ADMIN_TOKEN:TOKEN,...vars}});};
 // One browser: it keeps the cookies the server sets (a cleared one is dropped) and sends them back, with
 // X-Hoa-Tri-Admin: 1 as the admin console sends it (admin:false leaves the header out, as a public page does).
@@ -223,6 +225,7 @@ test('Logout ends this session only; a logout with no session or from no admin s
  const lines=logs(t),failed=await phone.send('/api/admin/logout',{method:'POST'});env.DB.prepare=prepare;
  assert.equal(failed.status,503);assert.equal(failed.json.code,'logout_incomplete');assert.match(failed.cookies[0],/^cat_hien_admin=; .*Max-Age=0/u);assert.equal(phone.jar.has('cat_hien_admin'),false);
  assert.ok(events(lines).some(entry=>entry.event==='admin_session_error'&&/storage unavailable/u.test(entry.message)));
+ const failures=levelsOf(lines,'admin_session_error');assert.ok(failures.length&&failures.every(level=>level==='error'),'a failure stays an error line');
 });
 
 test('Changing the password needs the current one, follows the rules, ends the other sessions and gives this browser a new one',async t=>{
@@ -245,6 +248,8 @@ test('Changing the password needs the current one, follows the rules, ends the o
  for(let i=0;i<10;i++)assert.equal((await change(admin,{currentPassword:`doan-${i}-sai-roi`,newPassword:'mot-mat-khau-moi-han'})).status,403);
  const locked=await change(admin,{currentPassword:NEW_PASSWORD,newPassword:'mot-mat-khau-moi-han'});
  assert.equal(locked.status,429);assert.equal(locked.json.scope,'failures');assert.match(locked.json.error,/^Mật khẩu quản trị đã bị nhập sai quá nhiều lần\. Hãy đợi khoảng 1 phút rồi thử lại\. Nếu quên mật khẩu, hãy bấm “Quên mật khẩu\?” và đặt lại bằng mã ADMIN_TOKEN\.$/u);
+ const lines=logs(t);assert.deepEqual(events(lines).filter(entry=>entry.event==='admin_account').map(entry=>entry.action),['created_first','password_changed']);
+ assert.deepEqual(levelsOf(lines,'admin_account'),['info','info'],'a password change is logged as info, not as an error');
 });
 
 test('Wrong passwords lock a username where they come from; the admin\'s own browser keeps signing in; the token recovery clears the rest',async t=>{
@@ -285,6 +290,8 @@ test('Wrong passwords lock a username where they come from; the admin\'s own bro
  assert.equal((await guesser.setup({token:'sai-van-sai'})).status,429,'and leaves the lock on wrong ones');
  assert.equal((await browser(env,{ip:'192.0.2.14'}).setup({token:'sai-o-mang-khac'})).status,403,'another network is not counted with it');
  tick(61*1000);assert.equal((await guesser.setup({token:'sai-sau-mot-phut'})).status,403,'a minute later a wrong token is checked and counted again');
+ const lines=logs(t);assert.deepEqual(events(lines).filter(entry=>entry.event==='admin_account').map(entry=>entry.action),['created_first','recovered','recovered']);
+ assert.deepEqual(levelsOf(lines,'admin_account'),['info','info','info'],'a recovery is logged as info, not as an error');
 });
 
 test('A locked admin account cannot sign in and its sessions stop counting',async t=>{
@@ -333,8 +340,10 @@ test('Admins list, add and remove each other; never oneself, never the last one;
  assert.deepEqual(answers.filter(answer=>answer.status===200).length,1);assert.equal(sqlite.prepare('SELECT COUNT(*) AS n FROM admin_users').get().n,1);
  // Unknown methods and paths of /api/admin/ say so.
  assert.equal((await lan.send('/api/admin/login')).status,405);assert.equal((await lan.send('/api/admin/admins',{method:'PUT',body:{}})).status,405);assert.equal((await browser(env).send('/api/admin/khong-co')).status,401);
- // Each change to the accounts is one log line naming what happened, never who or with which password.
+ // Each change to the accounts is one log line naming what happened, never who or with which password. It went as
+ // intended, so it is an info line: the start.cmd window must not print the first admin's creation as "X [ERROR]".
  const lines=logs(t);assert.deepEqual(events(lines).filter(entry=>entry.event==='admin_account').map(entry=>entry.action),['created_first','added','removed','added','removed']);
+ assert.deepEqual(levelsOf(lines,'admin_account'),['info','info','info','info','info']);
  assert.ok(events(lines).map(entry=>JSON.stringify(entry)).every(line=>!/minh|lan|an\.tran|cô|thầy/iu.test(line)&&![PASSWORD,NEW_PASSWORD,TOKEN].some(secret=>line.includes(secret))),lines.join('\n'));
 });
 
