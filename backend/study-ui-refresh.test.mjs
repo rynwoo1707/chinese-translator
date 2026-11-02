@@ -151,7 +151,7 @@ test('Xuất PDF tiếng Việt on the old layout offers the refresh first; "V�
   await page.waitForFunction(()=>!/đang tải/u.test(document.querySelector('#study-history-count').textContent));
   if(!await page.evaluate(()=>document.querySelector('#study-history').open))await page.click('#study-history > summary');
   await page.click(`[data-history-open="${OLD}"]`);await page.waitForFunction(()=>!document.querySelector('#download-pdf').disabled);
-  await page.click('#download-pdf');await page.waitForFunction(()=>document.querySelector('#book-dialog').open);
+  await page.click('#download-menu');await page.click('#download-pdf');await page.waitForFunction(()=>document.querySelector('#book-dialog').open);
   assert.equal(await page.textContent('#book-dialog-title'),'Bố cục của phần này đã cũ');assert.equal(await page.textContent('#book-dialog-submit'),'Cập nhật bố cục');
   assert.equal(account.calls.render,0,'not exported before the student chooses');
   // The export is downloaded as before (and the download finished before the page closes, which the shared browser needs).
@@ -168,7 +168,7 @@ test('A part this extractor read is offered nothing: no notice, and Xuất PDF t
  const {context,page,errors}=await openStudy(api,`/study?history=${OLD}&refresh=1`);
  try{
   await page.waitForFunction(()=>!document.querySelector('#download-pdf').disabled);assert.equal(await notice(page),null);
-  const downloaded=page.waitForEvent('download');await page.click('#download-pdf');const download=await downloaded;await download.delete();
+  const downloaded=page.waitForEvent('download');await page.click('#download-menu');await page.click('#download-pdf');const download=await downloaded;await download.delete();
   await waitProgress(page,/^PDF tiếng Việt đã được lưu vào Thư viện riêng/u);
   assert.deepEqual(account.renderBodies,[{assetId:OLD_ASSET,historyId:OLD}]);assert.equal(account.calls.refresh,0,'no refresh asked when the stamps match');
   assert.equal(await page.evaluate(()=>document.querySelector('#book-dialog').open),false);assert.deepEqual(errors,[]);

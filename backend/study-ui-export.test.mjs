@@ -80,7 +80,7 @@ test('Inside Zalo a download first says how to open the page in Safari, with the
  const {context,page,errors}=await openStudy({api:textSession,options:{userAgent:ZALO_IPHONE}});let downloads=0;page.on('download',()=>{downloads++;});
  try{
   await historyLoaded(page);await openHistoryItem(page,TEXT_ID);await waitProgress(page,/Bản dịch đã hoàn tất/u);
-  await page.click('#download');await page.waitForSelector('#book-dialog[open]');
+  await page.click('#download-menu');await page.click('#download');await page.waitForSelector('#book-dialog[open]');
   const dialog=await page.evaluate(()=>({title:document.querySelector('#book-dialog-title').textContent,body:document.querySelector('#book-dialog-body p').textContent,address:document.querySelector('#in-app-address').value,submit:document.querySelector('#book-dialog-submit').textContent,focused:document.activeElement.id}));
   assert.equal(dialog.title,'Mở bằng Safari để tải tệp về máy');assert.equal(dialog.address,`${ORIGIN}/study`);assert.equal(dialog.submit,'Vẫn tải ở đây');assert.equal(dialog.focused,'book-dialog-title');
   assert.match(dialog.body,/^Bạn đang mở Hoa Trí trong trình duyệt riêng của Zalo\. Trình duyệt này thường không lưu được tệp tải về\. Hãy bấm nút ⋯ \(hoặc biểu tượng chia sẻ\) rồi chọn “Mở trong Safari”/u);
@@ -92,7 +92,7 @@ test('Inside Zalo a download first says how to open the page in Safari, with the
   // read to its end before the context can close: Edge 155 crashes the shared browser on a context closed mid-download
   const file=await download;assert.equal(file.suggestedFilename(),'Luận ngữ.vi.txt');assert.ok(await file.path());await page.waitForFunction(()=>!document.querySelector('#book-dialog').open);
   // Hủy downloads nothing.
-  await page.click('#download');await page.waitForSelector('#book-dialog[open]');await page.click('#book-dialog-cancel');await page.waitForTimeout(300);
+  await page.click('#download-menu');await page.click('#download');await page.waitForSelector('#book-dialog[open]');await page.click('#book-dialog-cancel');await page.waitForTimeout(300);
   assert.equal(downloads,1);assert.deepEqual(errors,[]);
  }finally{await context.close();}
 });
@@ -101,13 +101,37 @@ test('A download outside such apps starts at once, and its address stays valid u
  const {context,page,errors}=await openStudy({api:textSession,init:DOWNLOAD_LOG});
  try{
   await historyLoaded(page);await openHistoryItem(page,TEXT_ID);await waitProgress(page,/Bản dịch đã hoàn tất/u);
-  const download=page.waitForEvent('download');await page.click('#download');const file=await download;assert.equal(file.suggestedFilename(),'Luận ngữ.vi.txt');assert.ok(await file.path());
+  const download=page.waitForEvent('download');await page.click('#download-menu');await page.click('#download');const file=await download;assert.equal(file.suggestedFilename(),'Luận ngữ.vi.txt');assert.ok(await file.path());
   assert.equal(await page.$('#book-dialog[open]'),null,'no dialog in an ordinary browser');
   await page.waitForTimeout(2500);
   const [url]=await page.evaluate(()=>window.__downloads);assert.match(url,/^blob:/u);
   assert.equal((await page.evaluate(()=>window.__revoked)).includes(url),false,'still valid 2.5 s later (a browser inside an app may read it late)');
   await page.evaluate(()=>dispatchEvent(new PageTransitionEvent('pagehide',{persisted:false})));
   assert.equal((await page.evaluate(()=>window.__revoked)).filter(item=>item===url).length,1,'freed when the page is left');
+  assert.deepEqual(errors,[]);
+ }finally{await context.close();}
+});
+
+// The three downloads give one translation in three formats, so they are one "Tải xuống ▾": the list holds the old buttons
+// in their old order, with their old labels and greyed states; the button is greyed only when all three are.
+for(const viewport of [{width:1280,height:900},{width:390,height:844}])test(`"Tải xuống ▾" holds the three downloads as they were; Esc, a click outside or Tab out closes it (${viewport.width} px)`,{skip,timeout:60000},async()=>{
+ const {context,page,errors}=await openStudy({api:textSession,viewport});
+ const state=()=>page.evaluate(()=>({menu:document.querySelector('#download-menu').disabled,expanded:document.querySelector('#download-menu').getAttribute('aria-expanded'),open:!document.querySelector('#download-list').hidden,items:[...document.querySelectorAll('#download-list button')].map(item=>`${item.id}:${item.textContent}:${item.disabled?'off':'on'}`),focused:document.activeElement?.id||''}));
+ const OFF=['download-pdf:Xuất PDF tiếng Việt:off','download:Tải .txt:off','download-rich:Tải HTML có hình:off'];
+ try{
+  await historyLoaded(page);
+  assert.deepEqual({...await state(),focused:undefined},{menu:true,expanded:'false',open:false,items:OFF,focused:undefined},'nothing to download yet: one greyed button, as the three were');
+  await openHistoryItem(page,TEXT_ID);await waitProgress(page,/Bản dịch đã hoàn tất/u);
+  await page.click('#download-menu');
+  assert.deepEqual(await state(),{menu:false,expanded:'true',open:true,items:[OFF[0],'download:Tải .txt:on',OFF[2]],focused:'download-menu'});
+  const box=await page.locator('#download-list').boundingBox();assert.ok(box.x>=0&&box.x+box.width<=viewport.width,JSON.stringify(box));
+  await page.keyboard.press('Escape');assert.deepEqual(await state(),{menu:false,expanded:'false',open:false,items:[OFF[0],'download:Tải .txt:on',OFF[2]],focused:'download-menu'});
+  await page.click('#download-menu');await page.click('.result-head h2');assert.equal((await state()).open,false,'a click outside closes it');
+  await page.click('#download-menu');await page.focus('#download');await page.keyboard.press('Tab');assert.equal((await state()).open,false,'Tab out of the list closes it');
+  // Choosing a format closes the list, gives the focus back to the button and downloads as before.
+  const download=page.waitForEvent('download');await page.click('#download-menu');await page.click('#download');
+  const file=await download;assert.equal(file.suggestedFilename(),'Luận ngữ.vi.txt');assert.ok(await file.path());
+  assert.deepEqual({...await state(),items:undefined},{menu:false,expanded:'false',open:false,items:undefined,focused:'download-menu'});
   assert.deepEqual(errors,[]);
  }finally{await context.close();}
 });

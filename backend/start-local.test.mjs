@@ -57,7 +57,7 @@ async function cloned(){
  const upstream=(file,text)=>{const other=mkdtempSync(join(tmpdir(),'hoa-tri-other-'));folders.push(other);gitIn(other,'clone','-q',remote,'.');write(join(other,file),text);gitIn(other,'commit','-q','-am','Bản mới');gitIn(other,'push','-q');return gitIn(other,'rev-parse','HEAD');};
  return {root,remote,upstream,head:()=>gitIn(root,'rev-parse','HEAD'),read:file=>readFileSync(join(root,file),'utf8')};
 }
-const BANNER=' Lần đầu: "Tạo tài khoản", rồi mở "Xưởng dịch".\n',OLD_VERSION=' Đây vẫn là bản cũ: chưa cập nhật được code mới (xem dòng "Không cập nhật được" ở trên).\n';
+const BANNER=' Lần đầu: "Tạo tài khoản", rồi mở "Xưởng dịch học tập".\n',OLD_VERSION=' Đây vẫn là bản cũ: chưa cập nhật được code mới (xem dòng "Không cập nhật được" ở trên).\n';
 
 // The project as start-local.mjs sees it. Launcher tests (setup given) also get an installed node_modules newer than
 // package-lock.json, so npm ci never runs, and a wrangler.jsonc dev port, so the running check never looks at 8787.
@@ -124,7 +124,7 @@ test('a PDF service that stops (its port is taken) leaves the web app running, w
  assert.equal(run.code,undefined,`start-local stopped:\n${run.text}`);
  const [web]=pids(run,'WEB');assert.ok(web&&alive(web),run.text);
  assert.ok(run.text.includes(`CẢNH BÁO: dịch vụ PDF đã dừng (mã 1) nên chế độ "Giữ bố cục PDF" không dùng được cho tới khi sửa lỗi rồi chạy lại; các phần khác của app vẫn chạy.\nCổng ${port} của dịch vụ PDF đang bận: có thể Hoa Trí đang chạy ở một cửa sổ khác (tắt cửa sổ đó rồi chạy lại), hoặc một chương trình khác đang dùng cổng này (sửa dòng PDF_LAYOUT_SERVICE_URL trong tệp .dev.vars sang cổng khác, ví dụ "PDF_LAYOUT_SERVICE_URL=http://127.0.0.1:${port+1}", rồi chạy lại).\n`),run.text);
- assert.ok(run.text.includes(' Hoa Trí đang chạy: http://127.0.0.1:48787/#account\n Lần đầu: "Tạo tài khoản", rồi mở "Xưởng dịch".\n Chế độ "Giữ bố cục PDF" chưa dùng được: dịch vụ PDF đã dừng (xem CẢNH BÁO ở trên).\n'),run.text);
+ assert.ok(run.text.includes(' Hoa Trí đang chạy: http://127.0.0.1:48787/#account\n Lần đầu: "Tạo tài khoản", rồi mở "Xưởng dịch học tập".\n Chế độ "Giữ bố cục PDF" chưa dùng được: dịch vụ PDF đã dừng (xem CẢNH BÁO ở trên).\n'),run.text);
  await stopTree(run);
 });
 
@@ -189,7 +189,7 @@ test('launcher: a setup LỖI that left every needed file in place still starts 
  const run=launch(project({pdfPort:await freePort(),webPort:await freePort(),setup:FAKE.setup}),'--launcher');
  assert.ok(await until(()=>run.text.includes('bấm Ctrl+C để tắt.')),run.text);
  assert.ok(run.text.includes('\nApp vẫn khởi động; phần liên quan đến các LỖI ở trên có thể chưa dùng được.\n'),run.text);
- assert.ok(run.text.includes(' Hoa Trí đang chạy: http://127.0.0.1:48787/#account\n Lần đầu: "Tạo tài khoản", rồi mở "Xưởng dịch".\n Giữ cửa sổ này'),`no PDF note when the service is ready:\n${run.text}`);
+ assert.ok(run.text.includes(' Hoa Trí đang chạy: http://127.0.0.1:48787/#account\n Lần đầu: "Tạo tài khoản", rồi mở "Xưởng dịch học tập".\n Giữ cửa sổ này'),`no PDF note when the service is ready:\n${run.text}`);
  assert.equal(pids(run).length,2,run.text);
  await stopTree(run);
 });

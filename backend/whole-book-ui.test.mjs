@@ -563,7 +563,7 @@ test('Dịch cả quyển: a chunk whose export finds translations longer than t
   assert.deepEqual(viewer,{page:'Trang 5 · 4/20',open:true,block:'p5-b1',outlined:['p5-b1']});assert.equal(fake.state.renders,1,'opening the part asks nothing of the PDF service');
   // Shortened, saved and exported: the book is complete again.
   await page.fill('[data-pdf-edit-text]','Bản dịch ngắn.');await page.click('[data-pdf-edit-save]');await page.waitForFunction(()=>/^Đã lưu đoạn sửa\./u.test(document.querySelector('#progress').textContent));
-  const download=page.waitForEvent('download');await page.click('#download-pdf');const file=await download;assert.ok(await file.path());
+  const download=page.waitForEvent('download');await page.click('#download-menu');await page.click('#download-pdf');const file=await download;assert.ok(await file.path());
   await page.waitForFunction(()=>/^PDF tiếng Việt đã được lưu vào Thư viện riêng/u.test(document.querySelector('#progress').textContent),null,{timeout:60000});
   await page.waitForFunction(()=>/Dịch cả quyển · Đã dịch 24\/24 trang · Hoàn tất/u.test(document.querySelector('#study-books-list .book-job').textContent),null,{timeout:30000});
   assert.equal(fake.state.renders,2);assert.deepEqual(errors,[]);assert.deepEqual(fake.state.failures,undefined);

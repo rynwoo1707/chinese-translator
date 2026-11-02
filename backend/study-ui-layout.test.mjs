@@ -283,11 +283,11 @@ test('An export refused for translations longer than their boxes says so in the 
   await page.waitForFunction(()=>document.querySelectorAll('#pdf-dual-viewer .is-overflow').length===1);state=await viewerState(page);
   assert.deepEqual(state.outlined,['p2-b2']);assert.doesNotMatch(state.options[0],/Dài hơn khung chữ/u);assert.match(state.options[1],/Dài hơn khung chữ$/u);
   // Exported again: the one still too long is opened in turn; once it is shortened too, the PDF is exported and downloaded.
-  await page.click('#download-pdf');await waitProgressText(page,overflowAnswer(document,refusals[1]).json.error);await idle(page);
+  await page.click('#download-menu');await page.click('#download-pdf');await waitProgressText(page,overflowAnswer(document,refusals[1]).json.error);await idle(page);
   await page.waitForFunction(()=>document.querySelector('#pdf-dual-viewer [data-pdf-edit-select]').value==='p2-b2');
   assert.equal((await viewerState(page)).text,translated('p2-b2'));
   await page.fill('[data-pdf-edit-text]','Cũng ngắn.');await page.click('[data-pdf-edit-save]');await waitProgress(page,/^Đã lưu đoạn sửa\./u);
-  const download=page.waitForEvent('download');await page.click('#download-pdf');
+  const download=page.waitForEvent('download');await page.click('#download-menu');await page.click('#download-pdf');
   // The file is read to its end before the context closes: Edge 155 crashes (0xC0000005), taking every other page of the
   // shared browser with it, when a context is closed while its download is still being written.
   const file=await download;assert.equal(file.suggestedFilename(),'Bài giữ bố cục.vi.pdf');assert.ok(await file.path());
@@ -447,7 +447,7 @@ test('A finished part whose export was refused says so in the history, and opene
   assert.equal(account.calls.render,1,'opening the part asks nothing of the PDF service');
   // Shortened, saved and exported: the history stops saying the part lacks its PDF.
   await page.fill('[data-pdf-edit-text]','Ngắn.');await page.click('[data-pdf-edit-save]');await waitProgress(page,/^Đã lưu đoạn sửa\./u);
-  const download=page.waitForEvent('download');await page.click('#download-pdf');const file=await download;assert.ok(await file.path());
+  const download=page.waitForEvent('download');await page.click('#download-menu');await page.click('#download-pdf');const file=await download;assert.ok(await file.path());
   await waitProgress(page,/^PDF tiếng Việt đã được lưu vào Thư viện riêng/u);
   await page.waitForFunction(()=>!/chưa có PDF tiếng Việt/u.test(document.querySelector('#study-history-list').textContent));
   assert.deepEqual(again.errors,[]);
@@ -481,7 +481,7 @@ test('Bắt đầu dịch translating again a block left in Chinese takes the pa
   await page.click('#translate');await waitProgressText(page,overflowAnswer(document,['p1-b2']).json.error);await idle(page);
   assert.equal(pdf,false);await waitCard(/^Hoàn tất · trang 1 · chưa có PDF tiếng Việt$/u);
   // Exported as it is, the part has its PDF again.
-  const download=page.waitForEvent('download');await page.click('#download-pdf');const file=await download;assert.ok(await file.path());
+  const download=page.waitForEvent('download');await page.click('#download-menu');await page.click('#download-pdf');const file=await download;assert.ok(await file.path());
   await waitProgress(page,/^PDF tiếng Việt đã được lưu vào Thư viện riêng/u);await idle(page);await waitCard(/^Hoàn tất · trang 1$/u);
   // Asked again for p1-b3: the save drops the PDF; the new export waits for a busy service, and Dừng ends that wait.
   await page.click('#translate');await waitProgress(page,/^Dịch vụ PDF đang bận vì nhiều người dùng cùng lúc\. Tự thử lại sau \d+ giây… Bấm Dừng để thôi chờ\.$/u);
@@ -519,7 +519,7 @@ test('A finished part that no longer belongs to a book (its book deleted, or its
   account.session.pdfLayout={assetId:ASSET,exported:true,renderVersion:3};
   await page.click(`[data-history-open="${SESSION}"]`);await waitProgressText(page,`${DETACHED}. PDF tiếng Việt đã xuất trước đó vẫn xem và tải được ở đây.`,15000);await idle(page);
   await page.waitForFunction(()=>document.querySelector('#pdf-dual-viewer [data-pdf-render-state]').textContent==='PDF đã xuất');
-  const download=page.waitForEvent('download');await page.click('#download-pdf');const file=await download;assert.ok(await file.path());await idle(page);assert.equal(account.calls.render,0);
+  const download=page.waitForEvent('download');await page.click('#download-menu');await page.click('#download-pdf');const file=await download;assert.ok(await file.path());await idle(page);assert.equal(account.calls.render,0);
   // A text translation outside any book is not said to be in Thư viện riêng either.
   await page.click(`[data-history-open="${TEXT}"]`);await waitProgressText(page,`${DETACHED}; bản dịch vẫn xem được ở đây.`,15000);await idle(page);
   assert.equal(await card(),'Hoàn tất · trang 1');

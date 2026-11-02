@@ -91,7 +91,7 @@ function openBrowser(url){
 function announce(){
  if(announced||!webUrl||pdfState==='starting')return;announced=true;const url=`${webUrl}/#account`;
  const note={stopped:'\n Chế độ "Giữ bố cục PDF" chưa dùng được: dịch vụ PDF đã dừng (xem CẢNH BÁO ở trên).',slow:'\n Dịch vụ PDF (chế độ "Giữ bố cục PDF") còn đang khởi động; các phần khác dùng được ngay.'}[pdfState]||'',old=stale?'\n Đây vẫn là bản cũ: chưa cập nhật được code mới (xem dòng "Không cập nhật được" ở trên).':'';
- console.log(`\n================================================================\n Hoa Trí đang chạy: ${url}\n Lần đầu: "Tạo tài khoản", rồi mở "Xưởng dịch".${old}${note}\n Giữ cửa sổ này mở trong lúc dùng; bấm Ctrl+C để tắt.\n================================================================\n`);
+ console.log(`\n================================================================\n Hoa Trí đang chạy: ${url}\n Lần đầu: "Tạo tài khoản", rồi mở "Xưởng dịch học tập".${old}${note}\n Giữ cửa sổ này mở trong lúc dùng; bấm Ctrl+C để tắt.\n================================================================\n`);
  if(!process.env.HOATRI_NO_BROWSER)openBrowser(url);
 }
 process.on('SIGINT',()=>stop(0));process.on('SIGTERM',()=>stop(0));

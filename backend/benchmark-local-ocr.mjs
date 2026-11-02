@@ -78,7 +78,7 @@ try{
  await page.locator('#translate').click();
  await page.waitForFunction(number=>document.querySelector('.translation-part.done summary')?.textContent.startsWith(`Trang ${number} ·`),pages.at(-1),{timeout:240_000});
  assert.equal(await page.locator('.aligned-original').count(),1);
- const downloading=page.waitForEvent('download');await page.locator('#download-rich').click();const download=await downloading;
+ const downloading=page.waitForEvent('download');await page.locator('#download-menu').click();await page.locator('#download-rich').click();const download=await downloading;
  await download.saveAs(fileURLToPath(new URL('export.html',output)));
  const exported=await readFile(new URL('export.html',output),'utf8');assert.match(exported,/data:image\/webp;base64,/);assert.match(exported,new RegExp(`Trang gốc ${pages.at(-1)}`));
  const fallbackPage=await browser.newPage();await fallbackPage.route('**/vendor/paddle/worker.js',route=>route.abort());await fallbackPage.goto(origin+'/study.html');const beforeFallback=translationCalls;

@@ -2094,6 +2094,19 @@ $('#api-key').addEventListener('input',event=>{event.currentTarget.setCustomVali
 $('#clear-key').addEventListener('click',()=>{sessionKey='';$('#api-key').value='';$('#key-status').textContent='Chưa nạp khóa cho phiên này.';status('Đã xóa khóa API khỏi phiên.');});
 $('#download').addEventListener('click',()=>{const text=$('#translation').value,filename=downloadFilename('txt');offerDownload(()=>saveFile(new Blob(['\uFEFF'+text],{type:'text/plain;charset=utf-8'}),filename)).catch(fail);});
 $('#download-rich').addEventListener('click',()=>offerDownload(downloadRichHtml).catch(fail));
+// The three downloads give one translation in three formats, so they sit behind one "Tải xuống ▾" and keep their ids,
+// labels, handlers and disabled states. The button is usable while any of them is. Choosing one closes the list and hands
+// the focus back to the button first, so a dialog the download opens (in-app browser, old layout) returns it there.
+const downloadMenu=$('#download-menu'),downloadList=$('#download-list'),downloadItems=[...downloadList.querySelectorAll('button')];
+function showDownloads(open,{focus=false}={}){downloadList.hidden=!open;downloadMenu.setAttribute('aria-expanded',String(open));if(open)downloadList.scrollIntoView({block:'nearest'});else if(focus)downloadMenu.focus();}
+function syncDownloadMenu(){downloadMenu.disabled=downloadItems.every(item=>item.disabled);if(downloadMenu.disabled&&!downloadList.hidden)showDownloads(false);}
+new MutationObserver(syncDownloadMenu).observe(downloadList,{subtree:true,attributes:true,attributeFilter:['disabled']});
+downloadMenu.addEventListener('click',()=>showDownloads(downloadList.hidden));
+downloadList.addEventListener('click',event=>{if(event.target.closest('button:not(:disabled)'))showDownloads(false,{focus:true});},true);
+document.addEventListener('click',event=>{if(!downloadList.hidden&&!event.target.closest('.download-menu'))showDownloads(false);});
+downloadMenu.parentElement.addEventListener('keydown',event=>{if(event.key==='Escape'&&!downloadList.hidden){event.stopPropagation();showDownloads(false,{focus:true});}});
+downloadMenu.parentElement.addEventListener('focusout',event=>{if(event.relatedTarget&&!event.currentTarget.contains(event.relatedTarget))showDownloads(false);});
+syncDownloadMenu();
 // While the export waits for a busy PDF service, Dừng shows and stops the wait.
 function exportNow(){if(running)return;runActive=true;stopRequested=false;busy(true);exportLayoutPdf().catch(error=>error?.code==='stopped'?status(error.message):fail(error)).finally(()=>{runActive=false;stopRequested=false;busy(false);renderHistory();});}
 // Exporting a layout an older extractor read draws that old layout again (its printed Chinese outside the blocks too):
